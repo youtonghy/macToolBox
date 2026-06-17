@@ -1,0 +1,12 @@
+# Xcode project — generated from project.yml by xcodegen
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# Build output
+build/
+.build/
+DerivedData/
+
+# macOS
+.DS_Store
