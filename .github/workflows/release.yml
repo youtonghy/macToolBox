@@ -14,7 +14,7 @@ permissions:
 jobs:
   release:
     name: Build and draft release
-    runs-on: macos-14
+    runs-on: macos-15
     env:
       VERSION: ${{ inputs.version }}
     steps:
@@ -35,6 +35,19 @@ jobs:
           else
             echo "BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
           fi
+
+      - name: Select latest Xcode
+        run: |
+          set -euo pipefail
+          # Prefer the newest installed Xcode so objectVersion from current XcodeGen opens cleanly.
+          XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE_APP" ]; then
+            echo "No Xcode.app found under /Applications" >&2
+            exit 1
+          fi
+          echo "Using $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
