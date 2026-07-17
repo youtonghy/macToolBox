@@ -22,7 +22,28 @@ brew install xcodegen        # 仅需一次
 
 产物：`build/Build/Products/Release/ToolBox.app`（ad-hoc 签名 + Hardened Runtime）。
 
+本地默认版本号为 `DEV0.0.0`。可覆盖：
+
+```bash
+VERSION=1.2.3 BUILD_NUMBER=42 OPEN=0 ./build.sh
+```
+
 > 只想构建不自动打开：`OPEN=0 ./build.sh`
+
+## 发布（CI）
+
+GitHub Actions 工作流 [Release](.github/workflows/release.yml) 为手动触发：
+
+1. 在 Actions → **Release** → **Run workflow**
+2. 输入版本号（如 `1.2.3`）
+3. CI 会用该版本编译，打包 `ToolBox-<version>.app.zip` 与 `ToolBox-<version>.dmg`
+4. 创建 **Draft** Release，描述为上一正式 Release 之后的全部 commit message
+
+本地打包（需已构建 `.app`）：
+
+```bash
+VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/package-release.sh
+```
 
 ## 权限
 

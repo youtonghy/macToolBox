@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (e.g. 1.2.3)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and draft release
+    runs-on: macos-14
+    env:
+      VERSION: ${{ inputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate version
+        run: |
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Invalid version: $VERSION" >&2
+            exit 1
+          fi
+          # Prefer numeric-ish build number for CFBundleVersion; fall back to run id.
+          if [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+)*$ ]]; then
+            echo "BUILD_NUMBER=$VERSION" >> "$GITHUB_ENV"
+          else
+            echo "BUILD_NUMBER=${{ github.run_number }}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Build app
+        env:
+          OPEN: "0"
+        run: ./build.sh
+
+      - name: Package app + dmg
+        env:
+          APP_PATH: build/Build/Products/Release/ToolBox.app
+          OUT_DIR: dist
+        run: ./scripts/package-release.sh
+
+      - name: Collect commits since last release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          LAST_TAG="$(
+            gh release list \
+              --exclude-drafts \
+              --limit 1 \
+              --json tagName \
+              --jq '.[0].tagName // empty'
+          )"
+
+          if [ -n "$LAST_TAG" ]; then
+            echo "Previous release tag: $LAST_TAG"
+            COMMITS="$(git log "${LAST_TAG}..HEAD" --pretty=format:'- %s' --no-merges || true)"
+          else
+            echo "No previous release found; using full history"
+            COMMITS="$(git log --pretty=format:'- %s' --no-merges || true)"
+          fi
+
+          {
+            echo "### Changes"
+            echo
+            if [ -n "$COMMITS" ]; then
+              printf '%s\n' "$COMMITS"
+            else
+              echo "- No commits since last release"
+            fi
+            echo
+          } | tee release-notes.md
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          TITLE="ToolBox ${VERSION}"
+
+          # Replace existing draft with the same tag if present.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            IS_DRAFT="$(gh release view "$TAG" --json isDraft --jq '.isDraft')"
+            if [ "$IS_DRAFT" = "true" ]; then
+              echo "Deleting existing draft release $TAG"
+              gh release delete "$TAG" --yes --cleanup-tag
+            else
+              echo "Release $TAG already exists and is not a draft" >&2
+              exit 1
+            fi
+          fi
+
+          gh release create "$TAG" \
+            --draft \
+            --title "$TITLE" \
+            --notes-file release-notes.md \
+            "dist/ToolBox-${VERSION}.app.zip" \
+            "dist/ToolBox-${VERSION}.dmg"
