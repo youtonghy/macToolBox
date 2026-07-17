@@ -22,6 +22,8 @@ targets:
     platform: macOS
     sources:
       - Sources/ToolBox
+    dependencies:
+      - sdk: CoreDisplay.framework
     info:
       path: Resources/Info.plist
       properties:
@@ -39,3 +41,19 @@ targets:
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
+        SWIFT_OBJC_BRIDGING_HEADER: Sources/ToolBox/DisplayControl/Darwin/DisplayControlBridgingHeader.h
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - /System/Library/Frameworks
+
+  ToolBoxTests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/ToolBoxTests
+    dependencies:
+      - target: ToolBox
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.tests
+        GENERATE_INFOPLIST_FILE: YES

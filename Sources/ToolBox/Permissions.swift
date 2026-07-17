@@ -2,8 +2,8 @@ import ApplicationServices
 import AppKit
 
 /// Handles TCC permission checks/prompts.
-/// - Input Monitoring: required for CGEventTap (listen) and IOHIDManagerOpen. There is no
-///   public "am I trusted?" API, so we detect denial indirectly (nil tap / open error) and
+/// - Input Monitoring: required for CGEventTap event listening. There is no
+///   public "am I trusted?" API, so we detect denial indirectly (nil tap) and
 ///   deep-link to System Settings.
 /// - Accessibility: requested once; some macOS builds also require it for taps.
 enum Permissions {

@@ -64,11 +64,16 @@ final class ScreenWipeCoordinator {
     }
 
     private func createBlackWindows() {
-        NSLog("[ToolBox] screen-wipe: \(NSScreen.screens.count) display(s)")
+        let screens = NSScreen.screens
+        NSLog("[ToolBox] screen-wipe: \(screens.count) display(s), separateSpaces=\(NSScreen.screensHaveSeparateSpaces)")
         // Activate so this accessory app can raise .screenSaver-level overlays on every display
         // (otherwise windows on secondary displays may fail to come forward).
         NSApp.activate()
-        for screen in NSScreen.screens {
+        for (index, screen) in screens.enumerated() {
+            NSLog(
+                "[ToolBox] screen-wipe display[\(index)]: name=\(screen.localizedName), frame=\(NSStringFromRect(screen.frame)), visibleFrame=\(NSStringFromRect(screen.visibleFrame)), scale=\(screen.backingScaleFactor)"
+            )
+
             let w = NSWindow(contentRect: screen.frame,
                              styleMask: .borderless,
                              backing: .buffered,
@@ -78,20 +83,30 @@ final class ScreenWipeCoordinator {
             w.backgroundColor = .black
             w.hasShadow = false
             w.level = .screenSaver
-            w.collectionBehavior = [.canJoinAllSpaces, .stationary]
-            w.ignoresMouseEvents = true
+            w.collectionBehavior = [
+                .canJoinAllSpaces,
+                .fullScreenAuxiliary,
+                .canJoinAllApplications,
+                .ignoresCycle,
+            ]
+            w.ignoresMouseEvents = false
             w.isMovable = false
             w.hidesOnDeactivate = false
             w.animationBehavior = .none
-            w.orderFrontRegardless()
 
             // Every display shows the countdown, so the number is visible on whichever
             // screen the user looks at. All views share one timer -> they tick in lockstep.
             let view = CountdownView(frame: NSRect(origin: .zero, size: screen.frame.size))
             view.autoresizingMask = [.width, .height]
+            view.setNumber(remaining)
             w.contentView = view
             countdownViews.append(view)
             blackWindows.append(w)
+
+            NSLog(
+                "[ToolBox] screen-wipe window[\(index)]: frame=\(NSStringFromRect(w.frame)), level=\(w.level.rawValue), collectionBehavior=\(w.collectionBehavior.rawValue)"
+            )
+            w.orderFrontRegardless()
         }
     }
 

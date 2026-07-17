@@ -6,7 +6,9 @@ struct ToolBoxApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
-        // LSUIElement hides the Dock; an empty Settings scene means no main window.
-        Settings { EmptyView() }
+        // AppDelegate owns the status item and settings window for this menu-bar-only app.
+        Settings {
+            EmptyView()
+        }
     }
 }
