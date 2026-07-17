@@ -6,7 +6,8 @@ enum MenuBarPanelConfiguration {
 }
 
 final class MenuBarPanelController<Content: View>: NSObject {
-    private let panelSize: NSSize
+    private var panelSize: NSSize
+    private let contentController: GlassPopoverViewController<Content>
     private let panel: MenuBarPanel
     private weak var anchorButton: NSStatusBarButton?
     private var globalMonitor: Any?
@@ -20,6 +21,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
             contentSize: panelSize,
             contentInsets: MenuBarPanelConfiguration.contentInsets
         )
+        self.contentController = contentController
         self.panel = MenuBarPanel(
             contentRect: NSRect(origin: .zero, size: panelSize),
             styleMask: [.borderless, .nonactivatingPanel, .fullSizeContentView],
@@ -42,6 +44,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
         panel.titlebarAppearsTransparent = true
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
+        panel.setContentSize(panelSize)
     }
 
     deinit {
@@ -63,6 +66,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
     func show(relativeTo button: NSStatusBarButton) {
         anchorButton = button
         isClosing = false
+        applyPanelSize(panelSize, reanchorIfVisible: false)
         panel.alphaValue = 1
         panel.setFrameOrigin(panelOrigin(relativeTo: button))
         panel.makeKeyAndOrderFront(nil)
@@ -78,6 +82,33 @@ final class MenuBarPanelController<Content: View>: NSObject {
         panel.orderOut(nil)
         panel.alphaValue = 1
         isClosing = false
+    }
+
+    func updatePanelSize(_ newSize: NSSize) {
+        applyPanelSize(newSize, reanchorIfVisible: true)
+    }
+
+    private func applyPanelSize(_ newSize: NSSize, reanchorIfVisible: Bool) {
+        let sizeChanged = newSize != panelSize
+        panelSize = newSize
+        contentController.updateContentSize(newSize)
+
+        if sizeChanged || panel.frame.size != newSize {
+            let origin: NSPoint
+            if reanchorIfVisible, isShown, let button = anchorButton {
+                origin = panelOrigin(relativeTo: button)
+            } else if panel.frame.size != .zero {
+                // Keep the top edge stable when the panel shrinks or grows.
+                let topY = panel.frame.maxY
+                origin = NSPoint(x: panel.frame.minX, y: topY - newSize.height)
+            } else {
+                origin = panel.frame.origin
+            }
+
+            panel.setFrame(NSRect(origin: origin, size: newSize), display: true)
+            panel.setContentSize(newSize)
+            panel.invalidateShadow()
+        }
     }
 
     private func startMonitoring() {

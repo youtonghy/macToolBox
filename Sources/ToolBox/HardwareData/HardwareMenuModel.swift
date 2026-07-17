@@ -61,12 +61,25 @@ enum CableDisplayKind: Equatable {
     }
 }
 
+struct CableDetailRow: Identifiable, Equatable {
+    var id: String { "\(label)|\(value)" }
+    var label: String
+    var value: String
+}
+
+struct CableDetailGroup: Identifiable, Equatable {
+    var id: String { title }
+    var title: String
+    var rows: [CableDetailRow]
+}
+
 struct CableDisplayItem: Identifiable, Equatable {
     var id: UInt64
     var title: String
     var lines: [String]
     var kind: CableDisplayKind
     var cableType: CableTypeSnapshot?
+    var detailGroups: [CableDetailGroup] = []
 }
 
 enum HardwareMenuLayout {
@@ -95,6 +108,7 @@ final class HardwareMenuModel: ObservableObject {
     @Published private(set) var cpuSamples: [PowerHistoryPoint] = []
     @Published private(set) var gpuSamples: [PowerHistoryPoint] = []
     @Published private(set) var cableItems: [CableDisplayItem] = []
+    @Published private(set) var powerAdapterGroup: CableDetailGroup?
     @Published private(set) var latestPowerSnapshot: ChipPowerSnapshot?
     @Published var cpuDisplayMode: PowerDisplayMode = .live
     @Published var gpuDisplayMode: PowerDisplayMode = .live
@@ -149,13 +163,20 @@ final class HardwareMenuModel: ObservableObject {
                 }
             } catch {
                 logger.error("Cable sampling failed: \(error.localizedDescription, privacy: .public)")
-                await MainActor.run { self.cableItems = [] }
+                await MainActor.run {
+                    self.cableItems = []
+                    self.powerAdapterGroup = nil
+                }
             }
         }
     }
 
     func setCableItemsForTesting(_ items: [CableDisplayItem]) {
         cableItems = items
+    }
+
+    func setPowerAdapterGroupForTesting(_ group: CableDetailGroup?) {
+        powerAdapterGroup = group
     }
 
     func stop() {
@@ -230,6 +251,7 @@ final class HardwareMenuModel: ObservableObject {
                 }
             }
             .map(makeCableItem)
+        powerAdapterGroup = makePowerAdapterGroup(from: snapshot.adapter)
     }
 
     private func trimPowerSamples(now: Date) {
@@ -276,8 +298,227 @@ final class HardwareMenuModel: ObservableObject {
             title: port.name,
             lines: lines.filter { !$0.isEmpty },
             kind: CableDisplayKind.classify(port: port),
-            cableType: port.cableCapability?.cableType
+            cableType: port.cableCapability?.cableType,
+            detailGroups: makeDetailGroups(for: port)
         )
+    }
+
+    private func makePowerAdapterGroup(from adapter: PowerAdapterSnapshot?) -> CableDetailGroup? {
+        guard let adapter else { return nil }
+
+        var rows: [CableDetailRow] = []
+        if let name = adapter.name, !name.isEmpty {
+            rows.append(.init(label: "名称", value: name))
+        }
+        if let manufacturer = adapter.manufacturer, !manufacturer.isEmpty {
+            rows.append(.init(label: "厂商", value: manufacturer))
+        }
+        if let model = adapter.model, !model.isEmpty {
+            rows.append(.init(label: "型号", value: model))
+        }
+        if let description = adapter.description, !description.isEmpty {
+            rows.append(.init(label: "描述", value: description))
+        }
+        if let watts = adapter.watts {
+            rows.append(.init(label: "功率", value: "\(watts) W"))
+        }
+        if let voltageMV = adapter.voltageMV {
+            rows.append(.init(label: "电压", value: voltsText(voltageMV)))
+        }
+        if let currentMA = adapter.currentMA {
+            rows.append(.init(label: "电流", value: ampsText(currentMA)))
+        }
+
+        guard !rows.isEmpty else { return nil }
+        return CableDetailGroup(title: "电源适配器", rows: rows)
+    }
+
+    private func makeDetailGroups(for port: CablePortSnapshot) -> [CableDetailGroup] {
+        var groups: [CableDetailGroup] = []
+
+        var portRows: [CableDetailRow] = [
+            .init(label: "端口", value: port.name)
+        ]
+        if let type = port.type, !type.isEmpty {
+            portRows.append(.init(label: "类型", value: type))
+        }
+        if let portNumber = port.portNumber {
+            portRows.append(.init(label: "编号", value: "#\(portNumber)"))
+        }
+        if let connectionActive = port.connectionActive {
+            portRows.append(.init(label: "连接", value: connectionActive ? "已连接" : "未连接"))
+        }
+        portRows.append(.init(label: "USB-PD", value: port.pdCapable ? "支持" : "不支持"))
+        if !port.transportsActive.isEmpty {
+            portRows.append(.init(label: "活动传输", value: port.transportsActive.joined(separator: " · ")))
+        }
+        if !port.transportsSupported.isEmpty {
+            portRows.append(.init(label: "支持传输", value: port.transportsSupported.joined(separator: " · ")))
+        }
+        if !port.transportsProvisioned.isEmpty {
+            portRows.append(.init(label: "已配置传输", value: port.transportsProvisioned.joined(separator: " · ")))
+        }
+        groups.append(CableDetailGroup(title: "端口信息", rows: portRows))
+
+        if let capability = port.cableCapability {
+            var rows: [CableDetailRow] = []
+            if let protocolText = protocolText(for: port) {
+                rows.append(.init(label: "协议", value: protocolText))
+            }
+            if let power = cableCapabilityPowerText(capability) {
+                rows.append(.init(label: "线缆功率", value: power))
+            }
+            if let speed = cableCapabilitySpeedText(capability) {
+                rows.append(.init(label: "线缆速率", value: speed))
+            }
+            if let cableType = cableTypeText(capability.cableType) {
+                rows.append(.init(label: "线缆类型", value: cableType))
+            }
+            if let eprCapable = capability.eprCapable {
+                rows.append(.init(label: "EPR", value: eprCapable ? "支持" : "不支持"))
+            }
+            if let vbusThroughCable = capability.vbusThroughCable {
+                rows.append(.init(label: "VBUS 贯通", value: vbusThroughCable ? "是" : "否"))
+            }
+            if !capability.warnings.isEmpty {
+                rows.append(.init(label: "警告", value: capability.warnings.joined(separator: " · ")))
+            }
+            if !rows.isEmpty {
+                groups.append(CableDetailGroup(title: "线缆规格", rows: rows))
+            }
+        }
+
+        if let power = port.powerNegotiation {
+            var rows: [CableDetailRow] = []
+            if let sourceName = power.sourceName, !sourceName.isEmpty {
+                rows.append(.init(label: "电源源", value: sourceName))
+            }
+            if let option = power.winningOption {
+                rows.append(.init(label: "协商 PDO", value: powerOptionText(option)))
+            }
+            if let negotiated = power.negotiatedWatts {
+                rows.append(.init(label: "协商功率", value: cableWattsText(negotiated)))
+            }
+            if let charger = power.chargerWatts {
+                rows.append(.init(label: "适配器功率", value: cableWattsText(charger)))
+            }
+            if let cableMax = power.cableMaxWatts {
+                rows.append(.init(label: "线缆上限", value: cableWattsText(cableMax)))
+            }
+            if let bottleneck = power.likelyBottleneck {
+                rows.append(.init(label: "瓶颈", value: bottleneckText(bottleneck)))
+            }
+            if !power.options.isEmpty {
+                let optionsText = power.options
+                    .prefix(6)
+                    .map(powerOptionText)
+                    .joined(separator: " · ")
+                rows.append(.init(label: "可选 PDO", value: optionsText))
+            }
+            if !rows.isEmpty {
+                groups.append(CableDetailGroup(title: "供电协商", rows: rows))
+            }
+        }
+
+        if let data = port.dataTransport, data.active {
+            var rows: [CableDetailRow] = []
+            if let effective = data.effectiveSpeedGbps {
+                rows.append(.init(label: "有效速率", value: speedText(effective)))
+            }
+            if let advertised = data.cableAdvertisedSpeedGbps {
+                rows.append(.init(label: "线缆宣告", value: speedText(advertised)))
+            }
+            if let controller = data.controllerCableSpeedGbps {
+                rows.append(.init(label: "控制器速率", value: speedText(controller)))
+            }
+            if let usbDescription = data.usb3Description, !usbDescription.isEmpty {
+                rows.append(.init(label: "USB 描述", value: usbDescription))
+            }
+            if let restricted = data.transportRestricted {
+                rows.append(.init(label: "受限", value: restricted ? "是" : "否"))
+            }
+            if !rows.isEmpty {
+                groups.append(CableDetailGroup(title: "数据链路", rows: rows))
+            }
+        }
+
+        if let display = port.displayTransport, display.active {
+            var rows: [CableDetailRow] = [
+                .init(label: "状态", value: "活动")
+            ]
+            if let lanes = display.laneCount {
+                rows.append(.init(label: "通道", value: "\(lanes) lanes"))
+            }
+            if let maxLanes = display.maxLaneCount {
+                rows.append(.init(label: "最大通道", value: "\(maxLanes)"))
+            }
+            if let rate = display.linkRateDescription, !rate.isEmpty {
+                rows.append(.init(label: "链路速率", value: rate))
+            }
+            if let payload = display.estimatedPayloadGbps {
+                rows.append(.init(label: "估算负载", value: speedText(payload)))
+            }
+            if let role = display.role, !role.isEmpty {
+                rows.append(.init(label: "角色", value: role))
+            }
+            if let sinks = display.sinkCount {
+                rows.append(.init(label: "Sink 数", value: "\(sinks)"))
+            }
+            let monitors = display.monitors.compactMap { monitor in
+                monitor.productName ?? monitor.name
+            }
+            if !monitors.isEmpty {
+                rows.append(.init(label: "显示器", value: monitors.joined(separator: " · ")))
+            }
+            groups.append(CableDetailGroup(title: "显示链路", rows: rows))
+        }
+
+        if !port.cableIdentities.isEmpty {
+            var rows: [CableDetailRow] = []
+            for identity in port.cableIdentities {
+                let endpoint: String
+                switch identity.endpoint {
+                case .sop: endpoint = "SOP"
+                case .sopPrime: endpoint = "SOP'"
+                case .sopDoublePrime: endpoint = "SOP''"
+                }
+                if let vendor = identity.vendorName, !vendor.isEmpty {
+                    rows.append(.init(label: "\(endpoint) 厂商", value: vendor))
+                }
+                if let product = identity.productName, !product.isEmpty {
+                    rows.append(.init(label: "\(endpoint) 产品", value: product))
+                }
+                if let revision = identity.specRevision, !revision.isEmpty {
+                    rows.append(.init(label: "\(endpoint) 规范", value: revision))
+                }
+                if let vendorID = identity.vendorID {
+                    rows.append(.init(label: "\(endpoint) VID", value: String(format: "0x%04X", vendorID)))
+                }
+                if let productID = identity.productID {
+                    rows.append(.init(label: "\(endpoint) PID", value: String(format: "0x%04X", productID)))
+                }
+            }
+            if !rows.isEmpty {
+                groups.append(CableDetailGroup(title: "线缆身份", rows: rows))
+            }
+        }
+
+        return groups
+    }
+
+    private func bottleneckText(_ bottleneck: PowerBottleneck) -> String {
+        switch bottleneck {
+        case .cable:
+            return "线缆"
+        case .charger:
+            return "充电器"
+        case .mac:
+            return "本机"
+        case .none:
+            return "无明显瓶颈"
+        case .unknown:
+            return "未知"
+        }
     }
 
     private func specificationLine(for port: CablePortSnapshot) -> String? {

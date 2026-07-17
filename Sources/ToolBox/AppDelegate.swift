@@ -5,10 +5,9 @@ import Combine
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private let popoverSize = MenuPanelLayout.size
     private lazy var menuBarPanelController = MenuBarPanelController(
         rootView: PopoverContent(state: state, hardware: hardware, displayControl: displayControlMenu),
-        panelSize: popoverSize
+        panelSize: currentPanelSize
     )
     private var settingsWindowController: NSWindowController?
     private let state = FeatureState()
@@ -19,7 +18,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         service: displayControl,
         menuModel: displayControlMenu
     )
+    private lazy var brightnessSchedule = BrightnessScheduleCoordinator(
+        service: displayControl
+    )
     private var cancellables = Set<AnyCancellable>()
+
+    private var currentPanelSize: NSSize {
+        MenuPanelLayout.panelSize(
+            cableItemCount: hardware.cableItems.count,
+            showsDisplayControl: displayControlMenu.hasExternalDisplay
+        )
+    }
 
     // Feature coordinators.
     let screenWipe = ScreenWipeCoordinator()
@@ -53,8 +62,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         hardware.start()
         displayControl.start()
+        brightnessSchedule.start()
         displayControlMenu.start()
         displayControlKeys.start()
+        observePanelSizeChanges()
+        refreshPanelSize()
+    }
+
+    private func observePanelSizeChanges() {
+        Publishers.CombineLatest(hardware.$cableItems, displayControlMenu.$displayItems)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _, _ in
+                self?.refreshPanelSize()
+            }
+            .store(in: &cancellables)
+    }
+
+    private func refreshPanelSize() {
+        // Force lazy controller creation so the first open already uses the current layout.
+        _ = menuBarPanelController
+        menuBarPanelController.updatePanelSize(currentPanelSize)
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -63,6 +90,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         hardware.stop()
         displayControlKeys.stop()
         displayControlMenu.stop()
+        brightnessSchedule.stop()
         displayControl.stop()
     }
 
@@ -173,16 +201,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeSettingsWindowController() -> NSWindowController {
-        let windowSize = NSSize(width: 860, height: 580)
+        let windowSize = NSSize(width: 840, height: 560)
         let hostingController = GlassHostingViewController(
-            rootView: SettingsView(),
+            rootView: SettingsView(
+                hardware: hardware,
+                displayControl: displayControlMenu,
+                mediaKeys: displayControlKeys,
+                brightnessSchedule: brightnessSchedule
+            ),
             contentSize: windowSize,
-            contentInsets: NSEdgeInsets(top: 58, left: 24, bottom: 24, right: 24)
+            contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)
         )
         let window = NSWindow(contentViewController: hostingController)
         window.title = "设置"
         window.setContentSize(windowSize)
-        window.minSize = windowSize
+        window.minSize = NSSize(width: 760, height: 500)
         window.styleMask.insert(.titled)
         window.styleMask.insert(.closable)
         window.styleMask.insert(.miniaturizable)

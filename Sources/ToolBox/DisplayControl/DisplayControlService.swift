@@ -31,6 +31,18 @@ private struct ControlWriteKey: Hashable {
     var kind: DisplayControlKind
 }
 
+enum DisplayBrightnessWritePolicy: Equatable, Sendable {
+    case manual
+    case scheduled
+}
+
+private struct BrightnessWriteRequest: Equatable {
+    var target: Double
+    var smooth: Bool
+    var force: Bool
+    var policy: DisplayBrightnessWritePolicy
+}
+
 @MainActor
 final class DisplayControlService: ObservableObject {
     static let shared = DisplayControlService()
@@ -49,9 +61,13 @@ final class DisplayControlService: ObservableObject {
     private var lastSuccessfulValues: [ControlWriteKey: Double] = [:]
     private var userTargetKeys = Set<ControlWriteKey>()
 
-    private var latestBrightnessTargets: [CGDirectDisplayID: Double] = [:]
+    private var latestBrightnessRequests: [CGDirectDisplayID: BrightnessWriteRequest] = [:]
     private var brightnessWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
     private var brightnessWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+    private let manualBrightnessWriteSubject = PassthroughSubject<
+        (displayID: CGDirectDisplayID, normalizedValue: Double),
+        Never
+    >()
 
     private var pendingControlTargets: [ControlWriteKey: Double] = [:]
     private var controlWorkers: [ControlWriteKey: Task<Void, Never>] = [:]
@@ -77,6 +93,12 @@ final class DisplayControlService: ObservableObject {
         registerDisplayReconfigurationCallback()
         registerWorkspaceObservers()
         refresh()
+    }
+
+    /// Test seam: publish a snapshot without going through the provider.
+    func setSnapshotForTesting(_ snapshot: DisplayControlSnapshot) {
+        self.snapshot = snapshot
+        seedValues(from: snapshot)
     }
 
     func stop() {
@@ -114,16 +136,25 @@ final class DisplayControlService: ObservableObject {
         try await provider.readValue(displayID: displayID, kind: kind)
     }
 
+    var manualBrightnessWrites: AnyPublisher<
+        (displayID: CGDirectDisplayID, normalizedValue: Double),
+        Never
+    > {
+        manualBrightnessWriteSubject.eraseToAnyPublisher()
+    }
+
     @discardableResult
     func writeValue(
         displayID: CGDirectDisplayID,
         kind: DisplayControlKind,
-        normalizedValue: Double
+        normalizedValue: Double,
+        options: DisplayControlWriteOptions = .none
     ) async throws -> DisplayControlValue {
         try await provider.writeValue(
             displayID: displayID,
             kind: kind,
-            normalizedValue: normalizedValue
+            normalizedValue: normalizedValue,
+            options: options
         )
     }
 
@@ -152,7 +183,8 @@ final class DisplayControlService: ObservableObject {
     func writeBrightness(
         displayID: CGDirectDisplayID,
         normalizedValue: Double,
-        smooth: Bool = true
+        smooth: Bool = true,
+        policy: DisplayBrightnessWritePolicy = .manual
     ) {
         guard !isSuspended else { return }
         let key = ControlWriteKey(displayID: displayID, kind: .brightness)
@@ -163,7 +195,19 @@ final class DisplayControlService: ObservableObject {
         )
         desiredValues[key] = target
         userTargetKeys.insert(key)
-        latestBrightnessTargets[displayID] = target
+
+        let force = policy == .scheduled
+        latestBrightnessRequests[displayID] = BrightnessWriteRequest(
+            target: target,
+            smooth: smooth,
+            force: force,
+            policy: policy
+        )
+
+        if policy == .manual {
+            manualBrightnessWriteSubject.send((displayID, target))
+        }
+
         guard brightnessWorkers[displayID] == nil else { return }
 
         let workerID = UUID()
@@ -171,8 +215,7 @@ final class DisplayControlService: ObservableObject {
         brightnessWorkers[displayID] = Task { [weak self] in
             await self?.runBrightnessWorker(
                 displayID: displayID,
-                workerID: workerID,
-                smooth: smooth
+                workerID: workerID
             )
         }
     }
@@ -273,8 +316,7 @@ final class DisplayControlService: ObservableObject {
 
     private func runBrightnessWorker(
         displayID: CGDirectDisplayID,
-        workerID: UUID,
-        smooth: Bool
+        workerID: UUID
     ) async {
         let key = ControlWriteKey(displayID: displayID, kind: .brightness)
         var transient = lastSuccessfulValues[key] ?? trustedSnapshotValue(
@@ -283,10 +325,11 @@ final class DisplayControlService: ObservableObject {
         )
 
         do {
-            while let target = latestBrightnessTargets[displayID] {
+            while let request = latestBrightnessRequests[displayID] {
                 try Task.checkCancellation()
+                let target = request.target
                 let next: Double
-                if !smooth || transient == nil {
+                if !request.smooth || transient == nil {
                     next = target
                 } else if abs(target - transient!) < 0.01 {
                     next = target
@@ -298,18 +341,20 @@ final class DisplayControlService: ObservableObject {
                     next = Self.clamp(transient! + step)
                 }
 
+                let options: DisplayControlWriteOptions = request.force ? .force : .none
                 let value = try await provider.writeValue(
                     displayID: displayID,
                     kind: .brightness,
-                    normalizedValue: next
+                    normalizedValue: next,
+                    options: options
                 )
                 try Task.checkCancellation()
                 transient = value.normalized
                 lastSuccessfulValues[key] = value.normalized
 
-                if let latestTarget = latestBrightnessTargets[displayID],
-                   abs(latestTarget - value.normalized) < 0.0001 {
-                    latestBrightnessTargets[displayID] = nil
+                if let latest = latestBrightnessRequests[displayID],
+                   abs(latest.target - value.normalized) < 0.0001 {
+                    latestBrightnessRequests[displayID] = nil
                     break
                 }
                 if timing.brightnessFrameDelayNanos > 0 {
@@ -323,7 +368,7 @@ final class DisplayControlService: ObservableObject {
             finishBrightnessWorker(displayID: displayID, workerID: workerID)
         } catch {
             logger.error("Brightness write failed: \(error.localizedDescription, privacy: .public)")
-            latestBrightnessTargets[displayID] = nil
+            latestBrightnessRequests[displayID] = nil
             restoreDesiredValue(for: key)
             finishBrightnessWorker(displayID: displayID, workerID: workerID)
         }
@@ -614,7 +659,7 @@ final class DisplayControlService: ObservableObject {
 
         brightnessWorkers.removeAll()
         brightnessWorkerIDs.removeAll()
-        latestBrightnessTargets.removeAll()
+        latestBrightnessRequests.removeAll()
         controlWorkers.removeAll()
         controlWorkerIDs.removeAll()
         pendingControlTargets.removeAll()

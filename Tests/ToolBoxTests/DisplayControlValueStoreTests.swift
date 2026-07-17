@@ -51,6 +51,7 @@ final class DisplayControlValueStoreTests: XCTestCase {
         store.recordSuccessfulWrite(raw, normalized: 0.4, for: key)
 
         XCTAssertFalse(store.shouldWrite(raw, for: key))
+        XCTAssertTrue(store.shouldWrite(raw, for: key, force: true))
         XCTAssertEqual(store.value(for: key).normalized, 0.4, accuracy: 0.001)
     }
 

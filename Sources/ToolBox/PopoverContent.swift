@@ -29,31 +29,16 @@ struct PopoverContent: View {
 
             controlsBar
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.clear)
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 10) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("ToolBox")
-                    .font(.system(size: 22, weight: .semibold))
-
-                Text("菜单栏里的硬件概览和常用系统工具")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 8)
-
-            HeaderBadgeStack(
-                powerSummary: livePowerSummary,
-                displaySummary: displaySummary
-            )
-            .frame(width: MenuPanelLayout.headerBadgesWidth)
-        }
-        .padding(.horizontal, 2)
-        .frame(height: MenuPanelLayout.headerHeight)
+        Text("ToolBox")
+            .font(.system(size: 22, weight: .semibold))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 2)
+            .frame(height: MenuPanelLayout.headerHeight, alignment: .center)
     }
 
     private var hardwareSection: some View {
@@ -85,17 +70,23 @@ struct PopoverContent: View {
     }
 
     private var controlsBar: some View {
-        HStack(spacing: 12) {
-            glassToggle(
+        HStack(spacing: 10) {
+            Spacer(minLength: 0)
+
+            circularControlButton(
+                systemName: "rectangle.inset.filled",
                 title: "擦屏幕",
                 subtitle: "黑屏 60 秒",
-                isOn: $state.wipeOn
+                isOn: $state.wipeOn,
+                accent: Color(nsColor: .systemIndigo)
             )
 
-            glassToggle(
+            circularControlButton(
+                systemName: "cup.and.saucer.fill",
                 title: "后台干",
                 subtitle: "阻止系统睡眠",
-                isOn: $state.awakeOn
+                isOn: $state.awakeOn,
+                accent: Color(nsColor: .systemOrange)
             )
         }
         .frame(maxWidth: .infinity, minHeight: MenuPanelLayout.controlsHeight, maxHeight: MenuPanelLayout.controlsHeight)
@@ -129,34 +120,41 @@ struct PopoverContent: View {
         .clipShape(shape)
     }
 
-    private func glassToggle(
+    private func circularControlButton(
+        systemName: String,
         title: String,
         subtitle: String,
-        isOn: Binding<Bool>
+        isOn: Binding<Bool>,
+        accent: Color
     ) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 16, style: .continuous)
+        let size = MenuPanelLayout.controlButtonSize
+        let active = isOn.wrappedValue
 
-        return HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.system(size: 13, weight: .semibold))
-                Text(subtitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer(minLength: 10)
-
-            Toggle("", isOn: isOn)
-                .toggleStyle(.switch)
-                .labelsHidden()
+        return Button {
+            isOn.wrappedValue.toggle()
+        } label: {
+            Image(systemName: systemName)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(active ? Color.white : Color.primary.opacity(0.78))
+                .frame(width: size, height: size)
+                .background(
+                    Circle()
+                        .fill(active ? accent.opacity(0.92) : sectionBackground)
+                )
+                .overlay(
+                    Circle()
+                        .strokeBorder(active ? accent.opacity(0.4) : sectionBorder, lineWidth: 1)
+                )
+                .shadow(color: active ? accent.opacity(0.28) : .clear, radius: 7, y: 1)
+                .contentShape(Circle())
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .frame(maxWidth: .infinity, minHeight: MenuPanelLayout.controlsHeight, maxHeight: MenuPanelLayout.controlsHeight)
-        .background(shape.fill(sectionBackground))
-        .overlay(shape.strokeBorder(sectionBorder, lineWidth: 1))
-        .clipShape(shape)
+        .buttonStyle(.plain)
+        .help("\(title)：\(subtitle)")
+        .accessibilityLabel(title)
+        .accessibilityHint(subtitle)
+        .accessibilityValue(active ? "已启用" : "已关闭")
+        .accessibilityAddTraits(.isButton)
+        .animation(.easeInOut(duration: 0.16), value: active)
     }
 
     private var sectionBackground: Color {
@@ -165,54 +163,6 @@ struct PopoverContent: View {
 
     private var sectionBorder: Color {
         Color.white.opacity(0.14)
-    }
-
-    private var livePowerSummary: String {
-        let cpu = hardware.displayText(for: .cpu)
-        let gpu = hardware.displayText(for: .gpu)
-        return "CPU \(cpu)  GPU \(gpu)"
-    }
-
-    private var displaySummary: String {
-        displayControl.hasExternalDisplay ? displayControl.selectedDisplayName : "未连接"
-    }
-}
-
-struct HeaderBadgeStack: View {
-    let powerSummary: String
-    let displaySummary: String
-
-    var body: some View {
-        VStack(alignment: .trailing, spacing: 4) {
-            badge(title: "功耗", value: powerSummary)
-            badge(title: "显示器", value: displaySummary)
-        }
-    }
-
-    private func badge(title: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(title.uppercased())
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: true, vertical: false)
-
-            Text(value)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .lineLimit(1)
-                .minimumScaleFactor(0.5)
-                .layoutPriority(1)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .frame(maxWidth: .infinity, alignment: .trailing)
-        .background(
-            Capsule(style: .continuous)
-                .fill(Color.white.opacity(0.08))
-        )
-        .overlay(
-            Capsule(style: .continuous)
-                .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
-        )
     }
 }
 

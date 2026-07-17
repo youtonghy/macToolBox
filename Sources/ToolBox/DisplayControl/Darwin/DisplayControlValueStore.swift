@@ -63,8 +63,13 @@ struct DisplayControlValueStore {
         return UInt16(min(max(raw.rounded(), Double(current.rawMinimum)), Double(current.rawMaximum)))
     }
 
-    func shouldWrite(_ rawValue: UInt16, for key: DisplayControlValueKey) -> Bool {
-        lastSuccessfulRawValues[key] != rawValue
+    func shouldWrite(
+        _ rawValue: UInt16,
+        for key: DisplayControlValueKey,
+        force: Bool = false
+    ) -> Bool {
+        if force { return true }
+        return lastSuccessfulRawValues[key] != rawValue
     }
 
     mutating func recordSuccessfulWrite(

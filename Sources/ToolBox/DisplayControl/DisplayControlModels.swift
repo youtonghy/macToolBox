@@ -1,11 +1,38 @@
 import CoreGraphics
 import Foundation
 
+struct DisplayControlWriteOptions: OptionSet, Sendable, Equatable {
+    let rawValue: Int
+
+    static let force = DisplayControlWriteOptions(rawValue: 1 << 0)
+    static let none = DisplayControlWriteOptions([])
+}
+
 protocol DisplayControlProviding: AnyObject {
     func snapshot() async throws -> DisplayControlSnapshot
     func refresh() async throws
     func readValue(displayID: CGDirectDisplayID, kind: DisplayControlKind) async throws -> DisplayControlValue
-    func writeValue(displayID: CGDirectDisplayID, kind: DisplayControlKind, normalizedValue: Double) async throws -> DisplayControlValue
+    func writeValue(
+        displayID: CGDirectDisplayID,
+        kind: DisplayControlKind,
+        normalizedValue: Double,
+        options: DisplayControlWriteOptions
+    ) async throws -> DisplayControlValue
+}
+
+extension DisplayControlProviding {
+    func writeValue(
+        displayID: CGDirectDisplayID,
+        kind: DisplayControlKind,
+        normalizedValue: Double
+    ) async throws -> DisplayControlValue {
+        try await writeValue(
+            displayID: displayID,
+            kind: kind,
+            normalizedValue: normalizedValue,
+            options: .none
+        )
+    }
 }
 
 struct DisplayControlSnapshot: Codable, Equatable, Sendable {

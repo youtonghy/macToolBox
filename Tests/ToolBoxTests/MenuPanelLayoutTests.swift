@@ -6,14 +6,21 @@ import XCTest
 final class MenuPanelLayoutTests: XCTestCase {
     func testCompactPanelMetricsFitTheApprovedDesign() {
         XCTAssertEqual(MenuPanelLayout.size.width, 560)
-        XCTAssertEqual(MenuPanelLayout.size.height, 718)
+        XCTAssertEqual(
+            MenuPanelLayout.size.height,
+            MenuPanelLayout.panelHeight(
+                cableItemCount: HardwareMenuLayout.maxCableItemCount,
+                showsDisplayControl: true
+            )
+        )
         XCTAssertEqual(MenuPanelLayout.contentInsets.top, 14)
-        XCTAssertEqual(MenuPanelLayout.headerHeight, 52)
-        XCTAssertEqual(MenuPanelLayout.headerBadgesWidth, 260)
+        XCTAssertEqual(MenuPanelLayout.headerHeight, 28)
         XCTAssertEqual(MenuPanelLayout.chartHeight, 96)
         XCTAssertEqual(MenuPanelLayout.cableRowHeight, 90)
-        XCTAssertEqual(MenuPanelLayout.controlsHeight, 50)
+        XCTAssertEqual(MenuPanelLayout.controlButtonSize, 40)
+        XCTAssertEqual(MenuPanelLayout.controlsHeight, MenuPanelLayout.controlButtonSize)
         XCTAssertEqual(MenuPanelLayout.cornerRadius, 22)
+        XCTAssertEqual(MenuPanelLayout.sectionChromeHeight, 44)
     }
 
     func testStandardCompleteConfigurationFitsWithoutScrolling() {
@@ -58,6 +65,58 @@ final class MenuPanelLayoutTests: XCTestCase {
             + MenuPanelLayout.cableGridSpacing
 
         XCTAssertLessThanOrEqual(maximumContentHeight, availableHeight)
+        XCTAssertEqual(
+            maximumContentHeight,
+            MenuPanelLayout.contentHeight(
+                cableItemCount: HardwareMenuLayout.maxCableItemCount,
+                showsDisplayControl: true
+            )
+        )
+    }
+
+    func testPanelHeightShrinksWhenOptionalSectionsAreHidden() {
+        let fullHeight = MenuPanelLayout.panelHeight(
+            cableItemCount: 1,
+            showsDisplayControl: true
+        )
+        let withoutDisplay = MenuPanelLayout.panelHeight(
+            cableItemCount: 1,
+            showsDisplayControl: false
+        )
+        let withoutCables = MenuPanelLayout.panelHeight(
+            cableItemCount: 0,
+            showsDisplayControl: true
+        )
+        let compactHeight = MenuPanelLayout.panelHeight(
+            cableItemCount: 0,
+            showsDisplayControl: false
+        )
+        let twoRowCables = MenuPanelLayout.panelHeight(
+            cableItemCount: 3,
+            showsDisplayControl: true
+        )
+
+        XCTAssertLessThan(withoutDisplay, fullHeight)
+        XCTAssertLessThan(withoutCables, fullHeight)
+        XCTAssertLessThan(compactHeight, withoutDisplay)
+        XCTAssertLessThan(compactHeight, withoutCables)
+        XCTAssertEqual(
+            fullHeight - withoutDisplay,
+            MenuPanelLayout.contentSpacing + MenuPanelLayout.displaySectionHeight
+        )
+        XCTAssertEqual(
+            fullHeight - withoutCables,
+            MenuPanelLayout.contentSpacing + MenuPanelLayout.cableSectionHeight(itemCount: 1)
+        )
+        XCTAssertEqual(
+            twoRowCables - fullHeight,
+            MenuPanelLayout.cableRowHeight + MenuPanelLayout.cableGridSpacing
+        )
+        XCTAssertEqual(MenuPanelLayout.size.height, twoRowCables)
+        XCTAssertEqual(
+            MenuPanelLayout.panelSize(cableItemCount: 0, showsDisplayControl: false).width,
+            560
+        )
     }
 
     func testMenuPopoverUsesSharedContentInsets() {
@@ -70,21 +129,12 @@ final class MenuPanelLayoutTests: XCTestCase {
     }
 
     @MainActor
-    func testLongHeaderBadgesFitWithinHeaderHeightAtSharedWidth() {
-        let powerSummary = "CPU 123.45 W  GPU 67.89 W"
-        let displaySummary = "DELL UltraSharp U3225QE (3840 x 2160)"
-        let badgeStack = HeaderBadgeStack(
-            powerSummary: powerSummary,
-            displaySummary: displaySummary
-        )
-        let hostingView = NSHostingView(
-            rootView: badgeStack.frame(width: MenuPanelLayout.headerBadgesWidth)
-        )
+    func testTitleOnlyHeaderFitsWithinHeaderHeight() {
+        let title = Text("ToolBox")
+            .font(.system(size: 22, weight: .semibold))
+        let hostingView = NSHostingView(rootView: title)
         let fittingSize = hostingView.fittingSize
 
-        XCTAssertEqual(badgeStack.powerSummary, powerSummary)
-        XCTAssertEqual(badgeStack.displaySummary, displaySummary)
-        XCTAssertEqual(fittingSize.width, MenuPanelLayout.headerBadgesWidth, accuracy: 0.5)
         XCTAssertGreaterThan(fittingSize.height, 0)
         XCTAssertLessThanOrEqual(fittingSize.height, MenuPanelLayout.headerHeight)
     }

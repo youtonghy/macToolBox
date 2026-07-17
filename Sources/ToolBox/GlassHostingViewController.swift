@@ -3,7 +3,7 @@ import SwiftUI
 
 class GlassHostingViewController<Content: View>: NSViewController {
     private let rootView: Content
-    private let contentSize: NSSize
+    private var contentSize: NSSize
     private let contentInsets: NSEdgeInsets
     private var hostingController: NSHostingController<Content>?
 
@@ -56,6 +56,17 @@ class GlassHostingViewController<Content: View>: NSViewController {
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
+    }
+
+    func updateContentSize(_ size: NSSize) {
+        guard size != contentSize else { return }
+        contentSize = size
+        preferredContentSize = size
+        if isViewLoaded {
+            view.setFrameSize(size)
+            view.needsLayout = true
+            view.layoutSubtreeIfNeeded()
+        }
     }
 }
 

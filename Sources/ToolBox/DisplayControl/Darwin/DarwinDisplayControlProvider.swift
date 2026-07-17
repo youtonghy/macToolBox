@@ -46,7 +46,12 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         }
     }
 
-    func writeValue(displayID: CGDirectDisplayID, kind: DisplayControlKind, normalizedValue: Double) async throws -> DisplayControlValue {
+    func writeValue(
+        displayID: CGDirectDisplayID,
+        kind: DisplayControlKind,
+        normalizedValue: Double,
+        options: DisplayControlWriteOptions
+    ) async throws -> DisplayControlValue {
         try await queue.asyncThrowing {
             try self.ensureDisplayOnline(displayID)
             guard normalizedValue.isFinite, (0...1).contains(normalizedValue) else {
@@ -57,7 +62,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             }
             let key = DisplayControlValueKey(displayID: displayID, kind: kind)
             let rawValue = try self.valueStore.rawValue(for: key, normalized: normalizedValue)
-            if self.valueStore.shouldWrite(rawValue, for: key) {
+            let force = options.contains(.force)
+            if self.valueStore.shouldWrite(rawValue, for: key, force: force) {
                 guard transport.write(command: kind.ddcCommand.rawValue, value: rawValue, options: .interactive) else {
                     throw DisplayControlError.writeFailed(displayID, kind)
                 }

@@ -9,7 +9,7 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         var continuation: CheckedContinuation<Void, Never>
     }
 
-    private(set) var writes: [(DisplayControlKind, Double)] = []
+    private(set) var writes: [(DisplayControlKind, Double, DisplayControlWriteOptions)] = []
     private var readCount = 0
     private var shouldBlockFirstWrite = false
     private var firstWriteRelease: CheckedContinuation<Void, Never>?
@@ -54,7 +54,7 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         }
     }
 
-    func recordedWrites() -> [(DisplayControlKind, Double)] {
+    func recordedWrites() -> [(DisplayControlKind, Double, DisplayControlWriteOptions)] {
         writes
     }
 
@@ -84,9 +84,10 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     func writeValue(
         displayID: CGDirectDisplayID,
         kind: DisplayControlKind,
-        normalizedValue: Double
+        normalizedValue: Double,
+        options: DisplayControlWriteOptions
     ) async throws -> DisplayControlValue {
-        writes.append((kind, normalizedValue))
+        writes.append((kind, normalizedValue, options))
         resumeMatchingWriteWaiters(kind: kind, value: normalizedValue)
 
         if shouldBlockFirstWrite && writes.count == 1 {
@@ -195,5 +196,47 @@ final class DisplayControlServiceTests: XCTestCase {
         XCTAssertEqual(values.count, 2)
         XCTAssertEqual(values[0], 0.2, accuracy: 0.0001)
         XCTAssertEqual(values[1], 0.3, accuracy: 0.0001)
+    }
+
+    func testScheduledBrightnessWritesForceAndDoesNotPublishManualEvent() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        var manualEvents: [(CGDirectDisplayID, Double)] = []
+        let cancellable = service.manualBrightnessWrites.sink { manualEvents.append(($0.displayID, $0.normalizedValue)) }
+        defer { cancellable.cancel() }
+
+        service.writeBrightness(
+            displayID: 42,
+            normalizedValue: 0.55,
+            smooth: false,
+            policy: .scheduled
+        )
+        await provider.waitUntilWrite(kind: .brightness, value: 0.55)
+
+        let writes = await provider.recordedWrites().filter { $0.0 == .brightness }
+        XCTAssertEqual(writes.count, 1)
+        XCTAssertEqual(writes[0].1, 0.55, accuracy: 0.0001)
+        XCTAssertTrue(writes[0].2.contains(.force))
+        XCTAssertTrue(manualEvents.isEmpty)
+    }
+
+    func testManualBrightnessPublishesQuantizedEventWithoutForce() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        var manualEvents: [(CGDirectDisplayID, Double)] = []
+        let cancellable = service.manualBrightnessWrites.sink { manualEvents.append(($0.displayID, $0.normalizedValue)) }
+        defer { cancellable.cancel() }
+
+        service.writeBrightness(displayID: 7, normalizedValue: 0.42, smooth: false)
+        await provider.waitUntilWrite(kind: .brightness, value: 0.42)
+
+        let writes = await provider.recordedWrites().filter { $0.0 == .brightness }
+        XCTAssertEqual(writes.count, 1)
+        XCTAssertFalse(writes[0].2.contains(.force))
+        XCTAssertEqual(manualEvents.count, 1)
+        XCTAssertEqual(manualEvents[0].0, 7)
+        XCTAssertEqual(manualEvents[0].1, 0.42, accuracy: 0.0001)
     }
 }
