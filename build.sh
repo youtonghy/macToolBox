@@ -26,10 +26,27 @@ xcodebuild \
   CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
   | tail -40
 
-APP="build/Build/Products/$CONFIG/ToolBox.app"
+APP="$(pwd)/build/Build/Products/$CONFIG/ToolBox.app"
 echo "==> built: $APP ($VERSION / $BUILD_NUMBER)"
 
+if [ ! -d "$APP" ]; then
+  echo "error: missing app bundle: $APP" >&2
+  exit 1
+fi
+
 if [ "$OPEN" = "1" ]; then
-  echo "==> open"
+  # Avoid Launch Services reusing a stale ToolBox from another path / old process.
+  if pgrep -x ToolBox >/dev/null 2>&1; then
+    echo "==> quitting existing ToolBox"
+    pkill -x ToolBox || true
+    # Give the old process a moment to exit cleanly.
+    for _ in 1 2 3 4 5; do
+      pgrep -x ToolBox >/dev/null 2>&1 || break
+      sleep 0.2
+    done
+    pkill -9 -x ToolBox 2>/dev/null || true
+  fi
+  echo "==> open $APP"
   open "$APP"
+  echo "==> path: $APP"
 fi

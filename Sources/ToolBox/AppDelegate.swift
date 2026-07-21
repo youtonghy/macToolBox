@@ -70,7 +70,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observePanelSizeChanges() {
-        Publishers.CombineLatest(hardware.$cableItems, displayControlMenu.$displayItems)
+        Publishers.CombineLatest(
+            hardware.$cableItems.map(\.count).removeDuplicates(),
+            displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates()
+        )
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in
                 self?.refreshPanelSize()

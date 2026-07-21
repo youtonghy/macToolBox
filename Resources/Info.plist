@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSHumanReadableCopyright</key>
 	<string></string>
+	<key>NSInputMonitoringUsageDescription</key>
+	<string>ToolBox 需要输入监控权限，以便拦截亮度 / 音量媒体键并转发给外接显示器。</string>
 </dict>
 </plist>

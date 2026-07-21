@@ -6,10 +6,10 @@ import IOKit.hid
 
 /// Handles TCC permission checks / prompts used by ToolBox.
 ///
-/// - Input Monitoring: required for `CGEvent.tapCreate` media-key interception.
-///   Prefer `CGPreflightListenEventAccess` / `CGRequestListenEventAccess`.
-/// - Accessibility: still useful as a fallback signal on some macOS builds, and
-///   for any future AX-based paths. Media-key taps primarily need Input Monitoring.
+/// Media-key interception uses `CGEvent.tapCreate` with `.defaultTap` so events can
+/// be swallowed. On current macOS that typically needs:
+/// - **Input Monitoring** (listen / event-tap identity)
+/// - **Accessibility** (modify / suppress the event stream)
 enum Permissions {
 
     enum InputMonitoringStatus: Equatable {
@@ -21,23 +21,34 @@ enum Permissions {
 
         var label: String {
             switch self {
-            case .granted:
-                return "已授权"
-            case .denied:
-                return "未授权"
-            case .unknown:
-                return "待确认"
+            case .granted: return "已授权"
+            case .denied: return "未授权"
+            case .unknown: return "待确认"
+            }
+        }
+    }
+
+    /// What the media-key path is still missing.
+    enum MediaKeyPermissionGap: Equatable {
+        case none
+        case inputMonitoring
+        case accessibility
+        case both
+        /// Preflight APIs report granted, but tap creation still fails (often needs process restart).
+        case restartRequired
+
+        var needsUserAction: Bool {
+            switch self {
+            case .none:
+                return false
+            case .inputMonitoring, .accessibility, .both, .restartRequired:
+                return true
             }
         }
     }
 
     // MARK: - Input Monitoring
 
-    /// Best-effort Input Monitoring status.
-    ///
-    /// Uses CoreGraphics preflight first (the API that maps to the Input Monitoring
-    /// privacy pane for event taps). Falls back to IOHID when preflight is false so
-    /// we can distinguish "explicitly denied" from "never asked / unknown".
     static var inputMonitoringStatus: InputMonitoringStatus {
         if CGPreflightListenEventAccess() {
             return .granted
@@ -46,9 +57,6 @@ enum Permissions {
         let access = IOHIDCheckAccess(kIOHIDRequestTypeListenEvent)
         switch access {
         case kIOHIDAccessTypeGranted:
-            // Some builds report IOHID granted while CG preflight is still false
-            // until the process is restarted. Treat as granted for UI, but callers
-            // should still verify that the event tap can be created.
             return .granted
         case kIOHIDAccessTypeDenied:
             return .denied
@@ -61,17 +69,21 @@ enum Permissions {
         inputMonitoringStatus.isTrusted
     }
 
-    /// Requests Input Monitoring access. May show a system prompt and/or add the
-    /// app to System Settings → Privacy & Security → Input Monitoring.
+    /// Registers the current process with TCC for Input Monitoring so it appears
+    /// in System Settings → Privacy & Security → Input Monitoring.
     @discardableResult
-    static func requestInputMonitoring() -> Bool {
+    static func registerInputMonitoring() -> Bool {
         if CGPreflightListenEventAccess() {
             return true
         }
-        // Both paths can surface the app in the Input Monitoring list.
         let cgGranted = CGRequestListenEventAccess()
         let ioGranted = IOHIDRequestAccess(kIOHIDRequestTypeListenEvent)
         return cgGranted || ioGranted || CGPreflightListenEventAccess()
+    }
+
+    @discardableResult
+    static func requestInputMonitoring() -> Bool {
+        registerInputMonitoring()
     }
 
     // MARK: - Accessibility
@@ -80,16 +92,62 @@ enum Permissions {
         AXIsProcessTrustedWithOptions(nil)
     }
 
+    /// Registers / prompts for Accessibility so ToolBox appears in the Accessibility list.
+    /// - Parameter prompt: when true, macOS may show the system trust dialog once.
     @discardableResult
-    static func requestAccessibilityOnce() -> Bool {
-        let opts: NSDictionary = [
-            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: kCFBooleanTrue as Any
-        ]
-        return AXIsProcessTrustedWithOptions(opts as CFDictionary)
+    static func registerAccessibility(prompt: Bool = false) -> Bool {
+        if prompt {
+            let opts: NSDictionary = [
+                kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: kCFBooleanTrue as Any
+            ]
+            return AXIsProcessTrustedWithOptions(opts as CFDictionary)
+        }
+        // Touch the API without prompting so TCC materializes a row when possible.
+        return AXIsProcessTrustedWithOptions(nil)
     }
 
-    /// Polls accessibility trust (debounced — Sequoia/Tahoe can return stale
-    /// `false` reads), calling `completion` on the main thread.
+    @discardableResult
+    static func requestAccessibilityOnce() -> Bool {
+        registerAccessibility(prompt: true)
+    }
+
+    // MARK: - Combined media-key gap
+
+    /// Best-effort classification of why a media-key event tap cannot be installed.
+    static func mediaKeyPermissionGap(
+        canCreateListenOnlyTap: Bool?,
+        canCreateDefaultTap: Bool?
+    ) -> MediaKeyPermissionGap {
+        if canCreateDefaultTap == true {
+            return .none
+        }
+
+        let im = isInputMonitoringTrusted
+        let ax = isAccessibilityTrusted
+
+        // Empirical split: listen-only often works with Input Monitoring alone;
+        // default (modify/swallow) commonly also needs Accessibility.
+        if canCreateListenOnlyTap == true, !ax {
+            return .accessibility
+        }
+        if canCreateListenOnlyTap == false, !im {
+            return im && ax ? .restartRequired : (!im && !ax ? .both : .inputMonitoring)
+        }
+
+        switch (im, ax) {
+        case (true, true):
+            return .restartRequired
+        case (false, true):
+            return .inputMonitoring
+        case (true, false):
+            return .accessibility
+        case (false, false):
+            return .both
+        }
+    }
+
+    // MARK: - Polling
+
     static func awaitAccessibility(
         timeout: TimeInterval = 60,
         completion: @escaping (Bool) -> Void
@@ -101,31 +159,81 @@ enum Permissions {
         )
     }
 
-    /// Polls Input Monitoring until granted or timeout.
     static func awaitInputMonitoring(
         timeout: TimeInterval = 60,
         completion: @escaping (Bool) -> Void
     ) {
         pollTrust(
             timeout: timeout,
-            isTrusted: { CGPreflightListenEventAccess() },
+            isTrusted: {
+                CGPreflightListenEventAccess()
+                    || IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted
+            },
+            completion: completion
+        )
+    }
+
+    static func awaitMediaKeyPermissions(
+        timeout: TimeInterval = 90,
+        completion: @escaping (Bool) -> Void
+    ) {
+        pollTrust(
+            timeout: timeout,
+            isTrusted: { isInputMonitoringTrusted && isAccessibilityTrusted },
             completion: completion
         )
     }
 
     // MARK: - Settings deep links
 
-    static func openInputMonitoringSettings() {
-        openPrivacyPane(anchors: [
-            "Privacy_ListenEvent",
-            "Privacy_InputMonitoring"
-        ])
+    /// Opens the most relevant privacy pane for media keys, registering ToolBox first
+    /// so the list is pre-filled (user only needs to flip the switch).
+    static func openMediaKeyPermissionSettings(
+        gap: MediaKeyPermissionGap = .both,
+        completion: (() -> Void)? = nil
+    ) {
+        switch gap {
+        case .accessibility, .restartRequired:
+            // Restart-required often still benefits from re-confirming Accessibility.
+            _ = registerAccessibility(prompt: false)
+            // Soft prompt once helps some macOS builds materialize the row.
+            if !isAccessibilityTrusted {
+                _ = registerAccessibility(prompt: true)
+            }
+            _ = registerInputMonitoring()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                openPrivacyPane(anchors: ["Privacy_Accessibility"])
+                completion?()
+            }
+
+        case .inputMonitoring:
+            _ = registerInputMonitoring()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                openPrivacyPane(anchors: [
+                    "Privacy_ListenEvent",
+                    "Privacy_InputMonitoring"
+                ])
+                completion?()
+            }
+
+        case .both, .none:
+            _ = registerInputMonitoring()
+            _ = registerAccessibility(prompt: !isAccessibilityTrusted)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                // Accessibility is the more common missing piece for .defaultTap.
+                // Input Monitoring is also registered so it appears if needed.
+                openPrivacyPane(anchors: ["Privacy_Accessibility"])
+                completion?()
+            }
+        }
     }
 
-    static func openAccessibilitySettings() {
-        openPrivacyPane(anchors: [
-            "Privacy_Accessibility"
-        ])
+    static func openInputMonitoringSettings(completion: (() -> Void)? = nil) {
+        openMediaKeyPermissionSettings(gap: .inputMonitoring, completion: completion)
+    }
+
+    static func openAccessibilitySettings(completion: (() -> Void)? = nil) {
+        openMediaKeyPermissionSettings(gap: .accessibility, completion: completion)
     }
 
     // MARK: - Private
@@ -141,7 +249,6 @@ enum Permissions {
             while Date() < deadline {
                 if isTrusted() {
                     consecutive += 1
-                    // Debounce: require two consecutive true reads.
                     if consecutive >= 2 {
                         DispatchQueue.main.async { completion(true) }
                         return
@@ -156,7 +263,6 @@ enum Permissions {
     }
 
     private static func openPrivacyPane(anchors: [String]) {
-        // Prefer modern System Settings URLs first, then legacy System Preferences.
         var candidates: [URL] = []
         for anchor in anchors {
             if let modern = URL(

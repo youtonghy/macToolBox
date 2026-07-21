@@ -14,14 +14,14 @@ struct PopoverContent: View {
                 hardwareSection
 
                 if !hardware.cableItems.isEmpty {
-                    section(title: "线缆状态", subtitle: hardware.cableSectionSubtitle) {
+                    section(title: "线缆状态") {
                         CableListView(items: hardware.visibleCableItems)
                             .frame(height: hardware.cableListHeight)
                     }
                 }
 
                 if displayControl.hasExternalDisplay {
-                    section(title: "显示器控制", subtitle: "DDC / VCP 实时写回外接屏幕") {
+                    section(title: "显示器控制") {
                         DisplayControlPanel(model: displayControl)
                     }
                 }
@@ -42,7 +42,7 @@ struct PopoverContent: View {
     }
 
     private var hardwareSection: some View {
-        section(title: "芯片功耗", subtitle: "点击数值可切换实时读数与 5 分钟平均值") {
+        section(title: "芯片功耗") {
             HStack(spacing: 10) {
                 PowerChartRepresentable(
                     title: "CPU",
@@ -94,7 +94,7 @@ struct PopoverContent: View {
 
     private func section<SectionContent: View>(
         title: String,
-        subtitle: String,
+        subtitle: String = "",
         @ViewBuilder content: () -> SectionContent
     ) -> some View {
         let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -106,10 +106,12 @@ struct PopoverContent: View {
 
                 Spacer(minLength: 8)
 
-                Text(subtitle)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                if !subtitle.isEmpty {
+                    Text(subtitle)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
             }
 
             content()

@@ -22,19 +22,6 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         }
     }
 
-    var subtitle: String {
-        switch self {
-        case .home:
-            return "总览面板能力与交互"
-        case .cables:
-            return "查看连接中的端口与协商细节"
-        case .display:
-            return "调节外接屏亮度、对比度与音量"
-        case .general:
-            return "启动偏好与当前状态"
-        }
-    }
-
     var symbolName: String {
         switch self {
         case .home:
@@ -88,15 +75,10 @@ struct SettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("设置")
-                    .font(.system(size: 22, weight: .semibold))
-                Text("ToolBox")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 4)
-            .padding(.bottom, 2)
+            Text("设置")
+                .font(.system(size: 22, weight: .semibold))
+                .padding(.horizontal, 4)
+                .padding(.bottom, 2)
 
             SettingsCard {
                 VStack(spacing: 8) {
@@ -107,30 +89,14 @@ struct SettingsView: View {
             }
 
             Spacer(minLength: 0)
-
-            SettingsCard {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("版本 1.0")
-                        .font(.system(size: 12, weight: .semibold))
-                    Text("菜单栏常驻，轻量操作")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
         }
     }
 
     private var content: some View {
         VStack(alignment: .leading, spacing: SettingsChrome.contentSpacing) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text(currentTab.title)
-                    .font(.system(size: 24, weight: .semibold))
-                Text(currentTab.subtitle)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 2)
+            Text(currentTab.title)
+                .font(.system(size: 24, weight: .semibold))
+                .padding(.horizontal, 2)
 
             Group {
                 switch currentTab {
@@ -197,45 +163,33 @@ struct SettingsView: View {
 private struct SettingsHomeView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
-            VStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
-                SettingsSection(title: "菜单栏面板", subtitle: "主面板与快捷入口") {
-                    VStack(spacing: 8) {
-                        SettingsFeatureRow(
-                            symbolName: "cursorarrow.click.2",
-                            accent: Color(nsColor: .systemBlue),
-                            title: "左键打开主面板",
-                            description: "查看功耗曲线、线缆状态和显示器控制，点外部自动收起。"
-                        )
-                        SettingsFeatureRow(
-                            symbolName: "button.horizontal.top.press",
-                            accent: Color(nsColor: .systemPurple),
-                            title: "右键快速菜单",
-                            description: "直接切换“擦屏幕”和“后台干”，或进入设置、退出应用。"
-                        )
-                    }
-                }
-
-                SettingsSection(title: "当前能力", subtitle: "围绕高频操作做轻量组织") {
-                    VStack(spacing: 8) {
-                        SettingsFeatureRow(
-                            symbolName: "cpu",
-                            accent: Color(nsColor: .systemOrange),
-                            title: "硬件概览",
-                            description: "CPU / GPU 功耗以图表和即时读数呈现，可在实时值与平均值之间切换。"
-                        )
-                        SettingsFeatureRow(
-                            symbolName: "cable.connector",
-                            accent: Color(nsColor: .systemPurple),
-                            title: "线缆详情",
-                            description: "在设置页展开端口规格、PD 协商、数据与显示链路等完整状态。"
-                        )
-                        SettingsFeatureRow(
-                            symbolName: "display.2",
-                            accent: Color(nsColor: .systemTeal),
-                            title: "外接显示器控制",
-                            description: "菜单快捷调节，设置页提供更大的滑杆和更完整的显示器状态。"
-                        )
-                    }
+            SettingsSection(title: "功能") {
+                VStack(spacing: 8) {
+                    SettingsFeatureRow(
+                        symbolName: "cpu",
+                        accent: Color(nsColor: .systemOrange),
+                        title: "芯片功耗"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "cable.connector",
+                        accent: Color(nsColor: .systemPurple),
+                        title: "线缆状态"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "display.2",
+                        accent: Color(nsColor: .systemTeal),
+                        title: "显示器控制"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "rectangle.inset.filled",
+                        accent: Color(nsColor: .systemIndigo),
+                        title: "擦屏幕"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "cup.and.saucer.fill",
+                        accent: Color(nsColor: .systemOrange),
+                        title: "后台干"
+                    )
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -259,8 +213,7 @@ private struct SettingsCablesView: View {
                     } else if hardware.cableItems.isEmpty {
                         SettingsEmptyState(
                             symbolName: "cable.connector.slash",
-                            title: "没有检测到活动线缆",
-                            description: "接入 USB-C / Thunderbolt / MagSafe 设备后，这里会显示完整协商状态。"
+                            title: "无活动线缆"
                         )
                     } else {
                         SettingsValueRow(
@@ -352,8 +305,7 @@ private struct SettingsCableDetailCard: View {
                 if item.detailGroups.isEmpty {
                     SettingsEmptyState(
                         symbolName: "info.circle",
-                        title: "暂无更多细节",
-                        description: "该端口当前只报告了基础连接信息。"
+                        title: "暂无更多细节"
                     )
                 } else {
                     ForEach(item.detailGroups) { group in
@@ -420,8 +372,7 @@ private struct SettingsDisplayView: View {
                     } else {
                         SettingsEmptyState(
                             symbolName: "display.trianglebadge.exclamationmark",
-                            title: "没有外接显示器",
-                            description: "连接支持 DDC/VCP 的外接屏后，可在这里调节亮度、对比度和音量。"
+                            title: "无外接显示器"
                         )
                     }
                 }
@@ -429,16 +380,6 @@ private struct SettingsDisplayView: View {
                 if model.hasExternalDisplay {
                     SettingsSection(title: "实时控制", subtitle: model.selectedDisplayName) {
                         VStack(spacing: 10) {
-                            SettingsInnerCard {
-                                VStack(alignment: .leading, spacing: 6) {
-                                    Text(model.statusText)
-                                        .font(.system(size: 12, weight: .semibold))
-                                    Text("通过 DDC/VCP 写回硬件；部分显示器为 write-only，读数可能是估算值。")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-
                             ForEach(model.sliderItems) { item in
                                 displaySliderCard(item)
                             }
@@ -451,13 +392,8 @@ private struct SettingsDisplayView: View {
                                         emphasized: model.muteAvailable
                                     )
 
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text("静音")
-                                            .font(.system(size: 13, weight: .semibold))
-                                        Text(model.muteAvailable ? "切换显示器音频静音" : "当前显示器不支持静音控制")
-                                            .font(.system(size: 11, weight: .medium))
-                                            .foregroundStyle(.secondary)
-                                    }
+                                    Text("静音")
+                                        .font(.system(size: 13, weight: .semibold))
 
                                     Spacer(minLength: 12)
 
@@ -498,32 +434,6 @@ private struct SettingsDisplayView: View {
                     coordinator: brightnessSchedule,
                     launchAtLogin: launchAtLogin
                 )
-
-                if model.hasExternalDisplay {
-                    SettingsSection(title: "当前选择", subtitle: "状态摘要") {
-                        VStack(spacing: 8) {
-                            SettingsValueRow(
-                                title: "显示器",
-                                value: model.selectedDisplayName,
-                                accent: Color(nsColor: .systemTeal)
-                            )
-                            SettingsValueRow(
-                                title: "控制通道",
-                                value: model.statusText,
-                                accent: Color(nsColor: .systemBlue)
-                            )
-                            SettingsValueRow(
-                                title: "静音",
-                                value: model.muteAvailable
-                                    ? (model.selectedMuted ? "已静音" : "未静音")
-                                    : "不可用",
-                                accent: model.muteAvailable
-                                    ? Color(nsColor: .systemPink)
-                                    : Color.secondary
-                            )
-                        }
-                    }
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 4)
@@ -661,148 +571,54 @@ private struct SettingsDisplayView: View {
 private struct MediaKeyPermissionSection: View {
     @ObservedObject var mediaKeys: DisplayControlMediaKeyController
 
-    private var statusAccent: Color {
-        if mediaKeys.isTapActive {
-            return Color(nsColor: .systemGreen)
-        }
-        if mediaKeys.needsPermission {
-            return Color(nsColor: .systemOrange)
-        }
-        return Color.secondary
+    private var isReady: Bool {
+        mediaKeys.isTapActive
     }
 
-    private var permissionAccent: Color {
-        switch mediaKeys.inputMonitoringStatus {
-        case .granted:
-            return Color(nsColor: .systemGreen)
-        case .denied:
-            return Color(nsColor: .systemRed)
-        case .unknown:
-            return Color(nsColor: .systemOrange)
-        }
+    private var accent: Color {
+        isReady ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange)
     }
 
     var body: some View {
-        VStack(spacing: 8) {
-            SettingsInnerCard {
-                HStack(spacing: 12) {
-                    SettingsIconBadge(
-                        systemName: "keyboard",
-                        accent: permissionAccent,
-                        emphasized: mediaKeys.inputMonitoringStatus == .granted
+        SettingsInnerCard {
+            HStack(spacing: 12) {
+                SettingsIconBadge(
+                    systemName: isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
+                    accent: accent,
+                    emphasized: isReady
+                )
+
+                Text("媒体键权限")
+                    .font(.system(size: 13, weight: .semibold))
+
+                Spacer(minLength: 12)
+
+                Text(isReady ? "已授权" : "未授权")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(accent)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(
+                        Capsule(style: .continuous)
+                            .fill(accent.opacity(0.12))
+                    )
+                    .overlay(
+                        Capsule(style: .continuous)
+                            .strokeBorder(accent.opacity(0.22), lineWidth: 1)
                     )
 
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("输入监控")
-                            .font(.system(size: 13, weight: .semibold))
-                        Text("拦截 F1/F2 亮度与音量媒体键，转发给外接显示器。")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                if !isReady {
+                    Button("请求权限") {
+                        mediaKeys.openRequiredPermissionSettings()
                     }
-
-                    Spacer(minLength: 12)
-
-                    Text(mediaKeys.inputMonitoringStatus.label)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(permissionAccent)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 5)
-                        .background(
-                            Capsule(style: .continuous)
-                                .fill(permissionAccent.opacity(0.12))
-                        )
-                        .overlay(
-                            Capsule(style: .continuous)
-                                .strokeBorder(permissionAccent.opacity(0.22), lineWidth: 1)
-                        )
-                }
-            }
-
-            SettingsValueRow(
-                title: "媒体键监听",
-                value: mediaKeys.statusText,
-                accent: statusAccent
-            )
-
-            HStack(spacing: 8) {
-                Button {
-                    mediaKeys.openInputMonitoringSettings()
-                } label: {
-                    permissionActionLabel(
-                        symbolName: "arrow.up.right.square",
-                        title: "打开系统设置",
-                        accent: Color(nsColor: .systemBlue)
-                    )
-                }
-                .buttonStyle(.plain)
-
-                Button {
-                    mediaKeys.refreshAndRetry(promptIfNeeded: true)
-                } label: {
-                    permissionActionLabel(
-                        symbolName: "arrow.clockwise",
-                        title: "重新检测",
-                        accent: Color(nsColor: .systemIndigo)
-                    )
-                }
-                .buttonStyle(.plain)
-            }
-
-            if mediaKeys.needsPermission || mediaKeys.inputMonitoringStatus != .granted {
-                SettingsInnerCard {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("授权后仍失败？")
-                            .font(.system(size: 12, weight: .bold))
-                        Text("1. 在「隐私与安全性 → 输入监控」中确认 ToolBox 开关已打开。")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text("2. 调试版可能有多条记录，只打开当前正在运行的那一项。")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text("3. 刚打开开关后若仍失败，完全退出再打开 ToolBox。")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
             }
         }
         .onAppear {
             mediaKeys.refreshAndRetry(promptIfNeeded: false)
         }
-    }
-
-    private func permissionActionLabel(
-        symbolName: String,
-        title: String,
-        accent: Color
-    ) -> some View {
-        HStack(spacing: 10) {
-            SettingsIconBadge(
-                systemName: symbolName,
-                accent: accent,
-                emphasized: false
-            )
-
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-
-            Spacer(minLength: 8)
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
-                .fill(SettingsChrome.cardBackground)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
-                .strokeBorder(SettingsChrome.cardBorder, lineWidth: 1)
-        )
-        .contentShape(
-            RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
-        )
     }
 }
 
@@ -813,99 +629,34 @@ private struct GeneralSettingsView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
-                SettingsSection(title: "权限", subtitle: "捕获亮度 / 音量媒体键") {
+                SettingsSection(title: "权限") {
                     MediaKeyPermissionSection(mediaKeys: mediaKeys)
                 }
 
-                SettingsSection(title: "启动", subtitle: "登录后保持菜单栏常驻") {
-                    VStack(spacing: 8) {
-                        SettingsInnerCard {
-                            HStack(spacing: 12) {
-                                SettingsIconBadge(
-                                    systemName: "power.circle.fill",
-                                    accent: Color(nsColor: .systemGreen),
-                                    emphasized: launchAtLogin.isEnabled
+                SettingsSection(title: "启动") {
+                    SettingsInnerCard {
+                        HStack(spacing: 12) {
+                            SettingsIconBadge(
+                                systemName: "power.circle.fill",
+                                accent: Color(nsColor: .systemGreen),
+                                emphasized: launchAtLogin.isEnabled
+                            )
+
+                            Text("开机自启动")
+                                .font(.system(size: 13, weight: .semibold))
+
+                            Spacer(minLength: 12)
+
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: { launchAtLogin.isEnabled },
+                                    set: { launchAtLogin.setEnabled($0) }
                                 )
-
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("开机自启动")
-                                        .font(.system(size: 13, weight: .semibold))
-                                    Text("登录 macOS 后自动启动 ToolBox。")
-                                        .font(.system(size: 11, weight: .medium))
-                                        .foregroundStyle(.secondary)
-                                }
-
-                                Spacer(minLength: 12)
-
-                                Toggle(
-                                    "",
-                                    isOn: Binding(
-                                        get: { launchAtLogin.isEnabled },
-                                        set: { launchAtLogin.setEnabled($0) }
-                                    )
-                                )
-                                .toggleStyle(.switch)
-                                .labelsHidden()
-                            }
+                            )
+                            .toggleStyle(.switch)
+                            .labelsHidden()
                         }
-
-                        Button {
-                            SMAppService.openSystemSettingsLoginItems()
-                        } label: {
-                            HStack(spacing: 10) {
-                                SettingsIconBadge(
-                                    systemName: "arrow.up.right.square",
-                                    accent: Color(nsColor: .systemBlue),
-                                    emphasized: false
-                                )
-
-                                Text("打开系统登录项设置")
-                                    .font(.system(size: 13, weight: .semibold))
-
-                                Spacer(minLength: 8)
-
-                                Image(systemName: "chevron.right")
-                                    .font(.system(size: 11, weight: .semibold))
-                                    .foregroundStyle(.secondary)
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(
-                                RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
-                                    .fill(SettingsChrome.cardBackground)
-                            )
-                            .overlay(
-                                RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
-                                    .strokeBorder(SettingsChrome.cardBorder, lineWidth: 1)
-                            )
-                            .contentShape(
-                                RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
-                            )
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-
-                SettingsSection(title: "当前状态", subtitle: "确认设置已经生效") {
-                    VStack(spacing: 8) {
-                        SettingsValueRow(
-                            title: "开机启动",
-                            value: launchAtLogin.isEnabled ? "已启用" : "未启用",
-                            accent: launchAtLogin.isEnabled
-                                ? Color(nsColor: .systemGreen)
-                                : Color.secondary
-                        )
-                        SettingsValueRow(
-                            title: "应用形态",
-                            value: "仅菜单栏",
-                            accent: Color(nsColor: .systemBlue)
-                        )
-                        SettingsValueRow(
-                            title: "窗口风格",
-                            value: "液态玻璃",
-                            accent: Color(nsColor: .systemIndigo)
-                        )
                     }
                 }
             }
@@ -914,5 +665,4 @@ private struct GeneralSettingsView: View {
         }
     }
 }
-
 

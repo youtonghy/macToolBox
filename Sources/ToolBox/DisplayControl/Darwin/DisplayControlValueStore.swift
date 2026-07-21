@@ -9,30 +9,49 @@ struct DisplayControlValueKey: Hashable, Sendable {
 struct DisplayControlValueStore {
     private var values: [DisplayControlValueKey: DisplayControlValue] = [:]
     private var lastSuccessfulRawValues: [DisplayControlValueKey: UInt16] = [:]
+    private let brightnessMemory: DisplayBrightnessRemembering
+
+    init(brightnessMemory: DisplayBrightnessRemembering = DisplayBrightnessMemoryStore()) {
+        self.brightnessMemory = brightnessMemory
+    }
 
     func value(for key: DisplayControlValueKey) -> DisplayControlValue {
         values[key] ?? Self.fallbackValue(kind: key.kind)
     }
 
-    mutating func recordObserved(_ value: DisplayControlValue, for key: DisplayControlValueKey) {
+    mutating func recordObserved(
+        _ value: DisplayControlValue,
+        for key: DisplayControlValueKey,
+        identity: DisplayBrightnessMemoryIdentity? = nil
+    ) {
         values[key] = value
         if lastSuccessfulRawValues[key] != value.rawCurrent {
             lastSuccessfulRawValues[key] = nil
+        }
+        if key.kind == .brightness, let identity {
+            brightnessMemory.save(value.normalized, for: identity)
         }
     }
 
     mutating func capability(
         for key: DisplayControlValueKey,
+        identity: DisplayBrightnessMemoryIdentity? = nil,
         observedValue: DisplayControlValue?
     ) -> DisplayControlCapability {
         if let observedValue {
-            recordObserved(observedValue, for: key)
+            recordObserved(observedValue, for: key, identity: identity)
             return DisplayControlCapability(
                 kind: key.kind,
                 status: .available,
                 value: observedValue,
                 unavailableReason: nil
             )
+        }
+
+        if key.kind == .brightness,
+           let identity,
+           let remembered = brightnessMemory.load(for: identity) {
+            values[key] = Self.fallbackValue(kind: key.kind, normalized: remembered)
         }
 
         return DisplayControlCapability(
@@ -75,7 +94,8 @@ struct DisplayControlValueStore {
     mutating func recordSuccessfulWrite(
         _ rawValue: UInt16,
         normalized: Double,
-        for key: DisplayControlValueKey
+        for key: DisplayControlValueKey,
+        identity: DisplayBrightnessMemoryIdentity? = nil
     ) {
         var value = value(for: key)
         value.timestamp = Date()
@@ -83,6 +103,9 @@ struct DisplayControlValueStore {
         value.normalized = normalized
         values[key] = value
         lastSuccessfulRawValues[key] = rawValue
+        if key.kind == .brightness, let identity {
+            brightnessMemory.save(normalized, for: identity)
+        }
     }
 
     mutating func retainDisplays(_ displayIDs: Set<CGDirectDisplayID>) {
@@ -92,7 +115,10 @@ struct DisplayControlValueStore {
         }
     }
 
-    private static func fallbackValue(kind: DisplayControlKind) -> DisplayControlValue {
+    private static func fallbackValue(
+        kind: DisplayControlKind,
+        normalized rememberedValue: Double? = nil
+    ) -> DisplayControlValue {
         let current: UInt16
         let maximum: UInt16
         switch kind {
@@ -110,13 +136,19 @@ struct DisplayControlValueStore {
             maximum = 2
         }
 
+        let normalized = kind == .mute
+            ? 0
+            : min(max(rememberedValue ?? Double(current) / Double(maximum), 0), 1)
+        let rememberedCurrent = UInt16(
+            min(max((normalized * Double(maximum)).rounded(), 0), Double(maximum))
+        )
         return DisplayControlValue(
             kind: kind,
             timestamp: Date(),
-            rawCurrent: current,
+            rawCurrent: rememberedValue == nil ? current : rememberedCurrent,
             rawMinimum: 0,
             rawMaximum: maximum,
-            normalized: kind == .mute ? 0 : Double(current) / Double(maximum)
+            normalized: normalized
         )
     }
 }

@@ -33,6 +33,8 @@ targets:
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: ""
+        # Helps TCC surface a proper Input Monitoring purpose string and list entry.
+        NSInputMonitoringUsageDescription: "ToolBox 需要输入监控权限，以便拦截亮度 / 音量媒体键并转发给外接显示器。"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox

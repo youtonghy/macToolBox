@@ -85,6 +85,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
     }
 
     func updatePanelSize(_ newSize: NSSize) {
+        guard newSize != panelSize else { return }
         applyPanelSize(newSize, reanchorIfVisible: true)
     }
 

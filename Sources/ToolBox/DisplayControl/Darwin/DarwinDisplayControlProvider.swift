@@ -40,7 +40,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             let value = try Self.makeValue(kind: kind, read: read)
             self.valueStore.recordObserved(
                 value,
-                for: DisplayControlValueKey(displayID: displayID, kind: kind)
+                for: DisplayControlValueKey(displayID: displayID, kind: kind),
+                identity: Self.brightnessMemoryIdentity(displayID: displayID)
             )
             return value
         }
@@ -70,7 +71,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 self.valueStore.recordSuccessfulWrite(
                     rawValue,
                     normalized: normalizedValue,
-                    for: key
+                    for: key,
+                    identity: Self.brightnessMemoryIdentity(displayID: displayID)
                 )
             }
             return self.valueStore.value(for: key)
@@ -172,7 +174,11 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             transport: transport,
             options: .probe
         )
-        return valueStore.capability(for: key, observedValue: observedValue)
+        return valueStore.capability(
+            for: key,
+            identity: Self.brightnessMemoryIdentity(displayID: displayID),
+            observedValue: observedValue
+        )
     }
 
     private func ensureDisplayOnline(_ displayID: CGDirectDisplayID) throws {
@@ -284,6 +290,21 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     private static func serialNumber(displayID: CGDirectDisplayID) -> UInt32? {
         let value = CGDisplaySerialNumber(displayID)
         return value == 0 ? nil : value
+    }
+
+    private static func brightnessMemoryIdentity(
+        displayID: CGDirectDisplayID
+    ) -> DisplayBrightnessMemoryIdentity? {
+        guard let vendorNumber = vendorNumber(displayID: displayID),
+              let modelNumber = modelNumber(displayID: displayID),
+              let serialNumber = serialNumber(displayID: displayID) else {
+            return nil
+        }
+        return DisplayBrightnessMemoryIdentity(
+            vendorNumber: vendorNumber,
+            modelNumber: modelNumber,
+            serialNumber: serialNumber
+        )
     }
 
     private static func isVirtual(displayID: CGDirectDisplayID) -> Bool {

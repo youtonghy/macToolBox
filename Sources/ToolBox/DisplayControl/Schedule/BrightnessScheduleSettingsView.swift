@@ -12,12 +12,6 @@ struct BrightnessScheduleSettingsView: View {
     @State private var draftBrightness = 60
 
     private let accent = Color(nsColor: .systemTeal)
-    private let timeFormatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "HH:mm"
-        return formatter
-    }()
 
     var body: some View {
         SettingsSection(title: "定时亮度", subtitle: runtimeSubtitle) {
@@ -40,14 +34,8 @@ struct BrightnessScheduleSettingsView: View {
                             emphasized: coordinator.configuration.isEnabled
                         )
 
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("按本地时间自动调节外接屏亮度")
-                                .font(.system(size: 13, weight: .semibold))
-                            Text(runtimeStatusText)
-                                .font(.system(size: 11, weight: .medium))
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
+                        Text("启用")
+                            .font(.system(size: 13, weight: .semibold))
 
                         Spacer(minLength: 12)
 
@@ -64,19 +52,6 @@ struct BrightnessScheduleSettingsView: View {
                     }
                 }
 
-                SettingsInnerCard {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("作用范围：所有可控制的外接显示器")
-                            .font(.system(size: 12, weight: .semibold))
-                        Text("时区：系统本地（\(TimeZone.current.identifier)）")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                        Text("手动调节仅影响当前显示器，直到下一个时段。")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
                 if coordinator.configuration.isEnabled && !launchAtLogin.isEnabled {
                     SettingsInnerCard {
                         HStack(spacing: 12) {
@@ -85,13 +60,8 @@ struct BrightnessScheduleSettingsView: View {
                                 accent: Color(nsColor: .systemOrange),
                                 emphasized: true
                             )
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("建议开启开机自启动")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text("定时亮度仅在 ToolBox 运行时生效。")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
+                            Text("开机自启动")
+                                .font(.system(size: 13, weight: .semibold))
                             Spacer(minLength: 8)
                             Button("开启") {
                                 launchAtLogin.setEnabled(true)
@@ -390,24 +360,6 @@ struct BrightnessScheduleSettingsView: View {
                 return "\(percent)% · \(count) 台 · \(overrideCount) 台手动"
             }
             return "\(percent)% · \(count) 台"
-        }
-    }
-
-    private var runtimeStatusText: String {
-        switch coordinator.runtimeState {
-        case .disabled:
-            return "未启用"
-        case .waitingForDisplays:
-            return "等待可控制的外接显示器"
-        case let .active(percent, count, nextTransition, overrideCount):
-            var parts = ["当前 \(percent)%", "\(count) 台显示器"]
-            if let nextTransition {
-                parts.append("下次 \(timeFormatter.string(from: nextTransition))")
-            }
-            if overrideCount > 0 {
-                parts.append("\(overrideCount) 台已手动调整，下个时段恢复")
-            }
-            return parts.joined(separator: " · ")
         }
     }
 

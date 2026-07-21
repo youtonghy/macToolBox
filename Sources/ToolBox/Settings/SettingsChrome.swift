@@ -17,7 +17,7 @@ enum SettingsChrome {
 
 struct SettingsSection<Content: View>: View {
     let title: String
-    let subtitle: String
+    var subtitle: String = ""
     @ViewBuilder let content: Content
 
     var body: some View {
@@ -29,10 +29,12 @@ struct SettingsSection<Content: View>: View {
 
                     Spacer(minLength: 8)
 
-                    Text(subtitle)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    if !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 content
@@ -76,20 +78,22 @@ struct SettingsFeatureRow: View {
     let symbolName: String
     let accent: Color
     let title: String
-    let description: String
+    var description: String = ""
 
     var body: some View {
         SettingsInnerCard {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(spacing: 12) {
                 SettingsIconBadge(systemName: symbolName, accent: accent, emphasized: true)
 
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.system(size: 13, weight: .semibold))
-                    Text(description)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 Spacer(minLength: 0)
@@ -135,11 +139,11 @@ struct SettingsValueRow: View {
 struct SettingsEmptyState: View {
     let symbolName: String
     let title: String
-    let description: String
+    var description: String = ""
 
     var body: some View {
         SettingsInnerCard {
-            HStack(alignment: .top, spacing: 12) {
+            HStack(spacing: 12) {
                 SettingsIconBadge(
                     systemName: symbolName,
                     accent: Color.secondary,
@@ -149,10 +153,12 @@ struct SettingsEmptyState: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
                         .font(.system(size: 13, weight: .semibold))
-                    Text(description)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    if !description.isEmpty {
+                        Text(description)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 Spacer(minLength: 0)
