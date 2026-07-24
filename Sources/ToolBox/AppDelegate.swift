@@ -3,10 +3,57 @@ import SwiftUI
 import Combine
 
 @MainActor
+final class TerminationShutdownCoordinator {
+    private let timeout: Duration
+    private var didReply = false
+    private var shutdownTask: Task<Void, Never>?
+    private var timeoutTask: Task<Void, Never>?
+
+    init(timeout: Duration) {
+        self.timeout = timeout
+    }
+
+    func start(
+        shutdown: @escaping @MainActor () async -> Void,
+        reply: @escaping @MainActor () -> Void
+    ) {
+        guard shutdownTask == nil, timeoutTask == nil, !didReply else { return }
+        shutdownTask = Task { [weak self] in
+            await shutdown()
+            self?.finish(reply: reply)
+        }
+        timeoutTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: self.timeout)
+            } catch {
+                return
+            }
+            self.finish(reply: reply)
+        }
+    }
+
+    private func finish(reply: @MainActor () -> Void) {
+        guard !didReply else { return }
+        didReply = true
+        shutdownTask?.cancel()
+        timeoutTask?.cancel()
+        shutdownTask = nil
+        timeoutTask = nil
+        reply()
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private lazy var menuBarPanelController = MenuBarPanelController(
-        rootView: PopoverContent(state: state, hardware: hardware, displayControl: displayControlMenu),
+        rootView: PopoverContent(
+            state: state,
+            hardware: hardware,
+            displayControl: displayControlMenu,
+            audioRouting: audioRouting
+        ),
         panelSize: currentPanelSize
     )
     private var settingsWindowController: NSWindowController?
@@ -14,6 +61,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let hardware = HardwareMenuModel()
     private let displayControl = DisplayControlService.shared
     private let displayControlMenu = DisplayControlMenuModel()
+    private let audioRouting = AudioRoutingService()
     private lazy var displayControlKeys = DisplayControlMediaKeyController(
         service: displayControl,
         menuModel: displayControlMenu
@@ -22,11 +70,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         service: displayControl
     )
     private var cancellables = Set<AnyCancellable>()
+    private var isTerminating = false
+    private var terminationShutdownCoordinator: TerminationShutdownCoordinator?
 
     private var currentPanelSize: NSSize {
         MenuPanelLayout.panelSize(
             cableItemCount: hardware.cableItems.count,
-            showsDisplayControl: displayControlMenu.hasExternalDisplay
+            showsDisplayControl: displayControlMenu.hasExternalDisplay,
+            showsAudioSection: !audioRouting.menuRows.isEmpty
         )
     }
 
@@ -65,17 +116,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         brightnessSchedule.start()
         displayControlMenu.start()
         displayControlKeys.start()
+        audioRouting.start()
         observePanelSizeChanges()
         refreshPanelSize()
     }
 
     private func observePanelSizeChanges() {
-        Publishers.CombineLatest(
+        Publishers.CombineLatest3(
             hardware.$cableItems.map(\.count).removeDuplicates(),
-            displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates()
+            displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
+            audioRouting.$rows.map { rows in
+                rows.contains(where: \.isCurrentlyPlaying)
+            }.removeDuplicates()
         )
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _ in
+            .sink { [weak self] _, _, _ in
                 self?.refreshPanelSize()
             }
             .store(in: &cancellables)
@@ -87,7 +142,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarPanelController.updatePanelSize(currentPanelSize)
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateLater }
+        isTerminating = true
+        stopNonAudioServices()
+        let coordinator = TerminationShutdownCoordinator(timeout: .seconds(2))
+        terminationShutdownCoordinator = coordinator
+        coordinator.start(
+            shutdown: { [weak self] in
+                _ = await self?.audioRouting.shutdown()
+            },
+            reply: {
+                sender.reply(toApplicationShouldTerminate: true)
+            }
+        )
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
+        guard !isTerminating else { return }
+        stopNonAudioServices()
+        audioRouting.stop()
+    }
+
+    private func stopNonAudioServices() {
         screenWipe.stop()
         awake.stop()
         hardware.stop()
@@ -210,7 +288,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 hardware: hardware,
                 displayControl: displayControlMenu,
                 mediaKeys: displayControlKeys,
-                brightnessSchedule: brightnessSchedule
+                brightnessSchedule: brightnessSchedule,
+                audioRouting: audioRouting
             ),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)

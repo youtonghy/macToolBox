@@ -4,6 +4,34 @@ import XCTest
 @testable import ToolBox
 
 final class MenuPanelLayoutTests: XCTestCase {
+    func testPanelFrameFitsWithinShortVisibleScreen() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 800)
+        let anchorFrame = NSRect(x: 1_380, y: 780, width: 28, height: 20)
+
+        let frame = MenuPanelLayout.panelFrame(
+            preferredSize: NSSize(width: 560, height: 830),
+            anchorFrame: anchorFrame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(frame.height, 780)
+        XCTAssertGreaterThanOrEqual(frame.minX, visibleFrame.minX + 10)
+        XCTAssertLessThanOrEqual(frame.maxX, visibleFrame.maxX - 10)
+        XCTAssertGreaterThanOrEqual(frame.minY, visibleFrame.minY + 10)
+        XCTAssertLessThanOrEqual(frame.maxY, visibleFrame.maxY - 10)
+    }
+
+    func testPanelFramePreservesPreferredSizeWhenItFits() {
+        let frame = MenuPanelLayout.panelFrame(
+            preferredSize: NSSize(width: 560, height: 600),
+            anchorFrame: NSRect(x: 900, y: 1_000, width: 28, height: 20),
+            visibleFrame: NSRect(x: 0, y: 0, width: 1_920, height: 1_080)
+        )
+
+        XCTAssertEqual(frame.size, NSSize(width: 560, height: 600))
+        XCTAssertEqual(frame.maxY, 992)
+    }
+
     func testCompactPanelMetricsFitTheApprovedDesign() {
         XCTAssertEqual(MenuPanelLayout.size.width, 560)
         XCTAssertEqual(
@@ -77,27 +105,38 @@ final class MenuPanelLayoutTests: XCTestCase {
     func testPanelHeightShrinksWhenOptionalSectionsAreHidden() {
         let fullHeight = MenuPanelLayout.panelHeight(
             cableItemCount: 1,
-            showsDisplayControl: true
+            showsDisplayControl: true,
+            showsAudioSection: true
         )
         let withoutDisplay = MenuPanelLayout.panelHeight(
             cableItemCount: 1,
-            showsDisplayControl: false
+            showsDisplayControl: false,
+            showsAudioSection: true
         )
         let withoutCables = MenuPanelLayout.panelHeight(
             cableItemCount: 0,
-            showsDisplayControl: true
+            showsDisplayControl: true,
+            showsAudioSection: true
+        )
+        let withoutAudio = MenuPanelLayout.panelHeight(
+            cableItemCount: 1,
+            showsDisplayControl: true,
+            showsAudioSection: false
         )
         let compactHeight = MenuPanelLayout.panelHeight(
             cableItemCount: 0,
-            showsDisplayControl: false
+            showsDisplayControl: false,
+            showsAudioSection: false
         )
         let twoRowCables = MenuPanelLayout.panelHeight(
             cableItemCount: 3,
-            showsDisplayControl: true
+            showsDisplayControl: true,
+            showsAudioSection: true
         )
 
         XCTAssertLessThan(withoutDisplay, fullHeight)
         XCTAssertLessThan(withoutCables, fullHeight)
+        XCTAssertLessThan(withoutAudio, fullHeight)
         XCTAssertLessThan(compactHeight, withoutDisplay)
         XCTAssertLessThan(compactHeight, withoutCables)
         XCTAssertEqual(
@@ -109,12 +148,20 @@ final class MenuPanelLayoutTests: XCTestCase {
             MenuPanelLayout.contentSpacing + MenuPanelLayout.cableSectionHeight(itemCount: 1)
         )
         XCTAssertEqual(
+            fullHeight - withoutAudio,
+            MenuPanelLayout.contentSpacing + MenuPanelLayout.audioSectionHeight
+        )
+        XCTAssertEqual(
             twoRowCables - fullHeight,
             MenuPanelLayout.cableRowHeight + MenuPanelLayout.cableGridSpacing
         )
         XCTAssertEqual(MenuPanelLayout.size.height, twoRowCables)
         XCTAssertEqual(
-            MenuPanelLayout.panelSize(cableItemCount: 0, showsDisplayControl: false).width,
+            MenuPanelLayout.panelSize(
+                cableItemCount: 0,
+                showsDisplayControl: false,
+                showsAudioSection: false
+            ).width,
             560
         )
     }

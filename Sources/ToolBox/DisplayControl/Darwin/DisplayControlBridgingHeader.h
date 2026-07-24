@@ -1,8 +1,11 @@
-#pragma once
-
 #import <CoreGraphics/CoreGraphics.h>
 #import <Foundation/Foundation.h>
 #import <IOKit/i2c/IOI2CInterface.h>
+#import "../../AudioRouting/AudioRouteDSP.hpp"
+#import "../../AudioRouting/AudioRouteCallbackLease.hpp"
+#import "../../AudioRouting/AudioRouteFormat.hpp"
+#import "../../AudioRouting/AudioRouteRealtime.hpp"
+#import "../../AudioRouting/AudioRouteEngine.h"
 
 typedef CFTypeRef IOAVService;
 

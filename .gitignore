@@ -7,6 +7,7 @@ xcuserdata/
 build/
 .build/
 DerivedData/
+default.profraw
 
 # macOS
 .DS_Store

@@ -5,6 +5,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case home
     case cables
     case display
+    case audio
     case general
 
     var id: String { rawValue }
@@ -17,6 +18,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "线缆"
         case .display:
             return "显示器"
+        case .audio:
+            return "音频"
         case .general:
             return "通用"
         }
@@ -30,6 +33,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "cable.connector"
         case .display:
             return "display"
+        case .audio:
+            return "speaker.wave.2"
         case .general:
             return "switch.2"
         }
@@ -43,6 +48,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemPurple)
         case .display:
             return Color(nsColor: .systemTeal)
+        case .audio:
+            return Color(nsColor: .systemGreen)
         case .general:
             return Color(nsColor: .systemOrange)
         }
@@ -54,6 +61,7 @@ struct SettingsView: View {
     @ObservedObject var displayControl: DisplayControlMenuModel
     @ObservedObject var mediaKeys: DisplayControlMediaKeyController
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
+    @ObservedObject var audioRouting: AudioRoutingService
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
@@ -110,6 +118,8 @@ struct SettingsView: View {
                         brightnessSchedule: brightnessSchedule,
                         launchAtLogin: launchAtLogin
                     )
+                case .audio:
+                    AudioRoutingSettingsView(service: audioRouting)
                 case .general:
                     GeneralSettingsView(launchAtLogin: launchAtLogin, mediaKeys: mediaKeys)
                 }
@@ -179,6 +189,11 @@ private struct SettingsHomeView: View {
                         symbolName: "display.2",
                         accent: Color(nsColor: .systemTeal),
                         title: "显示器控制"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "speaker.wave.2",
+                        accent: Color(nsColor: .systemGreen),
+                        title: "分应用音频"
                     )
                     SettingsFeatureRow(
                         symbolName: "rectangle.inset.filled",
@@ -665,4 +680,3 @@ private struct GeneralSettingsView: View {
         }
     }
 }
-

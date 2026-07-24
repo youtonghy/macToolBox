@@ -5,30 +5,42 @@ struct PopoverContent: View {
     @ObservedObject var state: FeatureState
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
+    @ObservedObject var audioRouting: AudioRoutingService
 
     var body: some View {
-        VStack(alignment: .leading, spacing: MenuPanelLayout.outerSpacing) {
-            header
+        ScrollView(.vertical, showsIndicators: true) {
+            VStack(alignment: .leading, spacing: MenuPanelLayout.outerSpacing) {
+                header
 
-            VStack(alignment: .leading, spacing: MenuPanelLayout.contentSpacing) {
-                hardwareSection
+                VStack(alignment: .leading, spacing: MenuPanelLayout.contentSpacing) {
+                    hardwareSection
 
-                if !hardware.cableItems.isEmpty {
-                    section(title: "线缆状态") {
-                        CableListView(items: hardware.visibleCableItems)
-                            .frame(height: hardware.cableListHeight)
+                    if !audioRouting.menuRows.isEmpty {
+                        section(title: "应用音频", subtitle: "0–300%") {
+                            AudioRoutingPanel(service: audioRouting)
+                                .frame(height: MenuPanelLayout.audioSectionContentHeight)
+                        }
+                    }
+
+                    if !hardware.cableItems.isEmpty {
+                        section(title: "线缆状态") {
+                            CableListView(items: hardware.visibleCableItems)
+                                .frame(height: hardware.cableListHeight)
+                        }
+                    }
+
+                    if displayControl.hasExternalDisplay {
+                        section(title: "显示器控制") {
+                            DisplayControlPanel(model: displayControl)
+                        }
                     }
                 }
 
-                if displayControl.hasExternalDisplay {
-                    section(title: "显示器控制") {
-                        DisplayControlPanel(model: displayControl)
-                    }
-                }
+                controlsBar
             }
-
-            controlsBar
+            .frame(maxWidth: .infinity, alignment: .topLeading)
         }
+        .scrollBounceBehavior(.basedOnSize)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.clear)
     }

@@ -24,6 +24,7 @@ targets:
       - Sources/ToolBox
     dependencies:
       - sdk: CoreDisplay.framework
+      - sdk: CoreAudio.framework
     info:
       path: Resources/Info.plist
       properties:
@@ -35,6 +36,7 @@ targets:
         NSHumanReadableCopyright: ""
         # Helps TCC surface a proper Input Monitoring purpose string and list entry.
         NSInputMonitoringUsageDescription: "ToolBox 需要输入监控权限，以便拦截亮度 / 音量媒体键并转发给外接显示器。"
+        NSAudioCaptureUsageDescription: "ToolBox 需要系统音频捕获权限，以便为不同应用调整音量并路由到指定输出设备。"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox

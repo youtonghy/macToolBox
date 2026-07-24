@@ -4,6 +4,8 @@
 
 ToolBox 需要为单个应用提供独立的输出音量和输出设备规则。例如，Zoom 可以以 `300%` 音量输出到耳机，同时其他应用继续通过系统默认扬声器播放。
 
+Zoom 仅是应用示例。实现不创建 `ZoomDevice` 或任何按应用命名的伪设备；输出 Picker 始终来自 Core Audio 枚举的系统输出设备，同一套规则适用于任意可识别的 HAL Process Object。
+
 macOS 没有公开的“替另一个进程设置输出设备”属性，也没有公开 API 强制第三方应用切换输入源。macOS 14.2 起提供 Core Audio Process Tap，可以捕获指定进程的输出，在 Tap 被读取时静音原始输出，再由 ToolBox 重新播放到指定硬件设备。因此本设计只采用 Process Tap，不引入 Background Music 的虚拟 HAL 驱动。
 
 ## 目标
@@ -49,9 +51,9 @@ Process Tap 不改变 Zoom 自己的设备选择，而是执行以下数据流�
 目标进程
   -> CATapDescription.processes
   -> Process Tap (CATapMutedWhenTapped)
-  -> 私有 Aggregate Device
-  -> Route Engine: 增益 / 声道映射 / 峰值保护
-  -> 指定硬件输出设备
+  -> 单 Tap 私有 capture Aggregate
+  -> 预分配无锁 stereo ring buffer
+  -> 指定硬件输出设备 IOProc: 混音 / 增益 / 峰值保护
 ```
 
 未配置规则的应用不创建 Tap，继续沿系统原始路径播放。
@@ -83,7 +85,7 @@ ProcessTapController  RoutePlanCompiler
        \             /
           AudioRouteEngine (ObjC++ / Core Audio)
                     |
-       Process Tap + private Aggregate + IOProc
+       Tap-only capture Aggregates + physical output IOProc
 ```
 
 SwiftUI 只接触 `AudioRoutingMenuModel` 和 `AudioRoutingSettingsModel`。实时 IO 回调不调用 SwiftUI、Combine、UserDefaults、日志格式化或可能分配内存的 API。
@@ -117,7 +119,7 @@ struct AppAudioRule: Codable, Equatable, Identifiable {
 - `kAudioProcessPropertyIsRunningOutput` 状态；
 - bundle ID 到当前 Process Object ID 集合的映射。
 
-规则以 bundle ID 匹配，运行时绑定到当前进程对象。进程退出或 Process Object 消失时销毁对应 Tap；同 bundle ID 的新进程出现时重新绑定。
+规则以 bundle ID 匹配，运行时绑定到当前进程对象。只要 Process Object 仍存在，就预先保持 Tap route；`kAudioProcessPropertyIsRunningOutput` 只表示当前是否存在活跃输出流，不作为“应用是否存在”的判断。这样静音期间修改的 gain 会立刻写入 route，并在下一帧音频到来时生效。进程退出或 Process Object 消失时销毁对应 Tap；同 bundle ID 的新进程出现时重新绑定。
 
 初版只使用公开信息。Zoom、Teams、浏览器等实际发声可能来自 helper，因此允许加入版本化的公开 bundle ID 兼容映射。无法确认归属时，UI 显示独立的 helper 进程，不使用私有 LaunchServices API 猜测 responsible process。
 
@@ -189,23 +191,26 @@ AudioRouteEngine 负责每个目标输出设备的一组 Tap。实现放在 Obje
 
 每个 route 包含：
 
-- 一个私有 Aggregate Device；
-- 目标硬件输出设备作为 Aggregate 的 sub-device；
-- 该 route 的 Tap UID 列表；
-- 一个预分配的 IOProc 上下文和固定 source slot；
+- 每个 source 一个只包含单个 Process Tap 的私有 capture Aggregate Device；
+- 目标硬件输出设备上的独立 output IOProc，不把全双工设备的输入流加入 capture Aggregate；
+- capture 与 output 回调之间的预分配单生产者/单消费者 stereo ring buffer；
+- 固定 source slot；
 - 每个 source slot 的原子 gain、启用状态和峰值计数器。
 
-Aggregate 的 Tap 列表和 sub-device 列表只在控制队列上修改。Route 变更时，在非实时线程停止 IO、更新 composition、重新建立格式转换状态，再启动 IO。
+每个 Aggregate 的 Tap 列表只在控制队列上修改。单 Tap Aggregate 避免依赖公开 API 未承诺的多 Tap buffer 排序，也避免把耳机麦克风误当作 Tap 输入。Route 变更时，在非实时线程停止 output/capture IO、更新 composition，再重新启动。
 
 IOProc 约束：
 
 - 只使用预分配 buffer、原子数值、无锁 ring buffer 或 Core Audio 提供的当前 buffer；
 - 不使用 malloc/free、Objective-C 消息发送、Swift ARC、UserDefaults、Combine、OSLog 或阻塞锁；
-- 对每个输入 source 应用线性增益，按目标输出声道数复制/丢弃/映射；
+- capture 回调只写入对应 source 的预分配 ring buffer，output 回调读取各 source 并应用线性增益；
+- output 回调根据 ring occupancy 在有限范围内执行线性速率校正，吸收独立设备时钟的长期微小漂移；
 - 统一执行 Float32 峰值检测与 `[-1, 1]` 限制；
 - 用原子计数器记录 underrun、overrun、格式不匹配和削波，控制面异步读取这些计数器。
 
-格式处理必须在启动 route 前准备好。首版支持双声道 Float32；设备通道超过 2 时将 stereo 映射到前两个输出通道，其余通道置零。若 Tap 和目标设备的采样率不同，使用预配置的 AudioConverter/等价 Core Audio 转换路径；转换器不得在 IOProc 中首次创建。
+格式处理必须在启动 route 前完成。首版只支持与目标设备采样率一致的 interleaved Float32 双声道 Tap 和单输出流；其他格式会 fail closed，停止 capture 并恢复应用原始输出。后续扩展多声道或跨采样率设备时，应在控制面预配置 AudioConverter/等价转换路径，转换器不得在 IOProc 中首次创建。
+
+目标设备的 alive、stream list、nominal sample rate 和 output stream virtual format 发生变化时，控制面必须先停止 route，再重新验证格式并重建。IOProc 注销失败时保留上下文以避免悬空指针，向上层报告失败并阻止为同一进程重复创建 Tap；`coreaudiod` service restart 则按新服务世代显式丢弃上一代已失效的对象上下文。
 
 ### `AudioRoutingService`
 

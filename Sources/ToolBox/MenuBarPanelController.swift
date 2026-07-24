@@ -6,7 +6,7 @@ enum MenuBarPanelConfiguration {
 }
 
 final class MenuBarPanelController<Content: View>: NSObject {
-    private var panelSize: NSSize
+    private var preferredPanelSize: NSSize
     private let contentController: GlassPopoverViewController<Content>
     private let panel: MenuBarPanel
     private weak var anchorButton: NSStatusBarButton?
@@ -15,7 +15,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
     private var isClosing = false
 
     init(rootView: Content, panelSize: NSSize) {
-        self.panelSize = panelSize
+        self.preferredPanelSize = panelSize
         let contentController = GlassPopoverViewController(
             rootView: rootView,
             contentSize: panelSize,
@@ -66,9 +66,8 @@ final class MenuBarPanelController<Content: View>: NSObject {
     func show(relativeTo button: NSStatusBarButton) {
         anchorButton = button
         isClosing = false
-        applyPanelSize(panelSize, reanchorIfVisible: false)
+        applyPanelFrame(targetPanelFrame(relativeTo: button))
         panel.alphaValue = 1
-        panel.setFrameOrigin(panelOrigin(relativeTo: button))
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         panel.invalidateShadow()
@@ -85,31 +84,18 @@ final class MenuBarPanelController<Content: View>: NSObject {
     }
 
     func updatePanelSize(_ newSize: NSSize) {
-        guard newSize != panelSize else { return }
-        applyPanelSize(newSize, reanchorIfVisible: true)
+        guard newSize != preferredPanelSize else { return }
+        preferredPanelSize = newSize
+        guard isShown, let anchorButton else { return }
+        applyPanelFrame(targetPanelFrame(relativeTo: anchorButton))
     }
 
-    private func applyPanelSize(_ newSize: NSSize, reanchorIfVisible: Bool) {
-        let sizeChanged = newSize != panelSize
-        panelSize = newSize
-        contentController.updateContentSize(newSize)
-
-        if sizeChanged || panel.frame.size != newSize {
-            let origin: NSPoint
-            if reanchorIfVisible, isShown, let button = anchorButton {
-                origin = panelOrigin(relativeTo: button)
-            } else if panel.frame.size != .zero {
-                // Keep the top edge stable when the panel shrinks or grows.
-                let topY = panel.frame.maxY
-                origin = NSPoint(x: panel.frame.minX, y: topY - newSize.height)
-            } else {
-                origin = panel.frame.origin
-            }
-
-            panel.setFrame(NSRect(origin: origin, size: newSize), display: true)
-            panel.setContentSize(newSize)
-            panel.invalidateShadow()
-        }
+    private func applyPanelFrame(_ frame: NSRect) {
+        contentController.updateContentSize(frame.size)
+        guard panel.frame != frame else { return }
+        panel.setFrame(frame, display: true)
+        panel.setContentSize(frame.size)
+        panel.invalidateShadow()
     }
 
     private func startMonitoring() {
@@ -160,23 +146,17 @@ final class MenuBarPanelController<Content: View>: NSObject {
         close()
     }
 
-    private func panelOrigin(relativeTo button: NSStatusBarButton) -> NSPoint {
+    private func targetPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect {
         guard let buttonFrame = screenRect(for: button) else {
-            return NSPoint(x: 0, y: 0)
+            return NSRect(origin: panel.frame.origin, size: preferredPanelSize)
         }
 
         let visibleFrame = button.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
-        let margin: CGFloat = 10
-        let verticalOffset: CGFloat = 8
-
-        let proposedX = buttonFrame.midX - (panelSize.width / 2)
-        let maxX = max(visibleFrame.minX + margin, visibleFrame.maxX - panelSize.width - margin)
-        let originX = min(max(proposedX, visibleFrame.minX + margin), maxX)
-
-        let proposedY = buttonFrame.minY - panelSize.height - verticalOffset
-        let originY = max(visibleFrame.minY + margin, proposedY)
-
-        return NSPoint(x: originX, y: originY)
+        return MenuPanelLayout.panelFrame(
+            preferredSize: preferredPanelSize,
+            anchorFrame: buttonFrame,
+            visibleFrame: visibleFrame
+        )
     }
 
     private func screenRect(for button: NSStatusBarButton) -> NSRect? {

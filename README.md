@@ -12,7 +12,8 @@
 5. **后台干** — 防止系统睡眠（后台软件可继续运行），允许屏幕熄灭省电；接通电源时合盖也不睡。
    - 机制：`PreventUserIdleSystemSleep` 电源断言 + `caffeinate -s` 子进程（AC 电源下阻止合盖休眠）。
 6. **菜单交互** — 左键点击菜单栏图标弹出窗口，点击其他区域自动收起；右键点击菜单栏图标可直接打开面板、切换常用功能、进入“设置”或退出应用。硬件、线缆、显示器和工具区域采用无需纵向滚动的紧凑单窗口布局，弹窗使用真正裁切的圆角玻璃表面。
-7. **设置窗口** — “首页 / 线缆 / 显示器 / 通用”；显示器页含实时控制与定时亮度编辑，通用页可管理开机自启动与输入监控状态。
+7. **分应用音频** — macOS 14.2+ 使用公开 Core Audio Process Tap，为正在播放音频的应用设置 0%–300% 音量并选择输出设备；100% 为原始增益。超过 100% 可能削波失真。
+8. **设置窗口** — “首页 / 线缆 / 显示器 / 音频 / 通用”；音频页提供精确百分比滑杆、恢复 100% 和输出设备选择。
 
 ## 构建
 
@@ -57,6 +58,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
   - **两项权限都已开启仍失败时，请完全退出并重新打开 ToolBox**（macOS TCC 对当前进程有时需重启才生效）。
   - 调试构建路径/签名变化时，列表里可能出现多条 ToolBox，请只打开当前正在运行的那一项。
   - 请始终用 `./build.sh` 启动 Release 产物，避免误开旧的 Debug/其他路径副本。
+- **分应用音频**：首次启用非默认规则时需要允许 **系统音频录制**。拒绝权限或目标设备断开时，ToolBox 会停止路由并恢复应用原始输出路径。
 
 ## 目录结构
 
@@ -73,6 +75,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 | `Sources/ToolBox/CableData/*` | 线缆、USB-PD、数据传输和显示协议采集与快照模型 |
 | `Sources/ToolBox/DisplayControl/*` | 外接显示器硬件 DDC 控制接口、能力快照、菜单控制区、媒体键拦截和 Darwin 后端 |
 | `Sources/ToolBox/DisplayControl/Schedule/*` | 定时亮度领域模型、持久化、运行时协调与设置编辑 UI |
+| `Sources/ToolBox/AudioRouting/*` | 分应用规则、HAL 进程/设备注册表、Process Tap 路由引擎、实时 DSP 与两套 UI |
 | `Sources/ToolBox/Settings/*` | 设置窗口玻璃卡片等共享 UI 原语 |
 | `Sources/ToolBox/Permissions.swift` | 输入监控 / 辅助功能检测与引导 |
 | `Sources/ToolBox/HotKeyController.swift` | Carbon 全局热键（无需权限） |
@@ -86,11 +89,17 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 - **后台干合盖**：`caffeinate -s` 仅在 **AC 电源** 有效；电池下合盖仍可能睡眠。
 - **外接显示器 DDC**：Apple Silicon 路径依赖 macOS 私有 `IOAVService` / `CoreDisplay` 符号，系统版本变化时可能降级为不可用；部分显示器只能写入、不能可靠读取 VCP，此时菜单会显示 `DDC write-only`。应用会优先使用硬件实时读值；读值失败时，带序列号的显示器会恢复上次成功读取或写入的亮度百分比，没有可用记忆时才显示估算值。滑杆按显示器报告的 VCP 原始范围量化（例如 20 档对应 5% 步进），写入期间会保持用户目标值，不会被滞后的回读值拉回。部分显示器不支持音量或静音 VCP，会在菜单中显示为不可用。
 - **定时亮度**：应用未运行时不会改写显示器；无独立守护进程。计划写入为离散跳变（`smooth: false`），强制绕过 write-only 缓存去重。无序列号的显示器不做持久身份绑定。
+- **分应用音频**：仅控制输出，不改变 Zoom 等第三方应用的麦克风输入。每个应用使用独立的 Tap-only capture aggregate，耳机作为独立输出 sink，因此不会把全双工耳机的麦克风流混入播放。路由先启动物理输出，再启动带静音属性的 capture；正常停止时使用现有 10 ms source ramp 静音并等待 12 ms，再先停 capture，避免输出启动失败或退出时让原应用保持静音。路由只有在 capture 和 output 都实际处理 frame 后才显示为活动；无数据会显示“权限、受保护内容或当前无可捕获音频”。实时缓冲按设备 period/latency/safety offset 计算并限制在 `256...2048` frames；ring 满会记录丢帧，高水位时跳到近期音频，underrun 恢复使用淡入。300% 是线性 3.0 倍增益，写入硬件前会清理非有限值并限制到 `[-1, 1]`，仍可能产生可闻失真。
+- **应用与设备是独立概念**：Zoom 只是示例，ToolBox 不创建 `ZoomDevice` 或其他应用专用设备。输出设备列表来自 Core Audio 系统枚举；只要应用的 HAL Process Object 存在，音量调整会立即写入其 route，即使应用当时静音，也会在下一帧音频到来时使用新 gain。
+- **输出设备兼容预检**：设置页会在创建 Tap 前读取输出 stream 的虚拟格式和 nominal sample rate。当前只接受 alive、单 stream、native-endian packed interleaved Float32 stereo，且源/目标采样率误差不超过 `1000 ppm` 的设备；不兼容项会禁用并显示原因，这表示明确降级，不代表设备损坏。设备 alive/格式/采样率/profile 变化会刷新 generation 并重建引用该设备的路由。跨采样率转换、多声道与 non-interleaved layout 尚未启用。
 - 默认快捷键（`⌃⌥⌘+Esc`）若与系统或其它 App 冲突可在源码中修改。
 
 ## 验证
 
+完整自动验证可运行 `./scripts/verify-audio-routing-build.sh`；真机输出矩阵见 [`docs/testing/per-app-audio-acceptance.md`](docs/testing/per-app-audio-acceptance.md)。
+
 - **后台干**：开关 ON 后 `pmset -g assertions` 可见 `PreventUserIdleSystemSleep` 由 ToolBox 持有；`pgrep caffeinate` 命中 `caffeinate -s`；空闲过屏幕休眠计时→屏幕熄灭但系统不睡。
 - **外接显示器控制**：连接支持 DDC/VCP 的外接屏后，菜单中选择该屏幕，亮度 / 对比度 / 音量滑杆应可写回显示器；若显示 `DDC write-only`，设置一个非 100% 亮度后断开并重连，确认带序列号显示器恢复上次百分比且连续拖动不会频闪。媒体键在有可控外接屏时控制外接屏。
 - **定时亮度**：设置 → 显示器 → 开启「定时亮度」，确认当前时段写入所有可控外接屏；拖动滑杆后仅该屏被覆盖直至下个边界；改时段或重启应用后按当前本地时间重新应用。
+- **分应用音频**：让 Zoom 或播放器持续发声，在弹窗中调整到 300% 并在设置 → 音频选择另一输出设备；确认声音切换。退出 ToolBox、拔出目标设备及拒绝权限后，确认应用原始输出立即恢复。
 - **擦屏幕**：开关 ON→所有屏幕全黑 + 每屏同步倒计时；长按 `⌃⌥⌘+Esc` 收起；到 0 自动收起。

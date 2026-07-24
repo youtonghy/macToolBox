@@ -52,6 +52,9 @@ jobs:
       - name: Install XcodeGen
         run: brew install xcodegen
 
+      - name: Verify tests and audio routing build gates
+        run: ./scripts/verify-audio-routing-build.sh
+
       - name: Build app
         env:
           OPEN: "0"
