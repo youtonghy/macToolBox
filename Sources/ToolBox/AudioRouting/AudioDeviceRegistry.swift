@@ -78,6 +78,9 @@ final class AudioDeviceRegistry: ObservableObject {
     private var pendingServiceRestart = false
     private var pendingRouteChange = false
     private var partialReloadRetryCount = 0
+    private var physicalDeviceIdentity: [String: AudioObjectID]?
+
+    private static let privateCaptureDeviceUIDPrefix = "com.youtonghy.toolbox.capture."
 
     nonisolated static func project(
         records: [HALAudioDeviceRecord],
@@ -119,19 +122,26 @@ final class AudioDeviceRegistry: ObservableObject {
         return rememberedUIDs.union(defaultOutputUID.map { [$0] } ?? []).intersection(availableUIDs)
     }
 
+    nonisolated static func eventEffects(
+        for selectors: [AudioObjectPropertySelector]
+    ) -> (serviceRestarted: Bool, routeConfigurationChanged: Bool) {
+        (
+            serviceRestarted: selectors.contains(kAudioHardwarePropertyServiceRestarted),
+            routeConfigurationChanged: selectors.contains(kAudioHardwarePropertyDefaultOutputDevice)
+        )
+    }
+
     func start() {
         guard let registrationSessionID = session.start() else { return }
         let callback: AudioObjectPropertyListenerBlock = { [weak self] addressCount, addresses in
-            let serviceRestarted = UnsafeBufferPointer(
+            let effects = Self.eventEffects(for: UnsafeBufferPointer(
                 start: addresses, count: Int(addressCount)
-            ).contains {
-                $0.mSelector == kAudioHardwarePropertyServiceRestarted
-            }
+            ).map(\.mSelector))
             Task { @MainActor [weak self] in
                 self?.scheduleReload(
                     sessionID: registrationSessionID,
-                    serviceRestarted: serviceRestarted,
-                    routeChanged: false,
+                    serviceRestarted: effects.serviceRestarted,
+                    routeChanged: effects.routeConfigurationChanged,
                     resetRetryBudget: true
                 )
             }
@@ -172,13 +182,15 @@ final class AudioDeviceRegistry: ObservableObject {
         pendingServiceRestart = false
         pendingRouteChange = false
         partialReloadRetryCount = 0
+        physicalDeviceIdentity = nil
         removeRouteListeners()
         snapshot = []
         defaultOutputUID = nil
     }
 
-    func reload() {
-        guard session.isActive else { return }
+    @discardableResult
+    func reload(detectRouteChange: Bool = true) -> Bool {
+        guard session.isActive else { return false }
         do {
             let system = AudioObjectID(kAudioObjectSystemObject)
             let ids = try CoreAudioPropertyReader.objectIDs(objectID: system, selector: kAudioHardwarePropertyDevices)
@@ -247,15 +259,33 @@ final class AudioDeviceRegistry: ObservableObject {
             }
             replaceRouteListeners(deviceIDs: monitoredDeviceIDs)
             if result.failureCount == 0 {
+                let refreshedIdentity: [String: AudioObjectID] = Dictionary(
+                    uniqueKeysWithValues: result.objects.compactMap { object -> (String, AudioObjectID)? in
+                        guard object.value.hasOutput,
+                              !object.value.uid.hasPrefix(Self.privateCaptureDeviceUIDPrefix) else {
+                            return nil
+                        }
+                        return (object.value.uid, object.id)
+                    }
+                )
+                if detectRouteChange,
+                   let physicalDeviceIdentity,
+                   physicalDeviceIdentity != refreshedIdentity {
+                    routeGeneration += 1
+                }
+                physicalDeviceIdentity = refreshedIdentity
                 partialReloadRetryCount = 0
                 lastError = nil
+                return true
             } else {
                 lastError = "\(result.failureCount) 个输出设备在刷新时已失效，已跳过。"
                 schedulePartialReloadRetry()
+                return false
             }
         } catch {
             lastError = error.localizedDescription
             schedulePartialReloadRetry()
+            return false
         }
     }
 
@@ -343,9 +373,21 @@ final class AudioDeviceRegistry: ObservableObject {
             let shouldAdvanceRouteGeneration = self.pendingRouteChange
             self.pendingServiceRestart = false
             self.pendingRouteChange = false
-            if shouldAdvanceServiceGeneration { self.serviceGeneration += 1 }
-            self.reload()
-            if shouldAdvanceRouteGeneration { self.routeGeneration += 1 }
+            let routeGenerationBeforeReload = self.routeGeneration
+            let reloadSucceeded = self.reload(
+                detectRouteChange: !shouldAdvanceServiceGeneration
+            )
+            if reloadSucceeded {
+                if shouldAdvanceServiceGeneration { self.serviceGeneration += 1 }
+                if shouldAdvanceRouteGeneration,
+                   !shouldAdvanceServiceGeneration,
+                   self.routeGeneration == routeGenerationBeforeReload {
+                    self.routeGeneration += 1
+                }
+            } else {
+                self.pendingServiceRestart = self.pendingServiceRestart || shouldAdvanceServiceGeneration
+                self.pendingRouteChange = self.pendingRouteChange || shouldAdvanceRouteGeneration
+            }
         }
     }
 

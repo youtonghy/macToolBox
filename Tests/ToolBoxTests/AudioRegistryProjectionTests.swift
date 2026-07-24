@@ -1,3 +1,4 @@
+import CoreAudio
 import XCTest
 @testable import ToolBox
 
@@ -348,6 +349,21 @@ final class AudioRegistryProjectionTests: XCTestCase {
         XCTAssertEqual(device?.uid, "headset")
         XCTAssertEqual(device?.isAvailable, false)
         XCTAssertEqual(device?.isRoutable, false)
+    }
+
+    func testOnlySystemDefaultOutputEventDirectlyInvalidatesAudioRoutes() {
+        let defaultOutput = AudioDeviceRegistry.eventEffects(
+            for: [kAudioHardwarePropertyDefaultOutputDevice]
+        )
+        let deviceList = AudioDeviceRegistry.eventEffects(for: [kAudioHardwarePropertyDevices])
+        let serviceRestart = AudioDeviceRegistry.eventEffects(
+            for: [kAudioHardwarePropertyServiceRestarted]
+        )
+
+        XCTAssertTrue(defaultOutput.routeConfigurationChanged)
+        XCTAssertFalse(deviceList.routeConfigurationChanged)
+        XCTAssertFalse(serviceRestart.routeConfigurationChanged)
+        XCTAssertTrue(serviceRestart.serviceRestarted)
     }
 
     func testOnlyDefaultAndRuleReferencedDevicesReceiveRouteListeners() {

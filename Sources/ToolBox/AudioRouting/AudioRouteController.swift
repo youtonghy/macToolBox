@@ -448,6 +448,10 @@ final class NativeAudioRouteEngineController: AudioRouteNativeEngineControlling 
             }
             try update(parameters: retainedParameters)
         } catch {
+            guard !engine.hasPendingCleanup() else {
+                appliedPlansByID.removeAll()
+                throw AudioRouteControllerError.cleanupFailed
+            }
             var newRoutesStopped = true
             for routeID in startedRouteIDs {
                 newRoutesStopped = engine.stopRoute(withIdentifier: routeID) && newRoutesStopped

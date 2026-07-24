@@ -50,6 +50,86 @@ final class AudioRouteLifecycleTests: XCTestCase {
         XCTAssertFalse(classifier(kAudioHardwareUnspecifiedError))
     }
 
+    func testNotReadyRouteSetupErrorsUseABoundedRetryBudget() throws {
+        typealias Classifier = @convention(c) (OSStatus, UInt32) -> Bool
+        let shouldRetry: Classifier = try loadTestSymbol(
+            named: "TBAudioRouteSetupShouldRetry",
+            as: Classifier.self
+        )
+
+        XCTAssertFalse(shouldRetry(kAudioDeviceUnsupportedFormatError, 0))
+        XCTAssertTrue(shouldRetry(kAudioHardwareNotReadyError, 0))
+        XCTAssertTrue(shouldRetry(kAudioHardwareNotReadyError, 8))
+        XCTAssertFalse(shouldRetry(kAudioHardwareNotReadyError, 9))
+        XCTAssertFalse(shouldRetry(kAudioDevicePermissionsError, 0))
+        XCTAssertFalse(shouldRetry(kAudioHardwareBadDeviceError, 0))
+    }
+
+    func testTapDeviceSelectionPrefersTargetThenUnambiguousProcessDevice() throws {
+        typealias Selector = @convention(c) (
+            AudioObjectID,
+            UnsafePointer<AudioObjectID>?,
+            UInt32
+        ) -> AudioObjectID
+        let selectDevice: Selector = try loadTestSymbol(
+            named: "TBAudioSelectTapDevice",
+            as: Selector.self
+        )
+
+        var devices: [AudioObjectID] = [41, 42]
+        XCTAssertEqual(selectDevice(42, &devices, UInt32(devices.count)), 42)
+
+        devices = [41]
+        XCTAssertEqual(selectDevice(42, &devices, UInt32(devices.count)), 41)
+
+        devices = [41, 43]
+        XCTAssertEqual(
+            selectDevice(42, &devices, UInt32(devices.count)),
+            AudioObjectID(kAudioObjectUnknown)
+        )
+        XCTAssertEqual(selectDevice(42, nil, 0), AudioObjectID(kAudioObjectUnknown))
+    }
+
+    func testDefaultOutputSelectionWaitsForProcessDeviceMigration() throws {
+        typealias Classifier = @convention(c) (
+            AudioObjectID,
+            AudioObjectID,
+            UnsafePointer<AudioObjectID>?,
+            UInt32,
+            UInt32
+        ) -> Bool
+        let shouldWait: Classifier = try loadTestSymbol(
+            named: "TBAudioTapDeviceSelectionShouldWait",
+            as: Classifier.self
+        )
+
+        var oldDevice: AudioObjectID = 41
+        XCTAssertTrue(shouldWait(42, 42, &oldDevice, 1, 0))
+        XCTAssertFalse(shouldWait(42, 42, &oldDevice, 1, 9))
+        XCTAssertFalse(shouldWait(42, 99, &oldDevice, 1, 0))
+        XCTAssertFalse(shouldWait(42, 42, nil, 0, 0))
+
+        var targetDevice: AudioObjectID = 42
+        XCTAssertFalse(shouldWait(42, 42, &targetDevice, 1, 0))
+    }
+
+    func testDefaultOutputMigrationTimeoutBindsTheNewTargetDevice() throws {
+        typealias Selector = @convention(c) (
+            AudioObjectID,
+            AudioObjectID,
+            UnsafePointer<AudioObjectID>?,
+            UInt32
+        ) -> AudioObjectID
+        let selectDevice: Selector = try loadTestSymbol(
+            named: "TBAudioSelectTapDeviceAfterMigrationWait",
+            as: Selector.self
+        )
+
+        var oldDevice: AudioObjectID = 41
+        XCTAssertEqual(selectDevice(42, 42, &oldDevice, 1), 42)
+        XCTAssertEqual(selectDevice(42, 99, &oldDevice, 1), 41)
+    }
+
     @available(macOS 14.2, *)
     func testInvalidRouteArgumentsDoNotStopExistingRoute() {
         let engine = StopRecordingAudioRouteEngine()
@@ -63,6 +143,23 @@ final class AudioRouteLifecycleTests: XCTestCase {
             )
         )
         XCTAssertEqual(engine.stoppedRouteIdentifiers, [])
+    }
+
+    @available(macOS 14.2, *)
+    func testMissingOutputDeviceReportsResolutionStage() {
+        let engine = TBAudioRouteEngine()
+
+        XCTAssertThrowsError(
+            try engine.startRoute(
+                withIdentifier: "missing-output",
+                outputDeviceUID: "com.youtonghy.toolbox.tests.missing-output",
+                processObjectIDs: [1],
+                gains: [1]
+            )
+        ) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Resolve output device"))
+            XCTAssertFalse(error.localizedDescription.contains("Start audio route"))
+        }
     }
 
     @available(macOS 14.2, *)

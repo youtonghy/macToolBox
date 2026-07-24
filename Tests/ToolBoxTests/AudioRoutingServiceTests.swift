@@ -264,6 +264,25 @@ final class AudioRoutingServiceTests: XCTestCase {
         XCTAssertEqual(engine.stopAllCallCount, 1)
     }
 
+    @available(macOS 14.2, *)
+    func testNativeStartFailureWithPendingCleanupDoesNotAttemptRollback() throws {
+        let engine = CleanupPendingAudioRouteEngine()
+        let controller = NativeAudioRouteEngineController(engine: engine)
+
+        XCTAssertThrowsError(
+            try controller.reconcile(
+                changedPlans: [Self.plan(processObjectID: 42)],
+                removingRouteIDs: [],
+                retainedParameters: []
+            )
+        ) { error in
+            guard case AudioRouteControllerError.cleanupFailed = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+        XCTAssertEqual(engine.startCallCount, 1)
+    }
+
     @MainActor
     func testStaleRestartHandlerCannotUnlockCurrentSession() async throws {
         let suiteName = "test.audioRoutingService.restartOwnership.\(UUID().uuidString)"
@@ -1462,6 +1481,23 @@ private final class RollbackFailingAudioRouteEngine: TBAudioRouteEngine {
         stopAllCallCount += 1
         return true
     }
+}
+
+@available(macOS 14.2, *)
+private final class CleanupPendingAudioRouteEngine: TBAudioRouteEngine {
+    private(set) var startCallCount = 0
+
+    override func startRoute(
+        withIdentifier identifier: String,
+        outputDeviceUID: String,
+        processObjectIDs: [NSNumber],
+        gains: [NSNumber]
+    ) throws {
+        startCallCount += 1
+        throw TestError.applyFailed
+    }
+
+    override func hasPendingCleanup() -> Bool { true }
 }
 
 @MainActor

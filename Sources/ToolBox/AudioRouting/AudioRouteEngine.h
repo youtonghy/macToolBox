@@ -43,6 +43,7 @@ API_AVAILABLE(macos(14.2))
 - (BOOL)stopAllRoutes;
 - (NSArray<TBAudioRouteDiagnostics*>*)diagnostics;
 - (BOOL)performMaintenance;
+- (BOOL)hasPendingCleanup;
 - (void)resetAfterAudioServerRestart;
 
 @end

@@ -10,6 +10,8 @@
 
 脚本必须通过全量 XCTest、Debug/Release 构建、plist 检查、CoreAudio 链接检查、严格 codesign 校验和 `git diff --check`。自动化测试覆盖规则、route diff、单原子 callback lease 与固定 arena、generation retirement、部分 HAL 枚举失败、事件合并、alive/格式/采样率预检、实时 ring、gain ramp、非有限样本和诊断 watchdog。
 
+设备拓扑或默认输出变化后，路由重建必须重新读取 `kAudioProcessPropertyDevices`。当目标是系统默认输出但进程仍报告旧设备时，最多等待 225 ms 让输出设备迁移，超时后固定绑定新的默认设备；仅当源设备是单一、双声道且采样率兼容时，Process Tap 才绑定其 output stream，否则保留 stereo mixdown。`kAudioHardwareNotReadyError` 仅对无副作用的 HAL 查询和格式校验最多重试 10 次、每次间隔 25 ms，资源创建和设备启动不原地重试。启动失败必须包含具体阶段与 OSStatus/FourCC，不能统一折叠为 `Start audio route`；若失败启动留下待清理资源，后续 route 创建必须保持阻塞，直到清理完成。
+
 2026-07-22 本机基线（macOS 26.5.2、arm64）：全量 XCTest `151 passed / 0 failed / 0 skipped`；AudioRoute lifecycle/realtime/DSP 的 ASan 子集 `16 passed`；lifecycle/realtime 的 TSan 子集 `12 passed`。这些结果证明当前自动化边界，不替代下方设备和真实应用矩阵。
 
 Sanitizer 复核命令：

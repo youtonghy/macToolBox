@@ -44,9 +44,58 @@ extern "C" bool TBAudioObjectDestructionComplete(OSStatus status) {
         || status == kAudioHardwareBadDeviceError;
 }
 
+extern "C" bool TBAudioRouteSetupShouldRetry(OSStatus status, uint32_t attemptIndex) {
+    constexpr uint32_t kMaximumAttempts = 10;
+    return status == kAudioHardwareNotReadyError && attemptIndex + 1 < kMaximumAttempts;
+}
+
+extern "C" AudioObjectID TBAudioSelectTapDevice(
+    AudioObjectID targetDeviceID,
+    const AudioObjectID* processDeviceIDs,
+    uint32_t processDeviceCount
+) {
+    if (processDeviceIDs == nullptr || processDeviceCount == 0) return kAudioObjectUnknown;
+    for (uint32_t index = 0; index < processDeviceCount; ++index) {
+        if (processDeviceIDs[index] == targetDeviceID) return targetDeviceID;
+    }
+    return processDeviceCount == 1 ? processDeviceIDs[0] : kAudioObjectUnknown;
+}
+
+extern "C" AudioObjectID TBAudioSelectTapDeviceAfterMigrationWait(
+    AudioObjectID targetDeviceID,
+    AudioObjectID defaultOutputDeviceID,
+    const AudioObjectID* processDeviceIDs,
+    uint32_t processDeviceCount
+) {
+    if (targetDeviceID == defaultOutputDeviceID) return targetDeviceID;
+    return TBAudioSelectTapDevice(
+        targetDeviceID, processDeviceIDs, processDeviceCount
+    );
+}
+
+extern "C" bool TBAudioTapDeviceSelectionShouldWait(
+    AudioObjectID targetDeviceID,
+    AudioObjectID defaultOutputDeviceID,
+    const AudioObjectID* processDeviceIDs,
+    uint32_t processDeviceCount,
+    uint32_t attemptIndex
+) {
+    constexpr uint32_t kMaximumAttempts = 10;
+    if (attemptIndex + 1 >= kMaximumAttempts
+        || targetDeviceID != defaultOutputDeviceID
+        || processDeviceIDs == nullptr
+        || processDeviceCount == 0) {
+        return false;
+    }
+    return std::find(
+        processDeviceIDs, processDeviceIDs + processDeviceCount, targetDeviceID
+    ) == processDeviceIDs + processDeviceCount;
+}
+
 namespace {
 constexpr NSUInteger kMaximumSources = 32;
 constexpr uint32_t kRingCapacityFrames = 1 << 16;
+constexpr auto kRouteSetupRetryDelay = std::chrono::milliseconds(25);
 
 struct SourceContext {
     SourceContext(uint32_t targetFrames, uint32_t gainRampFrames)
@@ -99,10 +148,34 @@ uint64_t HostTime(const AudioTimeStamp* timeStamp) noexcept {
 }
 
 NSError* RouteError(OSStatus status, NSString* operation) {
+    const uint32_t code = static_cast<uint32_t>(status);
+    const char characters[] = {
+        static_cast<char>((code >> 24) & 0xFF),
+        static_cast<char>((code >> 16) & 0xFF),
+        static_cast<char>((code >> 8) & 0xFF),
+        static_cast<char>(code & 0xFF),
+        '\0'
+    };
+    const bool printable = std::all_of(
+        std::begin(characters), std::end(characters) - 1,
+        [](char value) { return value >= 0x20 && value <= 0x7E; }
+    );
+    NSString* statusDescription = printable
+        ? [NSString stringWithFormat:@"OSStatus %d / '%s'", status, characters]
+        : [NSString stringWithFormat:@"OSStatus %d", status];
     return [NSError errorWithDomain:@"com.youtonghy.toolbox.audio-routing"
                                code:status
                            userInfo:@{NSLocalizedDescriptionKey:
-                                          [NSString stringWithFormat:@"%@ failed (OSStatus %d).", operation, status]}];
+                                          [NSString stringWithFormat:@"%@ failed (%@).", operation, statusDescription]}];
+}
+
+template <typename Operation>
+OSStatus PerformRouteSetupOperation(Operation&& operation) {
+    for (uint32_t attemptIndex = 0;; ++attemptIndex) {
+        const OSStatus status = operation();
+        if (status == noErr || !TBAudioRouteSetupShouldRetry(status, attemptIndex)) return status;
+        std::this_thread::sleep_for(kRouteSetupRetryDelay);
+    }
 }
 
 OSStatus DeviceIDForUID(NSString* uid, AudioObjectID& deviceID) {
@@ -117,6 +190,58 @@ OSStatus DeviceIDForUID(NSString* uid, AudioObjectID& deviceID) {
     return AudioObjectGetPropertyData(
         kAudioObjectSystemObject, &address, sizeof(qualifier), &qualifier, &size, &deviceID
     );
+}
+
+OSStatus GetDefaultOutputDeviceID(AudioObjectID& deviceID) {
+    AudioObjectPropertyAddress address = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 size = sizeof(deviceID);
+    deviceID = kAudioObjectUnknown;
+    return AudioObjectGetPropertyData(
+        kAudioObjectSystemObject, &address, 0, nullptr, &size, &deviceID
+    );
+}
+
+OSStatus DeviceUIDForID(AudioObjectID deviceID, NSString* __strong& uid) {
+    AudioObjectPropertyAddress address = {
+        kAudioDevicePropertyDeviceUID,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain
+    };
+    CFStringRef value = nullptr;
+    UInt32 size = sizeof(value);
+    const OSStatus status = AudioObjectGetPropertyData(
+        deviceID, &address, 0, nullptr, &size, &value
+    );
+    if (status != noErr) return status;
+    uid = CFBridgingRelease(value);
+    return uid != nil ? noErr : kAudioHardwareBadDeviceError;
+}
+
+OSStatus GetProcessOutputDevices(
+    AudioObjectID processObjectID,
+    std::vector<AudioObjectID>& deviceIDs
+) {
+    AudioObjectPropertyAddress address = {
+        kAudioProcessPropertyDevices,
+        kAudioObjectPropertyScopeOutput,
+        kAudioObjectPropertyElementMain
+    };
+    UInt32 size = 0;
+    OSStatus status = AudioObjectGetPropertyDataSize(
+        processObjectID, &address, 0, nullptr, &size
+    );
+    if (status != noErr) return status;
+    deviceIDs.resize(size / sizeof(AudioObjectID));
+    if (deviceIDs.empty()) return noErr;
+    status = AudioObjectGetPropertyData(
+        processObjectID, &address, 0, nullptr, &size, deviceIDs.data()
+    );
+    if (status == noErr) deviceIDs.resize(size / sizeof(AudioObjectID));
+    return status;
 }
 
 uint32_t GetDeviceUInt32Property(
@@ -518,10 +643,24 @@ bool StopRoute(RouteContext* route) {
     }
 
     auto route = std::make_unique<RouteContext>();
-    OSStatus status = DeviceIDForUID(outputDeviceUID, route->outputDeviceID);
+    NSString* failedOperation = @"Resolve output device";
+    OSStatus status = PerformRouteSetupOperation([&] {
+        return DeviceIDForUID(outputDeviceUID, route->outputDeviceID);
+    });
     Float64 outputSampleRate = 0;
     if (status == noErr && route->outputDeviceID == kAudioObjectUnknown) status = kAudioHardwareBadDeviceError;
-    if (status == noErr) status = ValidateOutputDevice(route->outputDeviceID, outputSampleRate);
+    AudioObjectID defaultOutputDeviceID = kAudioObjectUnknown;
+    if (status == noErr) {
+        (void)PerformRouteSetupOperation([&] {
+            return GetDefaultOutputDeviceID(defaultOutputDeviceID);
+        });
+    }
+    if (status == noErr) {
+        failedOperation = @"Validate output device format";
+        status = PerformRouteSetupOperation([&] {
+            return ValidateOutputDevice(route->outputDeviceID, outputSampleRate);
+        });
+    }
     route->sources.reserve(processObjectIDs.count);
 
     for (NSUInteger index = 0; status == noErr && index < processObjectIDs.count; ++index) {
@@ -541,29 +680,92 @@ bool StopRoute(RouteContext* route) {
         auto source = std::make_unique<SourceContext>(targetFrames, gainRampFrames);
         source->callbackLease = TBAudioCallbackLease::CreatePermanent(source.get());
         if (source->callbackLease == nullptr) {
+            failedOperation = [NSString stringWithFormat:@"Allocate source %lu callback lease", static_cast<unsigned long>(index)];
             status = kAudioHardwareUnspecifiedError;
             route->sources.push_back(std::move(source));
             break;
         }
-        CATapDescription* description = [[CATapDescription alloc] initStereoMixdownOfProcesses:@[processObjectIDs[index]]];
-        description.name = [NSString stringWithFormat:@"ToolBox %@ %lu", identifier, static_cast<unsigned long>(index)];
-        description.privateTap = YES;
-        description.muteBehavior = CATapMutedWhenTapped;
-        if (@available(macOS 26.0, *)) {
-            NSString* restoreKey = @"processRestoreEnabled";
-            if ([description respondsToSelector:NSSelectorFromString(restoreKey)]) {
-                [description setValue:@YES forKey:restoreKey];
+        const AudioObjectID processObjectID = processObjectIDs[index].unsignedIntValue;
+        std::vector<AudioObjectID> processDeviceIDs;
+        failedOperation = [NSString stringWithFormat:@"Resolve source %lu output device", static_cast<unsigned long>(index)];
+        status = PerformRouteSetupOperation([&] {
+            return GetProcessOutputDevices(processObjectID, processDeviceIDs);
+        });
+        for (uint32_t attemptIndex = 0;
+             status == noErr && TBAudioTapDeviceSelectionShouldWait(
+                 route->outputDeviceID,
+                 defaultOutputDeviceID,
+                 processDeviceIDs.empty() ? nullptr : processDeviceIDs.data(),
+                 static_cast<uint32_t>(processDeviceIDs.size()),
+                 attemptIndex
+             );
+             ++attemptIndex) {
+            std::this_thread::sleep_for(kRouteSetupRetryDelay);
+            status = PerformRouteSetupOperation([&] {
+                return GetProcessOutputDevices(processObjectID, processDeviceIDs);
+            });
+        }
+
+        NSString* tapDeviceUID = nil;
+        if (status == noErr) {
+            const AudioObjectID tapDeviceID = TBAudioSelectTapDeviceAfterMigrationWait(
+                route->outputDeviceID,
+                defaultOutputDeviceID,
+                processDeviceIDs.empty() ? nullptr : processDeviceIDs.data(),
+                static_cast<uint32_t>(processDeviceIDs.size())
+            );
+            if (tapDeviceID != kAudioObjectUnknown) {
+                Float64 tapSampleRate = 0;
+                const OSStatus tapFormatStatus = PerformRouteSetupOperation([&] {
+                    return ValidateOutputDevice(tapDeviceID, tapSampleRate);
+                });
+                if (tapFormatStatus == noErr
+                    && TBAudioSampleRatesCompatible(tapSampleRate, outputSampleRate)) {
+                    failedOperation = [NSString stringWithFormat:@"Resolve source %lu stream UID", static_cast<unsigned long>(index)];
+                    status = PerformRouteSetupOperation([&] {
+                        return DeviceUIDForID(tapDeviceID, tapDeviceUID);
+                    });
+                }
             }
         }
 
-        status = AudioHardwareCreateProcessTap(description, &source->tapID);
+        CATapDescription* description = nil;
+        if (status == noErr && tapDeviceUID != nil) {
+            description = [[CATapDescription alloc]
+                initWithProcesses:@[processObjectIDs[index]]
+                andDeviceUID:tapDeviceUID
+                withStream:0];
+        } else if (status == noErr) {
+            description = [[CATapDescription alloc]
+                initStereoMixdownOfProcesses:@[processObjectIDs[index]]];
+        }
+        if (status == noErr && description == nil) {
+            failedOperation = [NSString stringWithFormat:@"Describe source %lu process tap", static_cast<unsigned long>(index)];
+            status = kAudioHardwareUnspecifiedError;
+        }
+        if (description != nil) {
+            description.name = [NSString stringWithFormat:@"ToolBox %@ %lu", identifier, static_cast<unsigned long>(index)];
+            description.privateTap = YES;
+            description.muteBehavior = CATapMutedWhenTapped;
+            if (@available(macOS 26.0, *)) {
+                NSString* restoreKey = @"processRestoreEnabled";
+                if ([description respondsToSelector:NSSelectorFromString(restoreKey)]) {
+                    [description setValue:@YES forKey:restoreKey];
+                }
+            }
+        }
+
+        if (status == noErr) {
+            failedOperation = [NSString stringWithFormat:@"Create source %lu process tap", static_cast<unsigned long>(index)];
+            status = AudioHardwareCreateProcessTap(description, &source->tapID);
+        }
         // Private capture aggregate: attach the process tap at create time and pin the
         // destination device as clock only. Do NOT add the physical device as a subdevice
         // here — multiple sources may share one output, and claiming it would collide.
         // (Previously taps were set post-create as bare UUID strings; the property expects
         // CFArray<CFDictionary>, so capture often produced zero frames and gain was a no-op.)
         NSString* aggregateUID = [NSString stringWithFormat:@"com.youtonghy.toolbox.capture.%@", NSUUID.UUID.UUIDString];
-        NSString* tapUID = description.UUID.UUIDString;
+        NSString* tapUID = description.UUID.UUIDString ?: @"";
         NSDictionary* tapEntry = @{
             [NSString stringWithUTF8String:kAudioSubTapUIDKey]: tapUID,
             [NSString stringWithUTF8String:kAudioSubTapDriftCompensationKey]: @YES
@@ -580,10 +782,19 @@ bool StopRoute(RouteContext* route) {
             composition[[NSString stringWithUTF8String:kAudioAggregateDeviceClockDeviceKey]] = outputDeviceUID;
         }
         if (status == noErr) {
-            status = AudioHardwareCreateAggregateDevice((__bridge CFDictionaryRef)composition, &source->aggregateID);
+            failedOperation = [NSString stringWithFormat:@"Create source %lu capture aggregate", static_cast<unsigned long>(index)];
+            status = AudioHardwareCreateAggregateDevice(
+                (__bridge CFDictionaryRef)composition, &source->aggregateID
+            );
         }
-        if (status == noErr) status = ValidateCaptureDevice(source->aggregateID, outputSampleRate);
         if (status == noErr) {
+            failedOperation = [NSString stringWithFormat:@"Validate source %lu capture format", static_cast<unsigned long>(index)];
+            status = PerformRouteSetupOperation([&] {
+                return ValidateCaptureDevice(source->aggregateID, outputSampleRate);
+            });
+        }
+        if (status == noErr) {
+            failedOperation = [NSString stringWithFormat:@"Create source %lu capture IOProc", static_cast<unsigned long>(index)];
             status = AudioDeviceCreateIOProcID(
                 source->aggregateID, CaptureIOProc, source->callbackLease, &source->captureIOProcID
             );
@@ -595,22 +806,29 @@ bool StopRoute(RouteContext* route) {
     if (status == noErr) {
         route->callbackLease = TBAudioCallbackLease::CreatePermanent(route.get());
         if (route->callbackLease == nullptr) {
+            failedOperation = @"Allocate output callback lease";
             status = kAudioHardwareUnspecifiedError;
         } else {
+            failedOperation = @"Create output IOProc";
             status = AudioDeviceCreateIOProcID(
                 route->outputDeviceID, OutputIOProc, route->callbackLease, &route->outputIOProcID
             );
         }
     }
-    if (status == noErr) status = AudioDeviceStart(route->outputDeviceID, route->outputIOProcID);
-    for (auto& source : route->sources) {
-        if (status == noErr) status = AudioDeviceStart(source->aggregateID, source->captureIOProcID);
+    if (status == noErr) {
+        failedOperation = @"Start output device";
+        status = AudioDeviceStart(route->outputDeviceID, route->outputIOProcID);
+    }
+    for (NSUInteger index = 0; index < route->sources.size() && status == noErr; ++index) {
+        auto& source = route->sources[index];
+        failedOperation = [NSString stringWithFormat:@"Start source %lu capture", static_cast<unsigned long>(index)];
+        status = AudioDeviceStart(source->aggregateID, source->captureIOProcID);
     }
 
     if (status != noErr) {
         RouteContext* failed = route.release();
         if (StopRoute(failed)) [self retireRoute:failed]; else [self quarantineRoute:failed];
-        if (error) *error = RouteError(status, @"Start audio route");
+        if (error) *error = RouteError(status, failedOperation);
         return NO;
     }
 
@@ -709,6 +927,10 @@ bool StopRoute(RouteContext* route) {
     return self.retiredRoutes.count > 0
         || self.quarantinedRoutes.count > 0
         || self.abandonedAfterAudioServerRestart.count > 0;
+}
+
+- (BOOL)hasPendingCleanup {
+    return self.quarantinedRoutes.count > 0;
 }
 
 - (void)resetAfterAudioServerRestart {
