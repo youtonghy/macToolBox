@@ -184,13 +184,19 @@ private struct AudioProcessActivityListenerKey: Hashable {
 
 @MainActor
 final class AudioProcessRegistry: ObservableObject {
+    nonisolated static let processListSettleDelay: Duration = .seconds(5)
+
     @Published private(set) var snapshot: [AudioProcessSnapshot] = []
     @Published private(set) var lastError: String?
 
     private var listListener: AudioObjectPropertyListenerBlock?
     private var activityListeners: [AudioProcessActivityListenerKey: AudioObjectPropertyListenerBlock] = [:]
     private var listAddress = CoreAudioPropertyReader.address(kAudioHardwarePropertyProcessObjectList)
-    private let reloadCoalescer = AudioRegistryEventCoalescer(delay: .milliseconds(40))
+    // HAL publishes process-list changes before new clients always finish registering.
+    // Avoid synchronous enumeration while WebKit GPU/audio clients are still initializing.
+    private let reloadCoalescer = AudioRegistryEventCoalescer(
+        delay: AudioProcessRegistry.processListSettleDelay
+    )
     private let displayNameCache = AudioProcessDisplayNameCache()
     private var partialReloadRetryCount = 0
     private var started = false

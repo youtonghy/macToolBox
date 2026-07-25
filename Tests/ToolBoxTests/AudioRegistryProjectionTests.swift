@@ -3,6 +3,10 @@ import XCTest
 @testable import ToolBox
 
 final class AudioRegistryProjectionTests: XCTestCase {
+    func testProcessRegistryWaitsForNewHALProcessesToSettle() {
+        XCTAssertEqual(AudioProcessRegistry.processListSettleDelay, .seconds(5))
+    }
+
     @MainActor
     func testAppIconResolverReusesRenderedImage() {
         let first = AppIconResolver.icon(for: "com.example.missing-app", pointSize: 24)
