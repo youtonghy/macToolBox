@@ -68,7 +68,7 @@ struct DisplayControlPanel: View {
                 Text(item.title)
                     .frame(width: 66, alignment: .leading)
 
-                Slider(value: binding(for: kind), in: 0...1, step: item.step)
+                ScrollWheelSlider(value: binding(for: kind), in: 0...1, step: item.step)
                     .disabled(!item.isEnabled)
 
                 Text(item.percentText)

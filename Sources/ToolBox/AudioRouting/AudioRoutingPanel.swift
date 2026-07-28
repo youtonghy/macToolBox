@@ -31,7 +31,7 @@ struct AudioRoutingPanel: View {
             .accessibilityLabel("\(row.name)，恢复 100%")
             .accessibilityHint(statusDescription(for: row.state))
 
-            Slider(
+            ScrollWheelSlider(
                 value: Binding(
                     get: { Double(row.volumePercent) },
                     set: { service.setVolume(bundleID: row.bundleID, percent: Int($0.rounded())) }

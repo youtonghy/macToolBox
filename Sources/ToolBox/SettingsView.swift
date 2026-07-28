@@ -535,7 +535,7 @@ private struct SettingsDisplayView: View {
                         .monospacedDigit()
                 }
 
-                Slider(
+                ScrollWheelSlider(
                     value: binding(for: item.kind),
                     in: 0...1,
                     step: max(item.step, 0.01)

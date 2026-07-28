@@ -161,7 +161,7 @@ struct BrightnessScheduleSettingsView: View {
                         Text("亮度")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(.secondary)
-                        Slider(
+                        ScrollWheelSlider(
                             value: Binding(
                                 get: { Double(segment?.brightnessPercent ?? interval.brightnessPercent) },
                                 set: { updateSegment(id: interval.id, start: date(from: interval.startMinute), brightness: Int($0.rounded())) }
@@ -215,7 +215,7 @@ struct BrightnessScheduleSettingsView: View {
                 Text("亮度")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(.secondary)
-                Slider(value: Binding(
+                ScrollWheelSlider(value: Binding(
                     get: { Double(draftBrightness) },
                     set: { draftBrightness = Int($0.rounded()) }
                 ), in: 0...100, step: 1)

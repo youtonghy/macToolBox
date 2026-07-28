@@ -37,7 +37,7 @@ struct AudioRoutingSettingsView: View {
                                 Image(systemName: "speaker.wave.1.fill")
                                     .foregroundStyle(.secondary)
                                     .accessibilityHidden(true)
-                                Slider(
+                                ScrollWheelSlider(
                                     value: Binding(
                                         get: { Double(row.volumePercent) },
                                         set: { service.setVolume(bundleID: row.bundleID, percent: Int($0.rounded())) }
