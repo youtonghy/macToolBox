@@ -1,6 +1,7 @@
 #include "AudioRouteRealtimeKernel.hpp"
 
 #include "AudioRouteDSP.hpp"
+#include "AudioRouteFormat.hpp"
 #include "AudioRouteRealtime.hpp"
 
 #include <AudioToolbox/AudioFormat.h>
@@ -125,7 +126,9 @@ TBAudioRealtimeKernelRef TBAudioRealtimeKernelCreate(
     }
     for (uint32_t index = 0; index < sourceCount; ++index) {
         if (!IsPackedFloat32Stereo(sourceFormats[index])
-            || sourceFormats[index].sampleRate != outputFormat.sampleRate) {
+            || !TBAudioSampleRatesCompatible(
+                sourceFormats[index].sampleRate, outputFormat.sampleRate
+            )) {
             return nullptr;
         }
     }

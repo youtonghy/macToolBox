@@ -3,6 +3,29 @@ import XCTest
 @testable import ToolBox
 
 final class AudioRouteRealtimeTests: XCTestCase {
+    private enum KernelCreationError: Error {
+        case rejectedFormat
+    }
+
+    func testKernelAcceptsOnlyTheExistingClockDriftBudget() throws {
+        let compatible = try makeKernel(
+            generation: 7,
+            sourceCount: 1,
+            sourceSampleRate: 47_952,
+            outputSampleRate: 48_000
+        )
+        TBAudioRealtimeKernelDestroy(compatible)
+
+        XCTAssertThrowsError(
+            try makeKernel(
+                generation: 7,
+                sourceCount: 1,
+                sourceSampleRate: 47_951,
+                outputSampleRate: 48_000
+            )
+        )
+    }
+
     func testStaleGenerationCaptureIsRejected() throws {
         let kernel = try makeKernel(generation: 7, sourceCount: 1)
         defer { TBAudioRealtimeKernelDestroy(kernel) }
@@ -424,29 +447,42 @@ final class AudioRouteRealtimeTests: XCTestCase {
 
     private func makeKernel(
         generation: UInt64,
-        sourceCount: UInt32
+        sourceCount: UInt32,
+        sourceSampleRate: Double = 48_000,
+        outputSampleRate: Double = 48_000
     ) throws -> OpaquePointer {
-        let format = TBAudioRealtimeFormat(
-            sampleRate: 48_000,
+        let sourceFormat = TBAudioRealtimeFormat(
+            sampleRate: sourceSampleRate,
             formatID: kAudioFormatLinearPCM,
             formatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
             bytesPerFrame: 8,
             channelsPerFrame: 2,
             bitsPerChannel: 32
         )
-        let formats = [TBAudioRealtimeFormat](repeating: format, count: Int(sourceCount))
+        let outputFormat = TBAudioRealtimeFormat(
+            sampleRate: outputSampleRate,
+            formatID: kAudioFormatLinearPCM,
+            formatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            bytesPerFrame: 8,
+            channelsPerFrame: 2,
+            bitsPerChannel: 32
+        )
+        let formats = [TBAudioRealtimeFormat](
+            repeating: sourceFormat, count: Int(sourceCount)
+        )
         return try formats.withUnsafeBufferPointer { pointer in
-            try XCTUnwrap(
-                TBAudioRealtimeKernelCreate(
-                    generation,
-                    pointer.baseAddress!,
-                    sourceCount,
-                    format,
-                    4,
-                    32,
-                    1
-                )
-            )
+            guard let kernel = TBAudioRealtimeKernelCreate(
+                generation,
+                pointer.baseAddress!,
+                sourceCount,
+                outputFormat,
+                4,
+                32,
+                1
+            ) else {
+                throw KernelCreationError.rejectedFormat
+            }
+            return kernel
         }
     }
 
