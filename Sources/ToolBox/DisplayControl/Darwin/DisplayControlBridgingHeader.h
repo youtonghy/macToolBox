@@ -5,6 +5,7 @@
 #import "../../AudioRouting/AudioRouteCallbackLease.hpp"
 #import "../../AudioRouting/AudioRouteFormat.hpp"
 #import "../../AudioRouting/AudioRouteRealtime.hpp"
+#import "../../AudioRouting/AudioRouteRealtimeKernel.h"
 #import "../../AudioRouting/AudioRouteEngine.h"
 
 typedef CFTypeRef IOAVService;

@@ -12,6 +12,12 @@ public:
 
     void Write(const float* source, uint32_t frameCount) noexcept;
     void Mix(float* destination, uint32_t frameCount, float targetGain) noexcept;
+    void MixWithRamp(
+        float* destination,
+        uint32_t frameCount,
+        float targetGain,
+        uint32_t rampFrames
+    ) noexcept;
 
     uint64_t OccupancyFrames() const noexcept;
     uint64_t HighWaterFrames() const noexcept;

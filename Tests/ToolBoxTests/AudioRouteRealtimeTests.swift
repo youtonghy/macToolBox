@@ -1,7 +1,150 @@
+import CoreAudio
 import XCTest
 @testable import ToolBox
 
 final class AudioRouteRealtimeTests: XCTestCase {
+    func testStaleGenerationCaptureIsRejected() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        XCTAssertFalse(pushStereo(kernel, generation: 6, source: 0, value: 1))
+        XCTAssertEqual(
+            renderStereo(kernel, generation: 7, frames: 4),
+            [Float](repeating: 0, count: 8)
+        )
+    }
+
+    func testStaleGenerationOutputIsRejectedAndZeroed() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        XCTAssertTrue(pushStereo(kernel, generation: 7, source: 0, value: 0.75))
+        XCTAssertEqual(
+            renderStereo(kernel, generation: 6, frames: 4, expectedSuccess: false),
+            [Float](repeating: 0, count: 8)
+        )
+    }
+
+    func testMutingOneSourceKeepsSiblingAudible() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 2)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        XCTAssertTrue(pushStereo(kernel, generation: 7, source: 0, value: 0.25))
+        XCTAssertTrue(pushStereo(kernel, generation: 7, source: 1, value: 0.50))
+        TBAudioRealtimeKernelBeginSourceMute(kernel, 0, 0)
+
+        XCTAssertEqual(
+            renderStereo(kernel, generation: 7, frames: 4),
+            [Float](repeating: 0.50, count: 8)
+        )
+    }
+
+    func testZeroFrameCallbacksAreAcceptedAsNoOp() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        var inputSample: Float = 1
+        withUnsafePointer(to: &inputSample) { pointer in
+            var input = TBAudioRealtimeInputView(
+                buffers: (UnsafeRawPointer(pointer), nil, nil, nil, nil, nil, nil, nil),
+                byteSizes: (0, 0, 0, 0, 0, 0, 0, 0),
+                bufferCount: 1,
+                frameCount: 0
+            )
+            XCTAssertTrue(TBAudioRealtimeKernelPushCapture(kernel, 7, 0, &input))
+        }
+
+        var outputSample: Float = -1
+        withUnsafeMutablePointer(to: &outputSample) { pointer in
+            var output = TBAudioRealtimeOutputView(
+                buffers: (UnsafeMutableRawPointer(pointer), nil, nil, nil, nil, nil, nil, nil),
+                byteSizes: (0, 0, 0, 0, 0, 0, 0, 0),
+                bufferCount: 1,
+                frameCount: 0
+            )
+            XCTAssertTrue(TBAudioRealtimeKernelRenderOutput(kernel, 7, &output))
+        }
+        XCTAssertEqual(outputSample, -1)
+    }
+
+    func testDetachedKernelRejectsLateCallbacksAndZeroesOutput() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        XCTAssertTrue(pushStereo(kernel, generation: 7, source: 0, value: 0.75))
+        TBAudioRealtimeKernelDetach(kernel)
+
+        XCTAssertFalse(pushStereo(kernel, generation: 7, source: 0, value: 1))
+        XCTAssertEqual(
+            renderStereo(kernel, generation: 7, frames: 4, expectedSuccess: false),
+            [Float](repeating: 0, count: 8)
+        )
+        XCTAssertEqual(try snapshot(kernel).rejectedGenerationCount, 2)
+    }
+
+    func testMalformedCaptureIsIsolatedAndCounted() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        var sample: Float = 1
+        withUnsafePointer(to: &sample) { pointer in
+            var input = TBAudioRealtimeInputView(
+                buffers: (UnsafeRawPointer(pointer), nil, nil, nil, nil, nil, nil, nil),
+                byteSizes: (4, 0, 0, 0, 0, 0, 0, 0),
+                bufferCount: 1,
+                frameCount: 4
+            )
+            XCTAssertFalse(TBAudioRealtimeKernelPushCapture(kernel, 7, 0, &input))
+        }
+
+        let value = try snapshot(kernel)
+        XCTAssertEqual(value.formatMismatchCount, 1)
+        XCTAssertEqual(value.sourceFatalCount, 1)
+    }
+
+    func testMalformedOutputBuffersAreZeroedAndCounted() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        var left = [Float](repeating: 1, count: 4)
+        var right = [Float](repeating: 1, count: 4)
+        left.withUnsafeMutableBytes { leftBytes in
+            right.withUnsafeMutableBytes { rightBytes in
+                var output = TBAudioRealtimeOutputView(
+                    buffers: (
+                        leftBytes.baseAddress, rightBytes.baseAddress,
+                        nil, nil, nil, nil, nil, nil
+                    ),
+                    byteSizes: (
+                        UInt32(leftBytes.count), UInt32(rightBytes.count),
+                        0, 0, 0, 0, 0, 0
+                    ),
+                    bufferCount: 2,
+                    frameCount: 4
+                )
+                XCTAssertFalse(TBAudioRealtimeKernelRenderOutput(kernel, 7, &output))
+            }
+        }
+
+        XCTAssertEqual(left, [Float](repeating: 0, count: 4))
+        XCTAssertEqual(right, [Float](repeating: 0, count: 4))
+        XCTAssertEqual(try snapshot(kernel).formatMismatchCount, 1)
+    }
+
+    func testSnapshotReportsAcceptedCallbackAndFrameCounts() throws {
+        let kernel = try makeKernel(generation: 7, sourceCount: 1)
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+
+        XCTAssertTrue(pushStereo(kernel, generation: 7, source: 0, value: 0.25))
+        _ = renderStereo(kernel, generation: 7, frames: 4)
+
+        let value = try snapshot(kernel)
+        XCTAssertEqual(value.captureCallbackCount, 1)
+        XCTAssertEqual(value.captureFrameCount, 4)
+        XCTAssertEqual(value.outputCallbackCount, 1)
+        XCTAssertEqual(value.outputFrameCount, 4)
+    }
+
     func testTargetLatencyIsBoundedByCallbackPeriods() {
         XCTAssertEqual(TBAudioRecommendedTargetFrames(128, 0, 0), 256)
         XCTAssertEqual(TBAudioRecommendedTargetFrames(512, 64, 32), 1120)
@@ -277,5 +420,84 @@ final class AudioRouteRealtimeTests: XCTestCase {
             XCTAssertEqual(output, [Float](repeating: 0, count: 8))
             XCTAssertTrue(output.allSatisfy(\.isFinite))
         }
+    }
+
+    private func makeKernel(
+        generation: UInt64,
+        sourceCount: UInt32
+    ) throws -> OpaquePointer {
+        let format = TBAudioRealtimeFormat(
+            sampleRate: 48_000,
+            formatID: kAudioFormatLinearPCM,
+            formatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            bytesPerFrame: 8,
+            channelsPerFrame: 2,
+            bitsPerChannel: 32
+        )
+        let formats = [TBAudioRealtimeFormat](repeating: format, count: Int(sourceCount))
+        return try formats.withUnsafeBufferPointer { pointer in
+            try XCTUnwrap(
+                TBAudioRealtimeKernelCreate(
+                    generation,
+                    pointer.baseAddress!,
+                    sourceCount,
+                    format,
+                    4,
+                    32,
+                    1
+                )
+            )
+        }
+    }
+
+    private func pushStereo(
+        _ kernel: OpaquePointer,
+        generation: UInt64,
+        source: UInt32,
+        value: Float
+    ) -> Bool {
+        let samples = [Float](repeating: value, count: 8)
+        return samples.withUnsafeBytes { bytes in
+            var view = TBAudioRealtimeInputView(
+                buffers: (bytes.baseAddress, nil, nil, nil, nil, nil, nil, nil),
+                byteSizes: (UInt32(bytes.count), 0, 0, 0, 0, 0, 0, 0),
+                bufferCount: 1,
+                frameCount: 4
+            )
+            return TBAudioRealtimeKernelPushCapture(
+                kernel,
+                generation,
+                source,
+                &view
+            )
+        }
+    }
+
+    private func renderStereo(
+        _ kernel: OpaquePointer,
+        generation: UInt64,
+        frames: UInt32,
+        expectedSuccess: Bool = true
+    ) -> [Float] {
+        var samples = [Float](repeating: -1, count: Int(frames * 2))
+        samples.withUnsafeMutableBytes { bytes in
+            var view = TBAudioRealtimeOutputView(
+                buffers: (bytes.baseAddress, nil, nil, nil, nil, nil, nil, nil),
+                byteSizes: (UInt32(bytes.count), 0, 0, 0, 0, 0, 0, 0),
+                bufferCount: 1,
+                frameCount: frames
+            )
+            XCTAssertEqual(
+                TBAudioRealtimeKernelRenderOutput(kernel, generation, &view),
+                expectedSuccess
+            )
+        }
+        return samples
+    }
+
+    private func snapshot(_ kernel: OpaquePointer) throws -> TBAudioRealtimeSnapshot {
+        var value = TBAudioRealtimeSnapshot()
+        XCTAssertTrue(TBAudioRealtimeKernelCopySnapshot(kernel, &value))
+        return value
     }
 }
