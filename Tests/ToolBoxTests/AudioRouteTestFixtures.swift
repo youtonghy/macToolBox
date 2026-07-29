@@ -2,6 +2,32 @@ import CoreAudio
 @testable import ToolBox
 
 enum AudioRouteTestFixtures {
+    static func healthSample(
+        captureFrameCount: UInt64 = 0,
+        outputFrameCount: UInt64 = 0,
+        underrunFrameCount: UInt64 = 0,
+        overrunFrameCount: UInt64 = 0,
+        forcedResyncCount: UInt64 = 0,
+        formatMismatchCount: UInt64 = 0,
+        nonFiniteSampleCount: UInt64 = 0,
+        clippedSampleCount: UInt64 = 0,
+        outputPeriodFrames: UInt64 = 256,
+        sourceIsProducingOutput: Bool = true
+    ) -> AudioRouteHealthSample {
+        AudioRouteHealthSample(
+            captureFrameCount: captureFrameCount,
+            outputFrameCount: outputFrameCount,
+            underrunFrameCount: underrunFrameCount,
+            overrunFrameCount: overrunFrameCount,
+            forcedResyncCount: forcedResyncCount,
+            formatMismatchCount: formatMismatchCount,
+            nonFiniteSampleCount: nonFiniteSampleCount,
+            clippedSampleCount: clippedSampleCount,
+            outputPeriodFrames: outputPeriodFrames,
+            sourceIsProducingOutput: sourceIsProducingOutput
+        )
+    }
+
     static func format(sampleRate: Double) -> AudioStreamBasicDescription {
         AudioStreamBasicDescription(
             mSampleRate: sampleRate,
