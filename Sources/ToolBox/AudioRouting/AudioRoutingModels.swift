@@ -296,16 +296,23 @@ enum AudioRouteDiagnosticsEvaluator {
     static let startupGracePollCount = 8
     static let stallPollCount = 8
 
+    /// - Parameter sourceIsProducingOutput: HAL reports at least one source of this route
+    ///   as currently producing output (`piro`). A quiet capture path only means the tap
+    ///   is broken while that holds; otherwise the app is simply paused or idle.
     static func evaluate(
         snapshot: AudioRouteDiagnosticsSnapshot?,
         previous: AudioRouteDiagnosticsSnapshot?,
         startupPollCount: Int,
-        consecutiveStalledPollCount: Int
+        consecutiveStalledPollCount: Int,
+        sourceIsProducingOutput: Bool = true
     ) -> AudioRouteDiagnosticsHealth {
         guard let snapshot else {
             return startupPollCount >= startupGracePollCount ? .awaitingAudio : .starting
         }
-        if snapshot.fatalCallbackMismatch || snapshot.formatMismatchCount > 0 {
+        // Only the output path can mark a route fatal. Per-source capture mismatches
+        // are expected when one of several apps on a shared route is unreadable
+        // (e.g. iOS-on-Mac shells); those sources simply contribute silence.
+        if snapshot.fatalCallbackMismatch {
             return .fatal(.callbackFormatMismatch)
         }
 
@@ -318,9 +325,18 @@ enum AudioRouteDiagnosticsEvaluator {
         if let previous {
             let captureAdvanced = snapshot.captureFrameCount != previous.captureFrameCount
             let outputAdvanced = snapshot.outputFrameCount != previous.outputFrameCount
-            if (!captureAdvanced || !outputAdvanced),
-               consecutiveStalledPollCount >= stallPollCount {
+            // A dead output IOProc is always fatal for the route: nothing can be heard
+            // through it again, so release it and let the original path resume.
+            if !outputAdvanced, consecutiveStalledPollCount >= stallPollCount {
                 return .stalled
+            }
+            // A quiet capture path is only a failure while HAL still reports the source
+            // as producing output. Pausing playback stops capture frames for as long as
+            // the user likes, and tearing the route down there would silently drop the
+            // saved per-app gain until the slider is touched again.
+            if !captureAdvanced {
+                guard sourceIsProducingOutput else { return .awaitingAudio }
+                if consecutiveStalledPollCount >= stallPollCount { return .stalled }
             }
         }
         return .active

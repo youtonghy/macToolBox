@@ -142,7 +142,6 @@ extension Arm64DDCBackend {
     ) -> Bool {
         guard let service else { return false }
 
-        var success = false
         var packet: [UInt8] = [UInt8(0x80 | (send.count + 1)), UInt8(send.count)] + send + [0]
         let checksumSeed = send.count == 1
             ? Arm64DDCConstants.ddcAddress << 1
@@ -150,9 +149,10 @@ extension Arm64DDCBackend {
         packet[packet.count - 1] = checksum(seed: checksumSeed, data: packet, start: 0, end: packet.count - 2)
 
         for _ in 0...retryAttempts {
+            var writeSucceeded = false
             for _ in 0..<max(writeCycles, 1) {
                 usleep(writeSleepMicros)
-                success = IOAVServiceWriteI2C(
+                writeSucceeded = IOAVServiceWriteI2C(
                     service,
                     UInt32(Arm64DDCConstants.ddcAddress),
                     UInt32(Arm64DDCConstants.dataAddress),
@@ -161,26 +161,50 @@ extension Arm64DDCBackend {
                 ) == 0
             }
 
+            var readSucceeded = false
+            var replyChecksumIsValid = false
             if !reply.isEmpty {
                 usleep(readSleepMicros ?? 50_000)
-                if IOAVServiceReadI2C(
+                readSucceeded = IOAVServiceReadI2C(
                     service,
                     UInt32(Arm64DDCConstants.ddcAddress),
                     0,
                     &reply,
                     UInt32(reply.count)
-                ) == 0 {
-                    success = checksum(seed: 0x50, data: reply, start: 0, end: reply.count - 2) == reply[reply.count - 1]
+                ) == 0
+                if readSucceeded {
+                    replyChecksumIsValid = checksum(
+                        seed: 0x50,
+                        data: reply,
+                        start: 0,
+                        end: reply.count - 2
+                    ) == reply[reply.count - 1]
                 }
             }
 
-            if success {
+            if communicationSucceeded(
+                writeSucceeded: writeSucceeded,
+                expectsReply: !reply.isEmpty,
+                readSucceeded: readSucceeded,
+                replyChecksumIsValid: replyChecksumIsValid
+            ) {
                 return true
             }
             usleep(retrySleepMicros ?? 20_000)
         }
 
         return false
+    }
+
+    static func communicationSucceeded(
+        writeSucceeded: Bool,
+        expectsReply: Bool,
+        readSucceeded: Bool,
+        replyChecksumIsValid: Bool
+    ) -> Bool {
+        guard writeSucceeded else { return false }
+        guard expectsReply else { return true }
+        return readSucceeded && replyChecksumIsValid
     }
 
     private static func checksum(seed: UInt8, data: [UInt8], start: Int, end: Int) -> UInt8 {

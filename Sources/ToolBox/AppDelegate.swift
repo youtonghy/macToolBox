@@ -52,7 +52,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             state: state,
             hardware: hardware,
             displayControl: displayControlMenu,
-            audioRouting: audioRouting
+            audioRouting: audioRouting,
+            focusMode: focusMode
         ),
         panelSize: currentPanelSize
     )
@@ -68,6 +69,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     private lazy var brightnessSchedule = BrightnessScheduleCoordinator(
         service: displayControl
+    )
+    private let focusSystemObserver = SystemFocusModeObserver()
+    private let focusOverlayManager = FocusOverlayManager()
+    private lazy var focusMode = FocusModeCoordinator(
+        systemObserver: focusSystemObserver,
+        overlayManager: focusOverlayManager,
+        screensProvider: FocusScreenProvider.currentScreens
     )
     private var cancellables = Set<AnyCancellable>()
     private var isTerminating = false
@@ -117,6 +125,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         displayControlMenu.start()
         displayControlKeys.start()
         audioRouting.start()
+        focusMode.start()
         observePanelSizeChanges()
         refreshPanelSize()
     }
@@ -168,6 +177,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func stopNonAudioServices() {
         screenWipe.stop()
         awake.stop()
+        focusMode.stop()
         hardware.stop()
         displayControlKeys.stop()
         displayControlMenu.stop()
@@ -289,7 +299,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 displayControl: displayControlMenu,
                 mediaKeys: displayControlKeys,
                 brightnessSchedule: brightnessSchedule,
-                audioRouting: audioRouting
+                audioRouting: audioRouting,
+                focusMode: focusMode
             ),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)
@@ -322,9 +333,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyWipe(_ on: Bool) {
         if on {
-            screenWipe.start { [weak self] in
+            let started = screenWipe.start { [weak self] in
                 // Auto-dismissed (timeout or long-press) -> reflect in UI.
                 DispatchQueue.main.async { self?.state.wipeOn = false }
+            }
+            if !started {
+                DispatchQueue.main.async { [weak self] in self?.state.wipeOn = false }
             }
         } else {
             screenWipe.stop()

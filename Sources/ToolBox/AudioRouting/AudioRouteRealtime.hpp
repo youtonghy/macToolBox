@@ -42,7 +42,7 @@ private:
     float targetGain_ = 1;
     float gainStep_ = 0;
     uint32_t gainRampFramesRemaining_ = 0;
-    float recoveryGain_ = 1;
+    float recoveryGain_ = 0;
 };
 #endif
 

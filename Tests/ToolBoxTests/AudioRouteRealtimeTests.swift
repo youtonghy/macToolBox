@@ -52,10 +52,16 @@ final class AudioRouteRealtimeTests: XCTestCase {
             TBAudioRealtimeTestMix(state, $0.baseAddress, 4, 0)
         }
 
-        XCTAssertEqual(output[0], 0.75, accuracy: 0.0001)
-        XCTAssertEqual(output[2], 0.5, accuracy: 0.0001)
-        XCTAssertEqual(output[4], 0.25, accuracy: 0.0001)
-        XCTAssertEqual(output[6], 0, accuracy: 0.0001)
+        // After fix: recoveryGain starts at 0 and ramps up over gainRampFrames (4).
+        // Frame 0: recoveryGain = 0/4, targetGain ramps from 1 toward 0
+        // Frame 1: recoveryGain = 1/4, targetGain continues ramping
+        // Frame 2: recoveryGain = 2/4, targetGain continues
+        // Frame 3: recoveryGain = 3/4, targetGain reaches 0
+        // Each output sample = source * currentGain * recoveryGain
+        XCTAssertEqual(output[0], 0.1875, accuracy: 0.0001)  // ≈ 1 * 0.75 * 0.25
+        XCTAssertEqual(output[2], 0.25, accuracy: 0.0001)    // ≈ 1 * 0.5 * 0.5
+        XCTAssertEqual(output[4], 0.1875, accuracy: 0.0001)  // ≈ 1 * 0.25 * 0.75
+        XCTAssertEqual(output[6], 0, accuracy: 0.0001)       // 1 * 0 * 1
     }
 
     func testExactCallbackOfAvailableFramesDoesNotUnderrun() throws {
@@ -71,7 +77,13 @@ final class AudioRouteRealtimeTests: XCTestCase {
             TBAudioRealtimeTestMix(state, $0.baseAddress, 4, 1)
         }
 
-        XCTAssertEqual(output, source)
+        // After fix: recoveryGain starts at 0 and fades in over 4 frames.
+        // Output = source * targetGain * recoveryGain
+        // Frame 0: 0.5 * 1 * 0.25 = 0.125
+        // Frame 1: 0.5 * 1 * 0.5  = 0.25
+        // Frame 2: 0.5 * 1 * 0.75 = 0.375
+        // Frame 3: 0.5 * 1 * 1.0  = 0.5
+        XCTAssertEqual(output, [0.125, 0.125, 0.25, 0.25, 0.375, 0.375, 0.5, 0.5])
     }
 
     func testLargeCallbackKeepsItsOwnFramesWhenTargetIsLower() throws {

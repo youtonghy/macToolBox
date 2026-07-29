@@ -548,6 +548,70 @@ final class AudioRoutingServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testBluetoothProfileTransitionSuspendsAndRestoresRouteOnlyOncePerStableSnapshot() async throws {
+        let suiteName = "test.audioRoutingService.bluetooth.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AudioRuleStore(defaults: defaults, key: suiteName)
+        try store.save([AppAudioRule(bundleID: "us.zoom.xos", volumePercent: 150)])
+        let processRegistry = FakeAudioProcessRegistry(
+            snapshot: [
+                AudioProcessSnapshot(
+                    objectID: 42,
+                    pid: 1234,
+                    bundleID: "us.zoom.xos",
+                    name: "zoom.us",
+                    isRunningOutput: true
+                )
+            ]
+        )
+        let compatible = AudioOutputDevice(
+            uid: "bluetooth-headset",
+            name: "Bluetooth Headset",
+            isAvailable: true,
+            sampleRate: 44_100
+        )
+        let incompatible = AudioOutputDevice(
+            uid: compatible.uid,
+            name: compatible.name,
+            isAvailable: true,
+            compatibilityIssue: .requiresInterleavedStereo,
+            sampleRate: 16_000
+        )
+        let deviceRegistry = FakeAudioDeviceRegistry(
+            snapshot: [compatible],
+            defaultOutputUID: compatible.uid
+        )
+        let engine = WatchdogAudioRouteEngine()
+        let service = AudioRoutingService(
+            ruleStore: store,
+            processRegistry: processRegistry,
+            deviceRegistry: deviceRegistry,
+            engine: engine
+        )
+
+        service.start()
+        await engine.waitUntilReconcileCount(1)
+
+        deviceRegistry.publishSnapshot([incompatible])
+        await engine.waitUntilReconcileCount(2)
+        let suspendedPlans = await engine.currentPlans()
+        XCTAssertTrue(suspendedPlans.isEmpty)
+
+        deviceRegistry.publishSnapshot([incompatible])
+        try await Task.sleep(for: .milliseconds(30))
+        let countDuringDuplicateNotifications = await engine.reconcileCount()
+        XCTAssertEqual(countDuringDuplicateNotifications, 2)
+
+        deviceRegistry.publishSnapshot([compatible])
+        await engine.waitUntilReconcileCount(3)
+        let restoredPlans = await engine.currentPlans()
+        XCTAssertEqual(restoredPlans.map(\.id), [compatible.uid])
+
+        _ = await service.shutdown()
+    }
+
+    @MainActor
     func testFatalDiagnosticsStopRouteWithinOneWatchdogTick() async throws {
         let harness = try makeServiceHarness(volumePercent: 200)
         harness.service.start()
@@ -666,6 +730,105 @@ final class AudioRoutingServiceTests: XCTestCase {
             return XCTFail("Expected awaiting-audio state")
         }
         XCTAssertEqual(message, "权限、受保护内容或当前无可捕获音频")
+        _ = await harness.service.shutdown()
+        harness.cleanup()
+    }
+
+    @MainActor
+    func testPausedPlaybackKeepsRouteAndSavedGain() async throws {
+        let harness = try makeServiceHarness(volumePercent: 150)
+        let processRegistry = try XCTUnwrap(harness.processRegistry)
+        harness.service.start()
+        await harness.engine.waitUntilReconcileCount(1)
+
+        // Playback pauses: HAL drops `piro`, the output IOProc keeps running.
+        processRegistry.setSnapshot([
+            AudioProcessSnapshot(
+                objectID: 42,
+                pid: 1234,
+                bundleID: "us.zoom.xos",
+                name: "zoom.us",
+                isRunningOutput: false
+            )
+        ])
+        try await Task.sleep(for: .milliseconds(20))
+
+        var outputFrames: UInt64 = 512
+        for _ in 0...(AudioRouteDiagnosticsEvaluator.stallPollCount + 2) {
+            await harness.engine.setDiagnostics([
+                AudioRouteDiagnosticsSnapshot(
+                    routeID: "speakers",
+                    generation: 1,
+                    captureCallbackCount: 1,
+                    captureFrameCount: 512,
+                    outputCallbackCount: 1,
+                    outputFrameCount: outputFrames
+                )
+            ])
+            await harness.service.runDiagnosticsWatchdogTick()
+            outputFrames += 512
+        }
+
+        let plans = await harness.engine.currentPlans()
+        let reconcileCount = await harness.engine.reconcileCount()
+        XCTAssertEqual(reconcileCount, 1)
+        XCTAssertEqual(plans.first?.sources.first?.linearGain, 1.5)
+        _ = await harness.service.shutdown()
+        harness.cleanup()
+    }
+
+    @MainActor
+    func testResumedProcessRestoresSavedGainAfterStalledRouteWasReleased() async throws {
+        let harness = try makeServiceHarness(volumePercent: 150)
+        let processRegistry = try XCTUnwrap(harness.processRegistry)
+        harness.service.start()
+        await harness.engine.waitUntilReconcileCount(1)
+
+        processRegistry.setSnapshot([
+            AudioProcessSnapshot(
+                objectID: 42,
+                pid: 1234,
+                bundleID: "us.zoom.xos",
+                name: "zoom.us",
+                isRunningOutput: false
+            )
+        ])
+        try await Task.sleep(for: .milliseconds(20))
+
+        let stalledDiagnostics = [
+            AudioRouteDiagnosticsSnapshot(
+                routeID: "speakers",
+                generation: 1,
+                captureCallbackCount: 1,
+                captureFrameCount: 512,
+                outputCallbackCount: 1,
+                outputFrameCount: 512
+            )
+        ]
+        await harness.engine.setDiagnostics(stalledDiagnostics)
+        await harness.service.runDiagnosticsWatchdogTick()
+        for _ in 0..<AudioRouteDiagnosticsEvaluator.stallPollCount {
+            await harness.service.runDiagnosticsWatchdogTick()
+        }
+        await harness.engine.waitUntilReconcileCount(2)
+        let releasedPlans = await harness.engine.currentPlans()
+        XCTAssertTrue(releasedPlans.isEmpty)
+
+        processRegistry.setSnapshot([
+            AudioProcessSnapshot(
+                objectID: 42,
+                pid: 1234,
+                bundleID: "us.zoom.xos",
+                name: "zoom.us",
+                isRunningOutput: true
+            )
+        ])
+        try await Task.sleep(for: .milliseconds(50))
+
+        let restoredPlans = await harness.engine.currentPlans()
+        let reconcileCount = await harness.engine.reconcileCount()
+        XCTAssertEqual(reconcileCount, 3)
+        XCTAssertEqual(restoredPlans.first?.sources.first?.linearGain, 1.5)
         _ = await harness.service.shutdown()
         harness.cleanup()
     }
@@ -1567,6 +1730,10 @@ private final class FakeAudioDeviceRegistry: AudioDeviceRegistryProviding {
 
     func publishDefaultOutputUID(_ uid: String?) {
         defaultOutputSubject.send(uid)
+    }
+
+    func publishSnapshot(_ snapshot: [AudioOutputDevice]) {
+        snapshotSubject.send(snapshot)
     }
 
     func publishServiceGeneration(_ generation: Int) {

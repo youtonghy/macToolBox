@@ -2,6 +2,41 @@ import Foundation
 import IOKit
 import IOKit.ps
 
+struct CableRegistryJoin: Equatable, Sendable {
+    let hpmUUID: String?
+    let portType: Int
+    let portNumber: Int?
+
+    init(hpmUUID: String?, portType: Int, portNumber: Int?) {
+        let normalizedUUID = hpmUUID?
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        self.hpmUUID = normalizedUUID?.count == 32 ? normalizedUUID : nil
+        self.portType = portType
+        self.portNumber = portNumber
+    }
+
+    func matches(_ other: CableRegistryJoin) -> Bool {
+        guard let portNumber,
+              let otherPortNumber = other.portNumber,
+              portNumber == otherPortNumber else {
+            return false
+        }
+
+        if let hpmUUID, let otherHPMUUID = other.hpmUUID, hpmUUID != otherHPMUUID {
+            return false
+        }
+        // Some child nodes omit a controller UUID, so complete port identity remains a compatibility fallback.
+        if portType == other.portType {
+            return true
+        }
+
+        return hpmUUID != nil
+            && hpmUUID == other.hpmUUID
+            && (portType == 0 || other.portType == 0)
+    }
+}
+
 final class DarwinCableSnapshotProvider: CableSnapshotProviding {
     private let reader = IOKitCableReader()
 
@@ -62,7 +97,7 @@ private final class IOKitCableReader {
 
         let ports = portRecords.map { portRecord -> CablePortSnapshot in
             let identities = identityRecords
-                .filter { matches($0.joinKey, portRecord.joinKey, fallback: $0.portKey == portRecord.portKey) }
+                .filter { $0.join.matches(portRecord.join) }
                 .map(\.identity)
                 .sorted { $0.endpoint.rawValue < $1.endpoint.rawValue }
 
@@ -74,22 +109,22 @@ private final class IOKitCableReader {
                 .first
 
             let sourceRecord = powerRecords
-                .filter { matches($0.joinKey, portRecord.joinKey, fallback: $0.portKey == portRecord.portKey) }
+                .filter { $0.join.matches(portRecord.join) }
                 .max { lhs, rhs in
                     (lhs.winningOption?.maxPowerMW ?? lhs.options.first?.maxPowerMW ?? 0)
                     < (rhs.winningOption?.maxPowerMW ?? rhs.options.first?.maxPowerMW ?? 0)
                 }
 
             let usb3Record = usb3Records
-                .filter { matches($0.joinKey, portRecord.joinKey, fallback: $0.portKey == portRecord.portKey) }
+                .filter { $0.join.matches(portRecord.join) }
                 .first
 
             let cioRecord = cioRecords
-                .filter { matches($0.joinKey, portRecord.joinKey, fallback: $0.portKey == portRecord.portKey) }
+                .filter { $0.join.matches(portRecord.join) }
                 .first
 
             let display = displayRecords
-                .filter { matches($0.joinKey, portRecord.joinKey, fallback: $0.portKey == portRecord.portKey) }
+                .filter { $0.join.matches(portRecord.join) }
                 .map(\.display)
                 .sorted { ($0.active ? 0 : 1, $0.sinkCount ?? 0) < ($1.active ? 0 : 1, $1.sinkCount ?? 0) }
                 .first
@@ -182,11 +217,12 @@ private final class IOKitCableReader {
             readPropertyValue(service, key).map { (key, $0) }
         })
 
-        let portKey = makePortKey(
-            type: readInt(service, "PortType") ?? defaultPortTypeCode(for: type),
-            number: portNumber
+        let portType = readInt(service, "PortType") ?? defaultPortTypeCode(for: type)
+        let join = CableRegistryJoin(
+            hpmUUID: hpmControllerUUID(for: service),
+            portType: portType,
+            portNumber: portNumber
         )
-        let joinKey = makeJoinKey(hpmUUID: hpmControllerUUID(for: service), portKey: portKey)
 
         let port = CablePortSnapshot(
             id: entryID,
@@ -208,7 +244,7 @@ private final class IOKitCableReader {
             rawProperties: raw
         )
 
-        return PortRecord(port: port, portKey: portKey, joinKey: joinKey)
+        return PortRecord(port: port, join: join)
     }
 
     private func readIdentities() -> [IdentityRecord] {
@@ -272,12 +308,14 @@ private final class IOKitCableReader {
             rawVDOData: rawVDOData.isEmpty ? nil : rawVDOData.reduce(Data(), +)
         )
 
-        let portKey = makePortKey(type: parent.type, number: parent.number)
         return IdentityRecord(
             id: entryID,
             identity: identity,
-            portKey: portKey,
-            joinKey: makeJoinKey(hpmUUID: hpmControllerUUID(for: service), portKey: portKey)
+            join: CableRegistryJoin(
+                hpmUUID: hpmControllerUUID(for: service),
+                portType: parent.type,
+                portNumber: parent.number
+            )
         )
     }
 
@@ -306,14 +344,16 @@ private final class IOKitCableReader {
         let parent = parentPortIdentity(service)
         let options = parsePowerOptions(readProperty(service, "PowerSourceOptions"))
         let winning = parsePowerOption(readProperty(service, "WinningPowerSourceOption"))
-        let portKey = makePortKey(type: parent.type, number: parent.number)
         return PowerSourceRecord(
             id: entryID,
             sourceName: readString(service, "PowerSourceName"),
             options: options,
             winningOption: winning,
-            portKey: portKey,
-            joinKey: makeJoinKey(hpmUUID: hpmControllerUUID(for: service), portKey: portKey)
+            join: CableRegistryJoin(
+                hpmUUID: hpmControllerUUID(for: service),
+                portType: parent.type,
+                portNumber: parent.number
+            )
         )
     }
 
@@ -329,12 +369,14 @@ private final class IOKitCableReader {
             seenIDs.insert(entryID)
 
             let parent = parentPortIdentity(service)
-            let portKey = makePortKey(type: parent.type, number: parent.number)
             records.append(
                 USB3Record(
                     id: entryID,
-                    portKey: portKey,
-                    joinKey: makeJoinKey(hpmUUID: hpmControllerUUID(for: service), portKey: portKey),
+                    join: CableRegistryJoin(
+                        hpmUUID: hpmControllerUUID(for: service),
+                        portType: parent.type,
+                        portNumber: parent.number
+                    ),
                     active: readBool(service, "Active"),
                     signaling: readInt(service, "SuperSpeedSignaling"),
                     signalingDescription: readString(service, "SuperSpeedSignalingDescription"),
@@ -359,12 +401,14 @@ private final class IOKitCableReader {
             seenIDs.insert(entryID)
 
             let parent = parentPortIdentity(service)
-            let portKey = makePortKey(type: parent.type, number: parent.number)
             records.append(
                 CIORecord(
                     id: entryID,
-                    portKey: portKey,
-                    joinKey: makeJoinKey(hpmUUID: hpmControllerUUID(for: service), portKey: portKey),
+                    join: CableRegistryJoin(
+                        hpmUUID: hpmControllerUUID(for: service),
+                        portType: parent.type,
+                        portNumber: parent.number
+                    ),
                     cableSpeedCode: readInt(service, "CableSpeed") ?? readInt(service, "TRM_CableSpeed"),
                     cableGeneration: readInt(service, "CableGeneration") ?? readInt(service, "TRM_CableGeneration"),
                     asymmetricModeSupported: readBool(service, "AsymmetricModeSupported")
@@ -400,7 +444,6 @@ private final class IOKitCableReader {
         }
 
         let parent = parentPortIdentity(service)
-        let portKey = makePortKey(type: parent.type, number: parent.number)
         let metadata = readDictionary(service, "Metadata")
         let linkRateDescription = readString(service, "LinkRateDescription")
         let laneCount = readInt(service, "LaneCount")
@@ -437,8 +480,11 @@ private final class IOKitCableReader {
         return DisplayRecord(
             id: entryID,
             display: display,
-            portKey: portKey,
-            joinKey: makeJoinKey(hpmUUID: hpmControllerUUID(for: service), portKey: portKey)
+            join: CableRegistryJoin(
+                hpmUUID: hpmControllerUUID(for: service),
+                portType: parent.type,
+                portNumber: parent.number
+            )
         )
     }
 
@@ -495,15 +541,13 @@ private final class IOKitCableReader {
 private extension IOKitCableReader {
     struct PortRecord {
         var port: CablePortSnapshot
-        var portKey: String
-        var joinKey: String
+        var join: CableRegistryJoin
     }
 
     struct IdentityRecord {
         var id: UInt64
         var identity: CableIdentitySnapshot
-        var portKey: String
-        var joinKey: String
+        var join: CableRegistryJoin
     }
 
     struct PowerSourceRecord {
@@ -511,14 +555,12 @@ private extension IOKitCableReader {
         var sourceName: String?
         var options: [PowerOptionSnapshot]
         var winningOption: PowerOptionSnapshot?
-        var portKey: String
-        var joinKey: String
+        var join: CableRegistryJoin
     }
 
     struct USB3Record {
         var id: UInt64
-        var portKey: String
-        var joinKey: String
+        var join: CableRegistryJoin
         var active: Bool?
         var signaling: Int?
         var signalingDescription: String?
@@ -528,8 +570,7 @@ private extension IOKitCableReader {
 
     struct CIORecord {
         var id: UInt64
-        var portKey: String
-        var joinKey: String
+        var join: CableRegistryJoin
         var cableSpeedCode: Int?
         var cableGeneration: Int?
         var asymmetricModeSupported: Bool?
@@ -539,8 +580,7 @@ private extension IOKitCableReader {
     struct DisplayRecord {
         var id: UInt64
         var display: DisplayTransportSnapshot
-        var portKey: String
-        var joinKey: String
+        var join: CableRegistryJoin
     }
 }
 
@@ -846,24 +886,6 @@ private extension IOKitCableReader {
 }
 
 private extension IOKitCableReader {
-    func matches(_ lhs: String, _ rhs: String, fallback: Bool) -> Bool {
-        if lhs == rhs {
-            return true
-        }
-        return fallback
-    }
-
-    func makePortKey(type: Int, number: Int?) -> String {
-        "\(type)/\(number ?? 0)"
-    }
-
-    func makeJoinKey(hpmUUID: String?, portKey: String) -> String {
-        if let uuid = hpmUUID?.replacingOccurrences(of: "-", with: "").lowercased(), uuid.count == 32 {
-            return uuid
-        }
-        return portKey
-    }
-
     func defaultPortTypeCode(for description: String) -> Int {
         description.hasPrefix("MagSafe") ? 17 : 2
     }

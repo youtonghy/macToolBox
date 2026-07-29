@@ -28,6 +28,7 @@ final class HardwareDataService {
     }
 
     func stopChipPower() {
+        chipPowerProvider.onUpdate = nil
         chipPowerProvider.stop()
     }
 

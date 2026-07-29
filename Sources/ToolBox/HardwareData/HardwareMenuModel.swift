@@ -118,6 +118,7 @@ final class HardwareMenuModel: ObservableObject {
     private let historyWindow: TimeInterval = 5 * 60
     private var cableTask: Task<Void, Never>?
     private var started = false
+    private var sessionID: UInt64 = 0
 
     init(service: HardwareDataService = .shared) {
         self.service = service
@@ -145,10 +146,17 @@ final class HardwareMenuModel: ObservableObject {
     func start() {
         guard !started else { return }
         started = true
+        sessionID &+= 1
+        let currentSessionID = sessionID
 
         service.startChipPower(interval: 1.0) { [weak self] snapshot in
             Task { @MainActor in
-                self?.ingestPower(snapshot)
+                guard let self,
+                      self.started,
+                      self.sessionID == currentSessionID else {
+                    return
+                }
+                self.ingestPower(snapshot)
             }
         }
 
@@ -156,14 +164,21 @@ final class HardwareMenuModel: ObservableObject {
             guard let self else { return }
             do {
                 let initial = try await service.cableSnapshot()
-                await MainActor.run { self.ingestCable(initial) }
+                await MainActor.run {
+                    guard self.started, self.sessionID == currentSessionID else { return }
+                    self.ingestCable(initial)
+                }
 
                 for try await snapshot in service.cableSnapshots(interval: 1.0) {
-                    await MainActor.run { self.ingestCable(snapshot) }
+                    await MainActor.run {
+                        guard self.started, self.sessionID == currentSessionID else { return }
+                        self.ingestCable(snapshot)
+                    }
                 }
             } catch {
                 logger.error("Cable sampling failed: \(error.localizedDescription, privacy: .public)")
                 await MainActor.run {
+                    guard self.started, self.sessionID == currentSessionID else { return }
                     self.cableItems = []
                     self.powerAdapterGroup = nil
                 }
@@ -180,10 +195,11 @@ final class HardwareMenuModel: ObservableObject {
     }
 
     func stop() {
+        started = false
+        sessionID &+= 1
         cableTask?.cancel()
         cableTask = nil
         service.stopChipPower()
-        started = false
     }
 
     func toggleDisplayMode(for metric: PowerMetricKind) {

@@ -13,6 +13,7 @@ enum AudioOutputCompatibilityIssue: Int, Codable, Equatable, Sendable {
     case formatQueryFailed = 9
     case sampleRateMismatch = 10
     case unknownNativeResult = 11
+    case bluetoothProfileChanging = 12
 
     var message: String {
         switch self {
@@ -27,6 +28,7 @@ enum AudioOutputCompatibilityIssue: Int, Codable, Equatable, Sendable {
         case .formatQueryFailed: "无法读取设备输出格式"
         case .sampleRateMismatch: "设备采样率与当前系统输出不一致，暂不支持跨采样率转换"
         case .unknownNativeResult: "设备兼容性检查返回了未知错误"
+        case .bluetoothProfileChanging: "蓝牙耳机正在切换通话音频模式，已暂停路由"
         }
     }
 }

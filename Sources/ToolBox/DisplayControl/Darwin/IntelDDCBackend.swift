@@ -51,16 +51,23 @@ final class IntelDDCBackend: DDCTransport {
 
         for _ in 0..<max(options.writeCycles, 1) {
             usleep(options.writeSleepMicros)
-            var request = IOI2CRequest()
-            request.commFlags = 0
-            request.sendAddress = 0x6e
-            request.sendTransactionType = IOOptionBits(kIOI2CSimpleTransactionType)
-            request.sendBuffer = withUnsafePointer(to: &data[0]) { vm_address_t(bitPattern: $0) }
-            request.sendBytes = UInt32(data.count)
-            request.replyTransactionType = IOOptionBits(kIOI2CNoTransactionType)
-            request.replyBytes = 0
-
-            if Self.send(request: &request, to: framebuffer, errorRecoveryWaitMicros: options.errorRecoveryWaitMicros) {
+            let didSend = data.withUnsafeMutableBufferPointer { buffer -> Bool in
+                guard let baseAddress = buffer.baseAddress else { return false }
+                var request = IOI2CRequest()
+                request.commFlags = 0
+                request.sendAddress = 0x6e
+                request.sendTransactionType = IOOptionBits(kIOI2CSimpleTransactionType)
+                request.sendBuffer = vm_address_t(bitPattern: baseAddress)
+                request.sendBytes = UInt32(buffer.count)
+                request.replyTransactionType = IOOptionBits(kIOI2CNoTransactionType)
+                request.replyBytes = 0
+                return Self.send(
+                    request: &request,
+                    to: framebuffer,
+                    errorRecoveryWaitMicros: options.errorRecoveryWaitMicros
+                )
+            }
+            if didSend {
                 success = true
             }
         }
@@ -84,20 +91,32 @@ final class IntelDDCBackend: DDCTransport {
                 usleep(wait)
             }
 
-            var request = IOI2CRequest()
-            request.commFlags = 0
-            request.sendAddress = 0x6e
-            request.sendTransactionType = IOOptionBits(kIOI2CSimpleTransactionType)
-            request.sendBuffer = withUnsafePointer(to: &data[0]) { vm_address_t(bitPattern: $0) }
-            request.sendBytes = UInt32(data.count)
-            request.minReplyDelay = options.minReplyDelayMicros ?? 10
-            request.replyAddress = 0x6f
-            request.replySubAddress = 0x51
-            request.replyTransactionType = replyTransactionType
-            request.replyBytes = UInt32(replyData.count)
-            request.replyBuffer = withUnsafePointer(to: &replyData[0]) { vm_address_t(bitPattern: $0) }
-
-            guard Self.send(request: &request, to: framebuffer, errorRecoveryWaitMicros: options.errorRecoveryWaitMicros) else {
+            let didSend = data.withUnsafeMutableBufferPointer { sendBuffer in
+                replyData.withUnsafeMutableBufferPointer { replyBuffer -> Bool in
+                    guard let sendAddress = sendBuffer.baseAddress,
+                          let replyAddress = replyBuffer.baseAddress else {
+                        return false
+                    }
+                    var request = IOI2CRequest()
+                    request.commFlags = 0
+                    request.sendAddress = 0x6e
+                    request.sendTransactionType = IOOptionBits(kIOI2CSimpleTransactionType)
+                    request.sendBuffer = vm_address_t(bitPattern: sendAddress)
+                    request.sendBytes = UInt32(sendBuffer.count)
+                    request.minReplyDelay = options.minReplyDelayMicros ?? 10
+                    request.replyAddress = 0x6f
+                    request.replySubAddress = 0x51
+                    request.replyTransactionType = replyTransactionType
+                    request.replyBytes = UInt32(replyBuffer.count)
+                    request.replyBuffer = vm_address_t(bitPattern: replyAddress)
+                    return Self.send(
+                        request: &request,
+                        to: framebuffer,
+                        errorRecoveryWaitMicros: options.errorRecoveryWaitMicros
+                    )
+                }
+            }
+            guard didSend else {
                 continue
             }
 

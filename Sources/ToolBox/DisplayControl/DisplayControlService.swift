@@ -4,25 +4,76 @@ import CoreGraphics
 import Foundation
 import OSLog
 
+private final class DisplayControlReconfigurationContext {
+    private let lock = NSLock()
+    private weak var service: DisplayControlService?
+    private var sessionID: UInt64?
+
+    init(service: DisplayControlService) {
+        self.service = service
+    }
+
+    func activate(sessionID: UInt64) {
+        lock.lock()
+        self.sessionID = sessionID
+        lock.unlock()
+    }
+
+    func deactivate() {
+        lock.lock()
+        sessionID = nil
+        lock.unlock()
+    }
+
+    // CoreGraphics can call from outside MainActor, so preserve the session at ingress.
+    func dispatchReconfiguration() {
+        lock.lock()
+        let activeService = service
+        let activeSessionID = sessionID
+        lock.unlock()
+        guard let activeService, let activeSessionID else { return }
+
+        Task { @MainActor [weak activeService] in
+            activeService?.handleDisplayReconfiguration(sessionID: activeSessionID)
+        }
+    }
+}
+
 private let displayControlReconfigurationCallback: CGDisplayReconfigurationCallBack = { _, _, userInfo in
     guard let userInfo else { return }
-    let service = Unmanaged<DisplayControlService>.fromOpaque(userInfo).takeUnretainedValue()
-    Task { @MainActor in
-        service.handleDisplayReconfiguration()
+    let context = Unmanaged<DisplayControlReconfigurationContext>
+        .fromOpaque(userInfo)
+        .takeUnretainedValue()
+    context.dispatchReconfiguration()
+}
+
+protocol DisplayControlLifecycleSleeper: Sendable {
+    func sleep(nanoseconds: UInt64) async throws
+}
+
+struct TaskDisplayControlLifecycleSleeper: DisplayControlLifecycleSleeper {
+    func sleep(nanoseconds: UInt64) async throws {
+        try await Task.sleep(nanoseconds: nanoseconds)
     }
 }
 
 struct DisplayControlTiming: Sendable {
     var brightnessFrameDelayNanos: UInt64
     var refreshDebounceNanos: UInt64
+    var reconfigurationRefreshDelayNanos: UInt64
+    var wakeRefreshDelayNanos: UInt64
 
     static let live = DisplayControlTiming(
         brightnessFrameDelayNanos: 20_000_000,
-        refreshDebounceNanos: 250_000_000
+        refreshDebounceNanos: 250_000_000,
+        reconfigurationRefreshDelayNanos: 1_000_000_000,
+        wakeRefreshDelayNanos: 3_000_000_000
     )
     static let immediateForTests = DisplayControlTiming(
         brightnessFrameDelayNanos: 0,
-        refreshDebounceNanos: 0
+        refreshDebounceNanos: 0,
+        reconfigurationRefreshDelayNanos: 0,
+        wakeRefreshDelayNanos: 0
     )
 }
 
@@ -51,11 +102,16 @@ final class DisplayControlService: ObservableObject {
 
     private let provider: DisplayControlProviding
     private let timing: DisplayControlTiming
+    private let observesSystemEvents: Bool
+    private let lifecycleSleeper: any DisplayControlLifecycleSleeper
     private let logger = Logger(subsystem: "ToolBox", category: "DisplayControl")
+    private lazy var displayReconfigurationContext = DisplayControlReconfigurationContext(service: self)
 
     private var refreshTask: Task<Void, Never>?
     private var refreshAfterWritesTask: Task<Void, Never>?
     private var refreshAfterWritesID: UUID?
+    private var lifecycleRefreshTask: Task<Void, Never>?
+    private var lifecycleRefreshID: UUID?
 
     private var desiredValues: [ControlWriteKey: Double] = [:]
     private var lastSuccessfulValues: [ControlWriteKey: Double] = [:]
@@ -79,19 +135,33 @@ final class DisplayControlService: ObservableObject {
 
     private var displayCallbackRegistered = false
     private var workspaceObservers: [NSObjectProtocol] = []
+    private var started = false
+    private var sessionID: UInt64 = 0
     private var isSuspended = false
+    private var isWakeSettling = false
 
     init(
         provider: DisplayControlProviding = DarwinDisplayControlProvider(),
-        timing: DisplayControlTiming = .live
+        timing: DisplayControlTiming = .live,
+        observesSystemEvents: Bool = true,
+        lifecycleSleeper: any DisplayControlLifecycleSleeper = TaskDisplayControlLifecycleSleeper()
     ) {
         self.provider = provider
         self.timing = timing
+        self.observesSystemEvents = observesSystemEvents
+        self.lifecycleSleeper = lifecycleSleeper
     }
 
     func start() {
-        registerDisplayReconfigurationCallback()
-        registerWorkspaceObservers()
+        guard !started else { return }
+        started = true
+        sessionID &+= 1
+        isSuspended = false
+        isWakeSettling = false
+        if observesSystemEvents {
+            registerDisplayReconfigurationCallback()
+            registerWorkspaceObservers(sessionID: sessionID)
+        }
         refresh()
     }
 
@@ -102,6 +172,11 @@ final class DisplayControlService: ObservableObject {
     }
 
     func stop() {
+        started = false
+        sessionID &+= 1
+        isSuspended = false
+        isWakeSettling = false
+        cancelLifecycleRefresh()
         refreshTask?.cancel()
         refreshTask = nil
         cancelPendingWrites()
@@ -123,6 +198,7 @@ final class DisplayControlService: ObservableObject {
             } catch is CancellationError {
                 return
             } catch {
+                guard !Task.isCancelled else { return }
                 logger.error("Display control refresh failed: \(error.localizedDescription, privacy: .public)")
                 snapshot = DisplayControlSnapshot(timestamp: Date(), displays: [])
             }
@@ -558,24 +634,43 @@ final class DisplayControlService: ObservableObject {
     }
 
     private func registerDisplayReconfigurationCallback() {
+        let context = displayReconfigurationContext
+        context.activate(sessionID: sessionID)
+
         guard !displayCallbackRegistered else { return }
-        CGDisplayRegisterReconfigurationCallback(
+        // Keep this lifetime token alive until callback removal succeeds.
+        let opaqueContext = Unmanaged.passRetained(context).toOpaque()
+        let error = CGDisplayRegisterReconfigurationCallback(
             displayControlReconfigurationCallback,
-            Unmanaged.passUnretained(self).toOpaque()
+            opaqueContext
         )
+        guard error == .success else {
+            Unmanaged<DisplayControlReconfigurationContext>.fromOpaque(opaqueContext).release()
+            context.deactivate()
+            logger.error("Display reconfiguration callback registration failed: \(error.rawValue, privacy: .public)")
+            return
+        }
         displayCallbackRegistered = true
     }
 
     private func unregisterDisplayReconfigurationCallback() {
         guard displayCallbackRegistered else { return }
-        CGDisplayRemoveReconfigurationCallback(
+        let context = displayReconfigurationContext
+        context.deactivate()
+        let opaqueContext = Unmanaged.passUnretained(context).toOpaque()
+        let error = CGDisplayRemoveReconfigurationCallback(
             displayControlReconfigurationCallback,
-            Unmanaged.passUnretained(self).toOpaque()
+            opaqueContext
         )
+        guard error == .success else {
+            logger.error("Display reconfiguration callback removal failed: \(error.rawValue, privacy: .public)")
+            return
+        }
+        Unmanaged<DisplayControlReconfigurationContext>.fromOpaque(opaqueContext).release()
         displayCallbackRegistered = false
     }
 
-    private func registerWorkspaceObservers() {
+    private func registerWorkspaceObservers(sessionID: UInt64) {
         guard workspaceObservers.isEmpty else { return }
 
         let center = NSWorkspace.shared.notificationCenter
@@ -584,28 +679,36 @@ final class DisplayControlService: ObservableObject {
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.suspendForSleep() }
+            Task { @MainActor in
+                self?.suspendForSleep(sessionID: sessionID)
+            }
         })
         workspaceObservers.append(center.addObserver(
             forName: NSWorkspace.willSleepNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.suspendForSleep() }
+            Task { @MainActor in
+                self?.suspendForSleep(sessionID: sessionID)
+            }
         })
         workspaceObservers.append(center.addObserver(
             forName: NSWorkspace.screensDidWakeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.resumeAfterWake() }
+            Task { @MainActor in
+                self?.resumeAfterWake(sessionID: sessionID)
+            }
         })
         workspaceObservers.append(center.addObserver(
             forName: NSWorkspace.didWakeNotification,
             object: nil,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor in self?.resumeAfterWake() }
+            Task { @MainActor in
+                self?.resumeAfterWake(sessionID: sessionID)
+            }
         })
     }
 
@@ -617,38 +720,94 @@ final class DisplayControlService: ObservableObject {
         workspaceObservers.removeAll()
     }
 
-    fileprivate func handleDisplayReconfiguration() {
-        guard !isSuspended else { return }
-        Task { [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                try Task.checkCancellation()
-                self?.refresh()
-            } catch {
-                return
-            }
-        }
+    func handleDisplayReconfiguration() {
+        handleDisplayReconfiguration(sessionID: sessionID)
     }
 
-    private func suspendForSleep() {
+    func handleDisplayReconfiguration(sessionID: UInt64) {
+        guard started,
+              self.sessionID == sessionID,
+              !isSuspended,
+              !isWakeSettling else {
+            return
+        }
+        scheduleLifecycleRefresh(
+            after: timing.reconfigurationRefreshDelayNanos,
+            completesWakeSettling: false
+        )
+    }
+
+    func suspendForSleep() {
+        suspendForSleep(sessionID: sessionID)
+    }
+
+    private func suspendForSleep(sessionID: UInt64) {
+        guard started, self.sessionID == sessionID else { return }
         isSuspended = true
+        isWakeSettling = false
+        cancelLifecycleRefresh()
         refreshTask?.cancel()
         refreshTask = nil
         cancelPendingWrites()
     }
 
-    private func resumeAfterWake() {
-        guard isSuspended else { return }
+    func resumeAfterWake() {
+        resumeAfterWake(sessionID: sessionID)
+    }
+
+    private func resumeAfterWake(sessionID: UInt64) {
+        guard started, self.sessionID == sessionID, isSuspended else { return }
         isSuspended = false
-        Task { [weak self] in
+        isWakeSettling = true
+        scheduleLifecycleRefresh(
+            after: timing.wakeRefreshDelayNanos,
+            completesWakeSettling: true
+        )
+    }
+
+    private func scheduleLifecycleRefresh(
+        after delayNanos: UInt64,
+        completesWakeSettling: Bool
+    ) {
+        cancelLifecycleRefresh()
+        let taskID = UUID()
+        let currentSessionID = sessionID
+        let sleeper = lifecycleSleeper
+        lifecycleRefreshID = taskID
+        lifecycleRefreshTask = Task { [weak self, sleeper] in
             do {
-                try await Task.sleep(nanoseconds: 3_000_000_000)
+                if delayNanos > 0 {
+                    try await sleeper.sleep(nanoseconds: delayNanos)
+                } else {
+                    await Task.yield()
+                }
                 try Task.checkCancellation()
-                self?.refresh()
-            } catch {
+                guard let self,
+                      self.started,
+                      self.sessionID == currentSessionID,
+                      self.lifecycleRefreshID == taskID,
+                      !self.isSuspended else {
+                    return
+                }
+                if completesWakeSettling {
+                    guard self.isWakeSettling else { return }
+                    self.isWakeSettling = false
+                }
+                self.lifecycleRefreshTask = nil
+                self.lifecycleRefreshID = nil
+                self.refresh()
+            } catch is CancellationError {
                 return
+            } catch {
+                self?.logger.error("Lifecycle refresh scheduling failed: \(error.localizedDescription, privacy: .public)")
             }
         }
+    }
+
+    private func cancelLifecycleRefresh() {
+        lifecycleRefreshTask?.cancel()
+        lifecycleRefreshTask = nil
+        lifecycleRefreshID = nil
     }
 
     private func cancelPendingWrites() {

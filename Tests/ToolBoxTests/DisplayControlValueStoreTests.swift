@@ -150,6 +150,166 @@ final class DisplayControlValueStoreTests: XCTestCase {
     }
 }
 
+final class DarwinDisplayControlValueDecodingTests: XCTestCase {
+    func testCancelledQueuedWorkCompletesBeforeBlockedQueueResumes() async {
+        let queue = DispatchQueue(label: "test.display-control.cancelled-work")
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        let blockerStarted = expectation(description: "queue blocker started")
+        queue.async {
+            blockerStarted.fulfill()
+            releaseBlocker.wait()
+        }
+        await fulfillment(of: [blockerStarted], timeout: 1)
+
+        let enqueued = expectation(description: "cancellable work enqueued")
+        let didRun = LockedFlag()
+        let task = Task {
+            try await queue.asyncCancellable(onEnqueued: {
+                enqueued.fulfill()
+            }) {
+                didRun.set()
+                return 42
+            }
+        }
+        await fulfillment(of: [enqueued], timeout: 1)
+
+        let cancellationObserved = expectation(description: "cancellation observed before queue resumes")
+        task.cancel()
+        let resultTask = Task { () -> Bool in
+            defer { cancellationObserved.fulfill() }
+            do {
+                _ = try await task.value
+                return false
+            } catch is CancellationError {
+                return true
+            } catch {
+                return false
+            }
+        }
+
+        await fulfillment(of: [cancellationObserved], timeout: 0.2)
+        XCTAssertFalse(didRun.value)
+        releaseBlocker.signal()
+        let wasCancelled = await resultTask.value
+        XCTAssertTrue(wasCancelled)
+        queue.sync {}
+        XCTAssertFalse(didRun.value)
+    }
+
+    func testCancelledQueuedWorkReleasesCapturesBeforeQueueResumes() async {
+        let queue = DispatchQueue(label: "test.display-control.cancelled-captures")
+        let releaseBlocker = DispatchSemaphore(value: 0)
+        let blockerStarted = expectation(description: "capture queue blocker started")
+        queue.async {
+            blockerStarted.fulfill()
+            releaseBlocker.wait()
+        }
+        await fulfillment(of: [blockerStarted], timeout: 1)
+
+        var token: CancellationLifetimeToken? = CancellationLifetimeToken()
+        weak let weakToken = token
+        let enqueued = expectation(description: "capturing work enqueued")
+        do {
+            let task = Task { [capturedToken = token] in
+                try await queue.asyncCancellable(onEnqueued: {
+                    enqueued.fulfill()
+                }) {
+                    withExtendedLifetime(capturedToken) {}
+                    return 42
+                }
+            }
+            await fulfillment(of: [enqueued], timeout: 1)
+            token = nil
+            task.cancel()
+            _ = try? await task.value
+        }
+
+        XCTAssertNil(weakToken)
+        releaseBlocker.signal()
+        queue.sync {}
+    }
+
+    func testContinuousControlPreservesReportedSixteenBitRange() throws {
+        let value = try DarwinDisplayControlProvider.decodeValue(
+            kind: .brightness,
+            read: DDCReadResult(current: 128, maximum: 255)
+        )
+
+        XCTAssertEqual(value.rawCurrent, 128)
+        XCTAssertEqual(value.rawMinimum, 0)
+        XCTAssertEqual(value.rawMaximum, 255)
+        XCTAssertEqual(value.normalized, 128.0 / 255.0, accuracy: 0.0001)
+
+        var store = DisplayControlValueStore()
+        let key = DisplayControlValueKey(displayID: 42, kind: .brightness)
+        store.recordObserved(value, for: key)
+        XCTAssertEqual(try store.rawValue(for: key, normalized: 0.5), 128)
+    }
+
+    func testContinuousControlRejectsZeroMaximum() {
+        XCTAssertThrowsError(
+            try DarwinDisplayControlProvider.decodeValue(
+                kind: .brightness,
+                read: DDCReadResult(current: 0, maximum: 0)
+            )
+        ) { error in
+            guard case DisplayControlError.invalidRange(minimum: 0, maximum: 0) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testContinuousControlRejectsSentinelMaximum() {
+        XCTAssertThrowsError(
+            try DarwinDisplayControlProvider.decodeValue(
+                kind: .brightness,
+                read: DDCReadResult(current: 128, maximum: .max)
+            )
+        ) { error in
+            guard case DisplayControlError.invalidRange(minimum: 0, maximum: .max) = error else {
+                return XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testMuteDecodingKeepsDDCSemantics() throws {
+        let muted = try DarwinDisplayControlProvider.decodeValue(
+            kind: .mute,
+            read: DDCReadResult(current: 1, maximum: 255)
+        )
+        let unmuted = try DarwinDisplayControlProvider.decodeValue(
+            kind: .mute,
+            read: DDCReadResult(current: 2, maximum: 255)
+        )
+
+        XCTAssertEqual(muted.rawCurrent, 1)
+        XCTAssertEqual(muted.rawMaximum, 2)
+        XCTAssertEqual(muted.normalized, 1)
+        XCTAssertEqual(unmuted.rawCurrent, 2)
+        XCTAssertEqual(unmuted.rawMaximum, 2)
+        XCTAssertEqual(unmuted.normalized, 0)
+    }
+}
+
+private final class CancellationLifetimeToken {}
+
+private final class LockedFlag {
+    private let lock = NSLock()
+    private var storage = false
+
+    var value: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return storage
+    }
+
+    func set() {
+        lock.lock()
+        storage = true
+        lock.unlock()
+    }
+}
+
 private final class InMemoryDisplayBrightnessMemory: DisplayBrightnessRemembering {
     private var values: [DisplayBrightnessMemoryIdentity: Double] = [:]
 

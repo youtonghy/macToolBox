@@ -1,6 +1,14 @@
 import CoreAudio
 import Foundation
 
+actor CoreAudioRegistryQueryExecutor {
+    static let shared = CoreAudioRegistryQueryExecutor()
+
+    func run<Value: Sendable>(_ operation: @Sendable () -> Value) -> Value {
+        operation()
+    }
+}
+
 enum CoreAudioPropertyError: Error, LocalizedError {
     case status(OSStatus, AudioObjectPropertySelector)
 
