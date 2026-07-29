@@ -16,6 +16,8 @@ typedef struct {
     double sampleRate;
     uint32_t formatID;
     uint32_t formatFlags;
+    uint32_t bytesPerPacket;
+    uint32_t framesPerPacket;
     uint32_t bytesPerFrame;
     uint32_t channelsPerFrame;
     uint32_t bitsPerChannel;
@@ -34,6 +36,26 @@ typedef struct {
     uint32_t bufferCount;
     uint32_t frameCount;
 } TBAudioRealtimeOutputView;
+
+typedef struct TBAudioSampleRateConverter* TBAudioSampleRateConverterRef;
+
+TBAudioSampleRateConverterRef _Nullable TBAudioSampleRateConverterCreate(
+    TBAudioRealtimeFormat sourceFormat,
+    TBAudioRealtimeFormat destinationFormat,
+    uint32_t maximumInputFrames,
+    uint32_t maximumOutputFrames
+);
+void TBAudioSampleRateConverterDestroy(
+    TBAudioSampleRateConverterRef _Nullable converter
+);
+bool TBAudioSampleRateConverterConvert(
+    TBAudioSampleRateConverterRef _Nullable converter,
+    const TBAudioRealtimeInputView* _Nullable input,
+    TBAudioRealtimeOutputView* _Nullable output
+) TB_AUDIO_NOEXCEPT;
+bool TBAudioSampleRateConverterIsBypass(
+    TBAudioSampleRateConverterRef _Nullable converter
+);
 
 typedef struct {
     uint64_t captureCallbackCount;

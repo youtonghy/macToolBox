@@ -1,6 +1,7 @@
 import CoreAudio
 import Darwin
 import XCTest
+
 @testable import ToolBox
 
 final class AudioRouteLifecycleTests: XCTestCase {
@@ -66,11 +67,12 @@ final class AudioRouteLifecycleTests: XCTestCase {
     }
 
     func testTapDeviceSelectionPrefersTargetThenUnambiguousProcessDevice() throws {
-        typealias Selector = @convention(c) (
-            AudioObjectID,
-            UnsafePointer<AudioObjectID>?,
-            UInt32
-        ) -> AudioObjectID
+        typealias Selector =
+            @convention(c) (
+                AudioObjectID,
+                UnsafePointer<AudioObjectID>?,
+                UInt32
+            ) -> AudioObjectID
         let selectDevice: Selector = try loadTestSymbol(
             named: "TBAudioSelectTapDevice",
             as: Selector.self
@@ -91,13 +93,14 @@ final class AudioRouteLifecycleTests: XCTestCase {
     }
 
     func testDefaultOutputSelectionWaitsForProcessDeviceMigration() throws {
-        typealias Classifier = @convention(c) (
-            AudioObjectID,
-            AudioObjectID,
-            UnsafePointer<AudioObjectID>?,
-            UInt32,
-            UInt32
-        ) -> Bool
+        typealias Classifier =
+            @convention(c) (
+                AudioObjectID,
+                AudioObjectID,
+                UnsafePointer<AudioObjectID>?,
+                UInt32,
+                UInt32
+            ) -> Bool
         let shouldWait: Classifier = try loadTestSymbol(
             named: "TBAudioTapDeviceSelectionShouldWait",
             as: Classifier.self
@@ -114,12 +117,13 @@ final class AudioRouteLifecycleTests: XCTestCase {
     }
 
     func testMigrationTimeoutPinsWhereTheProcessActuallyPlaysOrFallsBack() throws {
-        typealias Selector = @convention(c) (
-            AudioObjectID,
-            AudioObjectID,
-            UnsafePointer<AudioObjectID>?,
-            UInt32
-        ) -> AudioObjectID
+        typealias Selector =
+            @convention(c) (
+                AudioObjectID,
+                AudioObjectID,
+                UnsafePointer<AudioObjectID>?,
+                UInt32
+            ) -> AudioObjectID
         let selectDevice: Selector = try loadTestSymbol(
             named: "TBAudioSelectTapDeviceAfterMigrationWait",
             as: Selector.self
@@ -204,6 +208,8 @@ final class AudioRouteLifecycleTests: XCTestCase {
             sampleRate: 48_000,
             formatID: kAudioFormatLinearPCM,
             formatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            bytesPerPacket: 8,
+            framesPerPacket: 1,
             bytesPerFrame: 8,
             channelsPerFrame: 2,
             bitsPerChannel: 32

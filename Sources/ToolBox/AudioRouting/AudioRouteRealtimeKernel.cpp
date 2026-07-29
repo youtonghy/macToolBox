@@ -1,16 +1,18 @@
 #include "AudioRouteRealtimeKernel.hpp"
 
 #include "AudioRouteDSP.hpp"
-#include "AudioRouteFormat.hpp"
 #include "AudioRouteRealtime.hpp"
+#include "AudioRouteSampleRateConverter.hpp"
 
 #include <AudioToolbox/AudioFormat.h>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
+#include <stdexcept>
 #include <vector>
 
 namespace {
@@ -35,16 +37,44 @@ float FloatFromBits(uint32_t bits) noexcept {
     return value;
 }
 
-bool IsPackedFloat32Stereo(const TBAudioRealtimeFormat& format) noexcept {
-    const uint32_t requiredFlags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked;
-    return std::isfinite(format.sampleRate)
-        && format.sampleRate > 0
-        && format.formatID == kAudioFormatLinearPCM
-        && (format.formatFlags & requiredFlags) == requiredFlags
-        && (format.formatFlags & kAudioFormatFlagIsNonInterleaved) == 0
-        && format.bytesPerFrame == 2 * sizeof(float)
-        && format.channelsPerFrame == 2
-        && format.bitsPerChannel == 32;
+TBAudioRealtimeFormat CanonicalFormat(double sampleRate) noexcept {
+    return TBAudioRealtimeFormat{
+        sampleRate,
+        kAudioFormatLinearPCM,
+        kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+            | kAudioFormatFlagIsNonInterleaved,
+        sizeof(float),
+        1,
+        sizeof(float),
+        2,
+        32
+    };
+}
+
+uint32_t MaximumConvertedFrames(
+    const TBAudioRealtimeFormat& source,
+    const TBAudioRealtimeFormat& destination,
+    uint32_t maximumInputFrames
+) {
+    const double ratio = destination.sampleRate / source.sampleRate;
+    if (!std::isfinite(ratio) || ratio < 0.125 || ratio > 8) {
+        throw std::invalid_argument("unsupported sample-rate ratio");
+    }
+    const double frames = std::ceil(maximumInputFrames * ratio) + 32;
+    if (frames > UINT32_MAX) throw std::overflow_error("converted frame capacity overflow");
+    return static_cast<uint32_t>(frames);
+}
+
+size_t CheckedSampleCount(uint32_t frames, uint32_t channels) {
+    if (channels != 0
+        && static_cast<size_t>(frames) > std::numeric_limits<size_t>::max() / channels) {
+        throw std::overflow_error("realtime scratch capacity overflow");
+    }
+    const size_t sampleCount = static_cast<size_t>(frames) * channels;
+    if (sampleCount > std::numeric_limits<size_t>::max() / sizeof(float)) {
+        throw std::overflow_error("realtime scratch byte capacity overflow");
+    }
+    return sampleCount;
 }
 
 void ZeroOutput(TBAudioRealtimeOutputView* output) noexcept {
@@ -57,25 +87,61 @@ void ZeroOutput(TBAudioRealtimeOutputView* output) noexcept {
     }
 }
 
-bool IsValidInput(const TBAudioRealtimeInputView* input) noexcept {
-    if (input == nullptr || input->bufferCount != 1 || input->buffers[0] == nullptr) return false;
-    const uint64_t requiredBytes = static_cast<uint64_t>(input->frameCount) * 2 * sizeof(float);
-    return input->byteSizes[0] >= requiredBytes;
-}
-
-bool IsValidOutput(const TBAudioRealtimeOutputView* output) noexcept {
-    if (output == nullptr || output->bufferCount != 1 || output->buffers[0] == nullptr) return false;
-    const uint64_t requiredBytes = static_cast<uint64_t>(output->frameCount) * 2 * sizeof(float);
-    return output->byteSizes[0] >= requiredBytes;
-}
-
 struct SourceState {
-    SourceState(uint32_t targetFrames, uint32_t capacityFrames, uint32_t rampFrames)
+    SourceState(
+        TBAudioRealtimeFormat sourceFormat,
+        TBAudioRealtimeFormat canonicalFormat,
+        uint32_t targetFrames,
+        uint32_t capacityFrames,
+        uint32_t rampFrames
+    )
         : ring(targetFrames, capacityFrames, rampFrames),
+          convertedCapacityFrames(MaximumConvertedFrames(
+              sourceFormat, canonicalFormat, capacityFrames
+          )),
+          converter(TBAudioSampleRateConverter::Create(
+              sourceFormat,
+              canonicalFormat,
+              capacityFrames,
+              convertedCapacityFrames
+          )),
+          convertedLeft(std::make_unique<float[]>(CheckedSampleCount(
+              convertedCapacityFrames, 1
+          ))),
+          convertedRight(std::make_unique<float[]>(CheckedSampleCount(
+              convertedCapacityFrames, 1
+          ))),
+          interleaved(std::make_unique<float[]>(CheckedSampleCount(
+              convertedCapacityFrames, 2
+          ))),
           defaultRampFrames(rampFrames),
-          gainBits(FloatBits(1)) {}
+          gainBits(FloatBits(1)) {
+        if (converter == nullptr) throw std::invalid_argument("unsupported source format");
+    }
+
+    bool ConvertAndWrite(const TBAudioRealtimeInputView& input) noexcept {
+        TBAudioRealtimeOutputView output{};
+        output.buffers[0] = convertedLeft.get();
+        output.buffers[1] = convertedRight.get();
+        output.byteSizes[0] = convertedCapacityFrames * sizeof(float);
+        output.byteSizes[1] = convertedCapacityFrames * sizeof(float);
+        output.bufferCount = 2;
+        output.frameCount = convertedCapacityFrames;
+        if (!converter->Convert(input, output)) return false;
+        for (uint32_t frame = 0; frame < output.frameCount; ++frame) {
+            interleaved[frame * 2] = convertedLeft[frame];
+            interleaved[frame * 2 + 1] = convertedRight[frame];
+        }
+        ring.Write(interleaved.get(), output.frameCount);
+        return true;
+    }
 
     TBAudioStereoRingBuffer ring;
+    const uint32_t convertedCapacityFrames;
+    std::unique_ptr<TBAudioSampleRateConverter> converter;
+    std::unique_ptr<float[]> convertedLeft;
+    std::unique_ptr<float[]> convertedRight;
+    std::unique_ptr<float[]> interleaved;
     const uint32_t defaultRampFrames;
     std::atomic<uint32_t> gainBits;
     std::atomic<uint32_t> muteRampFrames{0};
@@ -86,20 +152,43 @@ struct SourceState {
 struct TBAudioRealtimeKernel {
     TBAudioRealtimeKernel(
         uint64_t valueGeneration,
+        const TBAudioRealtimeFormat* sourceFormats,
         uint32_t sourceCount,
+        TBAudioRealtimeFormat outputFormat,
         uint32_t targetFrames,
         uint32_t capacityFrames,
         uint32_t rampFrames
-    ) : generation(valueGeneration) {
+    ) : generation(valueGeneration),
+        capacityFrames(capacityFrames),
+        canonicalFormat(CanonicalFormat(outputFormat.sampleRate)),
+        outputAdapter(TBAudioSampleRateConverter::Create(
+            canonicalFormat, outputFormat, capacityFrames, capacityFrames
+        )),
+        mixScratch(std::make_unique<float[]>(CheckedSampleCount(capacityFrames, 2))),
+        outputLeft(std::make_unique<float[]>(CheckedSampleCount(capacityFrames, 1))),
+        outputRight(std::make_unique<float[]>(CheckedSampleCount(capacityFrames, 1))) {
+        if (outputFormat.channelsPerFrame != 2 || outputAdapter == nullptr) {
+            throw std::invalid_argument("unsupported output format");
+        }
         sources.reserve(sourceCount);
         for (uint32_t index = 0; index < sourceCount; ++index) {
             sources.push_back(std::make_unique<SourceState>(
-                targetFrames, capacityFrames, rampFrames
+                sourceFormats[index],
+                canonicalFormat,
+                targetFrames,
+                capacityFrames,
+                rampFrames
             ));
         }
     }
 
     const uint64_t generation;
+    const uint32_t capacityFrames;
+    const TBAudioRealtimeFormat canonicalFormat;
+    std::unique_ptr<TBAudioSampleRateConverter> outputAdapter;
+    std::unique_ptr<float[]> mixScratch;
+    std::unique_ptr<float[]> outputLeft;
+    std::unique_ptr<float[]> outputRight;
     std::vector<std::unique_ptr<SourceState>> sources;
     std::atomic<uint32_t> attached{1};
     std::atomic<uint64_t> captureCallbackCount{0};
@@ -121,20 +210,16 @@ TBAudioRealtimeKernelRef TBAudioRealtimeKernelCreate(
     uint32_t capacityFrames,
     uint32_t rampFrames
 ) {
-    if (sourceFormats == nullptr || sourceCount == 0 || !IsPackedFloat32Stereo(outputFormat)) {
-        return nullptr;
-    }
-    for (uint32_t index = 0; index < sourceCount; ++index) {
-        if (!IsPackedFloat32Stereo(sourceFormats[index])
-            || !TBAudioSampleRatesCompatible(
-                sourceFormats[index].sampleRate, outputFormat.sampleRate
-            )) {
-            return nullptr;
-        }
-    }
+    if (sourceFormats == nullptr || sourceCount == 0) return nullptr;
     try {
         return new TBAudioRealtimeKernel(
-            generation, sourceCount, targetFrames, capacityFrames, rampFrames
+            generation,
+            sourceFormats,
+            sourceCount,
+            outputFormat,
+            targetFrames,
+            capacityFrames,
+            rampFrames
         );
     } catch (...) {
         return nullptr;
@@ -157,16 +242,14 @@ bool TBAudioRealtimeKernelPushCapture(
         kernel->rejectedGenerationCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    if (sourceIndex >= kernel->sources.size() || !IsValidInput(input)) {
+    if (sourceIndex >= kernel->sources.size() || input == nullptr
+        || !kernel->sources[sourceIndex]->ConvertAndWrite(*input)) {
         kernel->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
         kernel->sourceFatalCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     kernel->captureCallbackCount.fetch_add(1, std::memory_order_relaxed);
     kernel->captureFrameCount.fetch_add(input->frameCount, std::memory_order_relaxed);
-    kernel->sources[sourceIndex]->ring.Write(
-        static_cast<const float*>(input->buffers[0]), input->frameCount
-    );
     return true;
 }
 
@@ -182,14 +265,16 @@ bool TBAudioRealtimeKernelRenderOutput(
         kernel->rejectedGenerationCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
-    if (!IsValidOutput(output)) {
+    if (output == nullptr || output->frameCount > kernel->capacityFrames
+        || !kernel->outputAdapter->AcceptsOutput(*output)) {
         kernel->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
     kernel->outputCallbackCount.fetch_add(1, std::memory_order_relaxed);
     kernel->outputFrameCount.fetch_add(output->frameCount, std::memory_order_relaxed);
-    auto* samples = static_cast<float*>(output->buffers[0]);
+    auto* samples = kernel->mixScratch.get();
+    std::fill_n(samples, output->frameCount * 2, 0.0f);
     for (const auto& source : kernel->sources) {
         const bool muted = source->muted.load(std::memory_order_acquire) != 0;
         const float targetGain = muted
@@ -203,6 +288,22 @@ bool TBAudioRealtimeKernelRenderOutput(
     kernel->clippedSampleCount.fetch_add(
         TBAudioClamp(samples, output->frameCount * 2), std::memory_order_relaxed
     );
+    for (uint32_t frame = 0; frame < output->frameCount; ++frame) {
+        kernel->outputLeft[frame] = samples[frame * 2];
+        kernel->outputRight[frame] = samples[frame * 2 + 1];
+    }
+    TBAudioRealtimeInputView canonical{};
+    canonical.buffers[0] = kernel->outputLeft.get();
+    canonical.buffers[1] = kernel->outputRight.get();
+    canonical.byteSizes[0] = output->frameCount * sizeof(float);
+    canonical.byteSizes[1] = output->frameCount * sizeof(float);
+    canonical.bufferCount = 2;
+    canonical.frameCount = output->frameCount;
+    if (!kernel->outputAdapter->Convert(canonical, *output)) {
+        ZeroOutput(output);
+        kernel->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
+        return false;
+    }
     return true;
 }
 

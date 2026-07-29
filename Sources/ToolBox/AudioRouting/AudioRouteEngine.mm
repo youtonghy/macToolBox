@@ -170,6 +170,8 @@ TBAudioRealtimeFormat MakeRealtimeFormat(
         format.mSampleRate,
         format.mFormatID,
         format.mFormatFlags,
+        format.mBytesPerPacket,
+        format.mFramesPerPacket,
         format.mBytesPerFrame,
         format.mChannelsPerFrame,
         format.mBitsPerChannel
@@ -180,16 +182,21 @@ TBAudioRealtimeInputView MakeInputView(const AudioBufferList* input) noexcept {
     TBAudioRealtimeInputView view{};
     if (input == nullptr || input->mNumberBuffers == 0 || input->mNumberBuffers > 8) return view;
     view.bufferCount = input->mNumberBuffers;
+    UInt32 frameCount = 0;
     for (UInt32 index = 0; index < input->mNumberBuffers; ++index) {
-        view.buffers[index] = input->mBuffers[index].mData;
-        view.byteSizes[index] = input->mBuffers[index].mDataByteSize;
+        const AudioBuffer& buffer = input->mBuffers[index];
+        const UInt32 bytesPerFrame = buffer.mNumberChannels * sizeof(float);
+        if (bytesPerFrame == 0 || buffer.mDataByteSize % bytesPerFrame != 0
+            || (buffer.mDataByteSize != 0 && buffer.mData == nullptr)) {
+            return {};
+        }
+        const UInt32 bufferFrames = buffer.mDataByteSize / bytesPerFrame;
+        if (index != 0 && bufferFrames != frameCount) return {};
+        frameCount = bufferFrames;
+        view.buffers[index] = buffer.mData;
+        view.byteSizes[index] = buffer.mDataByteSize;
     }
-    const AudioBuffer& buffer = input->mBuffers[0];
-    if (input->mNumberBuffers == 1 && buffer.mData != nullptr
-        && buffer.mNumberChannels == 2
-        && buffer.mDataByteSize % (2 * sizeof(float)) == 0) {
-        view.frameCount = buffer.mDataByteSize / (2 * sizeof(float));
-    }
+    view.frameCount = frameCount;
     return view;
 }
 
@@ -197,16 +204,21 @@ TBAudioRealtimeOutputView MakeOutputView(AudioBufferList* output) noexcept {
     TBAudioRealtimeOutputView view{};
     if (output == nullptr || output->mNumberBuffers == 0 || output->mNumberBuffers > 8) return view;
     view.bufferCount = output->mNumberBuffers;
+    UInt32 frameCount = 0;
     for (UInt32 index = 0; index < output->mNumberBuffers; ++index) {
-        view.buffers[index] = output->mBuffers[index].mData;
-        view.byteSizes[index] = output->mBuffers[index].mDataByteSize;
+        AudioBuffer& buffer = output->mBuffers[index];
+        const UInt32 bytesPerFrame = buffer.mNumberChannels * sizeof(float);
+        if (bytesPerFrame == 0 || buffer.mDataByteSize % bytesPerFrame != 0
+            || (buffer.mDataByteSize != 0 && buffer.mData == nullptr)) {
+            return {};
+        }
+        const UInt32 bufferFrames = buffer.mDataByteSize / bytesPerFrame;
+        if (index != 0 && bufferFrames != frameCount) return {};
+        frameCount = bufferFrames;
+        view.buffers[index] = buffer.mData;
+        view.byteSizes[index] = buffer.mDataByteSize;
     }
-    const AudioBuffer& buffer = output->mBuffers[0];
-    if (output->mNumberBuffers == 1 && buffer.mData != nullptr
-        && buffer.mNumberChannels == 2
-        && buffer.mDataByteSize % (2 * sizeof(float)) == 0) {
-        view.frameCount = buffer.mDataByteSize / (2 * sizeof(float));
-    }
+    view.frameCount = frameCount;
     return view;
 }
 

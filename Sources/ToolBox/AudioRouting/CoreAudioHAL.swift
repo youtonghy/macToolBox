@@ -250,6 +250,20 @@ final class SystemCoreAudioResourceAccess: CoreAudioResourceAccess {
         rampFrames: UInt32,
         gains: [Float]
     ) throws -> HALKernelResource {
+        do {
+            for sourceFormat in sourceFormats {
+                _ = try AudioFormatContract.negotiate(
+                    source: sourceFormat.streamDescription,
+                    output: outputFormat.streamDescription
+                )
+            }
+        } catch {
+            throw AudioRuntimeFailure.prepareFailed(
+                routeID: "",
+                stage: .prepareKernel,
+                status: kAudioDeviceUnsupportedFormatError
+            )
+        }
         let sourceRealtimeFormats = sourceFormats.map(Self.realtimeFormat)
         guard !sourceRealtimeFormats.isEmpty else {
             throw AudioRuntimeFailure.invalidIntent("An audio route needs at least one source.")
@@ -468,6 +482,8 @@ final class SystemCoreAudioResourceAccess: CoreAudioResourceAccess {
             sampleRate: format.sampleRate,
             formatID: format.formatID,
             formatFlags: format.formatFlags,
+            bytesPerPacket: format.bytesPerPacket,
+            framesPerPacket: format.framesPerPacket,
             bytesPerFrame: format.bytesPerFrame,
             channelsPerFrame: format.channelsPerFrame,
             bitsPerChannel: format.bitsPerChannel
