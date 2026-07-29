@@ -168,13 +168,22 @@ struct RealizationKey: Hashable, Sendable {
     }
 }
 
-enum HALStage: String, Sendable {
+enum HALStage: String, Hashable, Sendable {
     case observe, prepareKernel, createTap, createAggregate, createIOProc
-    case startCapture, startOutput, commit, stopIOProc, destroyAggregate, destroyTap
+    case startCapture, startOutput, commit, stopIOProc, destroyIOProc, drainCallbacks
+    case destroyAggregate, destroyTap, destroyKernel
 }
 
-enum HALResourceKind: String, Sendable {
+enum HALResourceKind: String, Hashable, Sendable {
     case processTap, aggregateDevice, captureIOProc, outputIOProc, realtimeKernel
+}
+
+struct HALCleanupFailure: Equatable, Hashable, Sendable {
+    let routeID: String
+    let resource: HALResourceKind
+    let objectID: UInt32?
+    let stage: HALStage
+    let status: OSStatus
 }
 
 enum AudioRuntimeFailure: Error, Equatable, Sendable {
@@ -188,6 +197,6 @@ enum AudioRuntimeFailure: Error, Equatable, Sendable {
         status: OSStatus,
         rollbackSucceeded: Bool
     )
-    case cleanupDeferred(routeID: String, resources: [HALResourceKind])
+    case cleanupDeferred(routeID: String, failures: [HALCleanupFailure])
     case audioServerRestarted
 }

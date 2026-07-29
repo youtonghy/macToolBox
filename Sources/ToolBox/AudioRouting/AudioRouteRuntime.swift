@@ -72,26 +72,35 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
     }
 
     func performMaintenance() -> Bool {
-        guard !pendingCleanups.isEmpty else { return false }
-
         var deferred: [PendingCleanup] = []
         for cleanup in pendingCleanups {
             switch cleanup.receipt.rollback() {
             case .succeeded:
                 continue
-            case let .deferred(resources):
+            case let .deferred(failures):
                 deferred.append(cleanup)
                 lastFailure = .cleanupDeferred(
                     routeID: cleanup.routeID,
-                    resources: resources
+                    failures: failures
                 )
             }
         }
         pendingCleanups = deferred
-        if deferred.isEmpty {
+        let halCleanupPending: Bool
+        switch hal.performMaintenance() {
+        case .succeeded:
+            halCleanupPending = false
+        case let .deferred(failures):
+            halCleanupPending = true
+            lastFailure = .cleanupDeferred(
+                routeID: failures.first?.routeID ?? "",
+                failures: failures
+            )
+        }
+        if deferred.isEmpty, !halCleanupPending {
             lastFailure = nil
         }
-        return !deferred.isEmpty
+        return !deferred.isEmpty || halCleanupPending
     }
 
     func shutdown(reason: AudioRouteStopReason) -> AudioRouteStopReport {
@@ -100,6 +109,17 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
                 succeeded: false,
                 errorMessage: lastFailure.map { String(describing: $0) }
                     ?? "Core Audio cleanup remains pending."
+            )
+        }
+        if case let .deferred(failures) = hal.performMaintenance() {
+            let failure = AudioRuntimeFailure.cleanupDeferred(
+                routeID: failures.first?.routeID ?? "",
+                failures: failures
+            )
+            lastFailure = failure
+            return AudioRouteStopReport(
+                succeeded: false,
+                errorMessage: String(describing: failure)
             )
         }
         guard let desiredIntent, !realizedKeysByRouteID.isEmpty else {
@@ -199,11 +219,11 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
                 status: -1,
                 rollbackSucceeded: true
             )
-        case let .deferred(resources):
+        case let .deferred(failures):
             pendingCleanups.append(PendingCleanup(routeID: routeID, receipt: receipt))
             throw AudioRuntimeFailure.cleanupDeferred(
                 routeID: routeID,
-                resources: resources
+                failures: failures
             )
         }
     }

@@ -71,12 +71,19 @@ final class AudioRouteRuntimeTests: XCTestCase {
         let hal = ScriptedCoreAudioHAL(observation: AudioRouteTestFixtures.observation())
         let runtime = AudioRouteRuntime(hal: hal)
         hal.omitRealizedKeyOnNextReceipt = true
-        hal.rollbackResultOnNextReceipt = .deferred(resources: [.processTap])
+        let cleanupFailure = HALCleanupFailure(
+            routeID: "output-A",
+            resource: .processTap,
+            objectID: 77,
+            stage: .destroyTap,
+            status: -1
+        )
+        hal.rollbackResultOnNextReceipt = .deferred(failures: [cleanupFailure])
 
         XCTAssertThrowsError(try runtime.converge(to: AudioRouteTestFixtures.intent())) { error in
             XCTAssertEqual(
                 error as? AudioRuntimeFailure,
-                .cleanupDeferred(routeID: "output-A", resources: [.processTap])
+                .cleanupDeferred(routeID: "output-A", failures: [cleanupFailure])
             )
         }
 
@@ -90,7 +97,15 @@ final class AudioRouteRuntimeTests: XCTestCase {
         let runtime = AudioRouteRuntime(hal: hal)
         hal.omitRealizedKeyOnNextReceipt = true
         hal.rollbackResultsOnNextReceipt = [
-            .deferred(resources: [.processTap]),
+            .deferred(failures: [
+                HALCleanupFailure(
+                    routeID: "output-A",
+                    resource: .processTap,
+                    objectID: 77,
+                    stage: .destroyTap,
+                    status: -1
+                ),
+            ]),
             .succeeded,
         ]
 

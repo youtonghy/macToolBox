@@ -152,6 +152,12 @@ struct RouteContext {
     uint64_t retirementEpoch = 0;
 };
 
+struct IOProcBridgeContext {
+    TBAudioRealtimeKernelRef kernel = nullptr;
+    uint64_t generation = 0;
+    uint32_t sourceIndex = 0;
+};
+
 uint64_t HostTime(const AudioTimeStamp* timeStamp) noexcept {
     if (timeStamp == nullptr || (timeStamp->mFlags & kAudioTimeStampHostTimeValid) == 0) return 0;
     return timeStamp->mHostTime;
@@ -448,6 +454,22 @@ OSStatus OutputIOProc(AudioObjectID,
     return noErr;
 }
 
+OSStatus CaptureBridgeIOProc(AudioObjectID,
+                             const AudioTimeStamp*,
+                             const AudioBufferList* input,
+                             const AudioTimeStamp*,
+                             AudioBufferList*,
+                             const AudioTimeStamp*,
+                             void* clientData) noexcept;
+
+OSStatus OutputBridgeIOProc(AudioObjectID,
+                            const AudioTimeStamp*,
+                            const AudioBufferList*,
+                            const AudioTimeStamp*,
+                            AudioBufferList* output,
+                            const AudioTimeStamp*,
+                            void* clientData) noexcept;
+
 bool StopIOProc(AudioObjectID deviceID, AudioDeviceIOProcID& ioProcID) {
     if (deviceID == kAudioObjectUnknown || ioProcID == nullptr) return true;
     const OSStatus stopStatus = AudioDeviceStop(deviceID, ioProcID);
@@ -503,6 +525,171 @@ bool StopRoute(RouteContext* route) {
     }
     return safeToRetire;
 }
+}
+
+struct TBAudioIOProcLease {
+    TBAudioCallbackLease* lease = nullptr;
+    IOProcBridgeContext* context = nullptr;
+};
+
+namespace {
+OSStatus CaptureBridgeIOProc(AudioObjectID,
+                             const AudioTimeStamp*,
+                             const AudioBufferList* input,
+                             const AudioTimeStamp*,
+                             AudioBufferList*,
+                             const AudioTimeStamp*,
+                             void* clientData) noexcept {
+    auto* wrapper = static_cast<TBAudioIOProcLease*>(clientData);
+    if (wrapper == nullptr || wrapper->lease == nullptr) return noErr;
+    auto* context = static_cast<IOProcBridgeContext*>(wrapper->lease->Acquire());
+    if (context == nullptr) return noErr;
+    TBAudioCallbackLeaseGuard flight(wrapper->lease);
+    const TBAudioRealtimeInputView view = MakeInputView(input);
+    TBAudioRealtimeKernelPushCapture(
+        context->kernel,
+        context->generation,
+        context->sourceIndex,
+        &view
+    );
+    return noErr;
+}
+
+OSStatus OutputBridgeIOProc(AudioObjectID,
+                            const AudioTimeStamp*,
+                            const AudioBufferList*,
+                            const AudioTimeStamp*,
+                            AudioBufferList* output,
+                            const AudioTimeStamp*,
+                            void* clientData) noexcept {
+    auto* wrapper = static_cast<TBAudioIOProcLease*>(clientData);
+    if (wrapper == nullptr || wrapper->lease == nullptr) {
+        ZeroBufferList(output);
+        return noErr;
+    }
+    auto* context = static_cast<IOProcBridgeContext*>(wrapper->lease->Acquire());
+    if (context == nullptr) {
+        ZeroBufferList(output);
+        return noErr;
+    }
+    TBAudioCallbackLeaseGuard flight(wrapper->lease);
+    TBAudioRealtimeOutputView view = MakeOutputView(output);
+    if (!TBAudioRealtimeKernelRenderOutput(context->kernel, context->generation, &view)) {
+        ZeroBufferList(output);
+    }
+    return noErr;
+}
+
+OSStatus CreateBridgeIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef kernel,
+    uint64_t generation,
+    uint32_t sourceIndex,
+    AudioDeviceIOProc callback,
+    AudioDeviceIOProcID* outIOProcID,
+    TBAudioCallbackLeaseRef* outLease
+) {
+    if (deviceID == kAudioObjectUnknown || kernel == nullptr
+        || callback == nullptr || outIOProcID == nullptr || outLease == nullptr) {
+        return kAudioHardwareIllegalOperationError;
+    }
+    *outIOProcID = nullptr;
+    *outLease = nullptr;
+    try {
+        auto wrapper = std::make_unique<TBAudioIOProcLease>();
+        auto context = std::make_unique<IOProcBridgeContext>();
+        context->kernel = kernel;
+        context->generation = generation;
+        context->sourceIndex = sourceIndex;
+        wrapper->lease = TBAudioCallbackLease::CreatePermanent(context.get());
+        if (wrapper->lease == nullptr) return kAudioHardwareUnspecifiedError;
+        wrapper->context = context.get();
+        const OSStatus status = AudioDeviceCreateIOProcID(
+            deviceID,
+            callback,
+            wrapper.get(),
+            outIOProcID
+        );
+        if (status != noErr) {
+            wrapper->lease->Detach();
+            TBAudioCallbackLease::RecyclePermanentAfterCallbackSourceDestroyed(wrapper->lease);
+            *outIOProcID = nullptr;
+            return status;
+        }
+        context.release();
+        *outLease = wrapper.release();
+        return noErr;
+    } catch (...) {
+        *outIOProcID = nullptr;
+        *outLease = nullptr;
+        return kAudioHardwareUnspecifiedError;
+    }
+}
+}
+
+extern "C" OSStatus TBAudioCreateCaptureIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef kernel,
+    uint64_t generation,
+    uint32_t sourceIndex,
+    AudioDeviceIOProcID* outIOProcID,
+    TBAudioCallbackLeaseRef* outLease
+) {
+    return CreateBridgeIOProc(
+        deviceID,
+        kernel,
+        generation,
+        sourceIndex,
+        CaptureBridgeIOProc,
+        outIOProcID,
+        outLease
+    );
+}
+
+extern "C" OSStatus TBAudioCreateOutputIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef kernel,
+    uint64_t generation,
+    AudioDeviceIOProcID* outIOProcID,
+    TBAudioCallbackLeaseRef* outLease
+) {
+    return CreateBridgeIOProc(
+        deviceID,
+        kernel,
+        generation,
+        0,
+        OutputBridgeIOProc,
+        outIOProcID,
+        outLease
+    );
+}
+
+extern "C" void TBAudioDetachIOProcLease(TBAudioCallbackLeaseRef lease) {
+    if (lease != nullptr && lease->lease != nullptr) lease->lease->Detach();
+}
+
+extern "C" uint64_t TBAudioIOProcLeaseInFlight(TBAudioCallbackLeaseRef lease) {
+    return lease != nullptr && lease->lease != nullptr ? lease->lease->InFlight() : 0;
+}
+
+extern "C" bool TBAudioDestroyIOProcLease(TBAudioCallbackLeaseRef lease) {
+    if (lease == nullptr) return true;
+    if (lease->lease == nullptr || !lease->lease->IsDetached()
+        || lease->lease->InFlight() != 0) {
+        return false;
+    }
+    if (!TBAudioCallbackLease::RecyclePermanentAfterCallbackSourceDestroyed(lease->lease)) {
+        return false;
+    }
+    delete lease->context;
+    lease->context = nullptr;
+    lease->lease = nullptr;
+    delete lease;
+    return true;
+}
+
+extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
+    return TBAudioCallbackLease::PermanentInUse();
 }
 
 @interface TBAudioRouteDiagnostics ()

@@ -199,6 +199,40 @@ final class AudioRouteLifecycleTests: XCTestCase {
         XCTAssertTrue(reuseCheck(2, 100))
     }
 
+    func testIOProcBridgeCreationFailureRecyclesPermanentLease() throws {
+        let format = TBAudioRealtimeFormat(
+            sampleRate: 48_000,
+            formatID: kAudioFormatLinearPCM,
+            formatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            bytesPerFrame: 8,
+            channelsPerFrame: 2,
+            bitsPerChannel: 32
+        )
+        var sourceFormat = format
+        let kernel = try XCTUnwrap(
+            TBAudioRealtimeKernelCreate(1, &sourceFormat, 1, format, 4, 32, 1)
+        )
+        defer { TBAudioRealtimeKernelDestroy(kernel) }
+        let leasesBefore = TBAudioCallbackLeasePermanentInUse()
+        var ioProcID: AudioDeviceIOProcID?
+        var lease: OpaquePointer?
+
+        let status = TBAudioCreateOutputIOProc(
+            AudioObjectID.max - 1,
+            kernel,
+            1,
+            &ioProcID,
+            &lease
+        )
+
+        XCTAssertNotEqual(status, noErr)
+        XCTAssertNil(ioProcID)
+        XCTAssertNil(lease)
+        XCTAssertEqual(TBAudioCallbackLeasePermanentInUse(), leasesBefore)
+        XCTAssertEqual(TBAudioIOProcLeaseInFlight(nil), 0)
+        XCTAssertTrue(TBAudioDestroyIOProcLease(nil))
+    }
+
     func testDetachedCallbackLeaseRejectsLateCallbacks() throws {
         let lease = try XCTUnwrap(TBAudioCallbackLeaseTestCreate())
         defer { TBAudioCallbackLeaseTestDestroy(lease) }
