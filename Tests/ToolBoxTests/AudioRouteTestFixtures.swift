@@ -38,10 +38,13 @@ enum AudioRouteTestFixtures {
         server: UInt64 = 1,
         outputUID: String = "output-A",
         tapSampleRate: Double = 48_000,
+        aggregateSampleRate: Double? = nil,
         outputSampleRate: Double = 48_000,
         processDeviceID: AudioObjectID = 100
     ) -> HALObservationSnapshot {
-        HALObservationSnapshot(
+        let aggregateSampleRate = aggregateSampleRate ?? tapSampleRate
+
+        return HALObservationSnapshot(
             audioServerGeneration: server,
             routesByID: [
                 outputUID: HALRouteObservation(
@@ -54,7 +57,7 @@ enum AudioRouteTestFixtures {
                         42: AudioFormatFingerprint(format(sampleRate: tapSampleRate))
                     ],
                     aggregateFormatsByProcessObjectID: [
-                        42: AudioFormatFingerprint(format(sampleRate: tapSampleRate))
+                        42: AudioFormatFingerprint(format(sampleRate: aggregateSampleRate))
                     ]
                 )
             ]
