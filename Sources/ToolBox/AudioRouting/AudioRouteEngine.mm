@@ -3,6 +3,7 @@
 #import "AudioRouteDSP.hpp"
 #import "AudioRouteFormat.hpp"
 #import "AudioRouteRealtime.hpp"
+#import "AudioRouteRealtimeKernel.h"
 
 #import <CoreAudio/AudioHardwareTapping.h>
 #import <CoreAudio/CATapDescription.h>
@@ -101,10 +102,9 @@ namespace {
 constexpr NSUInteger kMaximumSources = 32;
 constexpr uint32_t kRingCapacityFrames = 1 << 16;
 constexpr auto kRouteSetupRetryDelay = std::chrono::milliseconds(25);
+std::atomic<uint64_t> nextKernelGeneration{1};
 
 struct SourceContext {
-    SourceContext(uint32_t targetFrames, uint32_t gainRampFrames)
-        : ring(targetFrames, kRingCapacityFrames, gainRampFrames) {}
     ~SourceContext() {
         if (captureIOProcID == nullptr && callbackLease != nullptr) {
             TBAudioCallbackLease::RecyclePermanentAfterCallbackSourceDestroyed(callbackLease);
@@ -115,8 +115,10 @@ struct SourceContext {
     AudioObjectID aggregateID = kAudioObjectUnknown;
     AudioDeviceIOProcID captureIOProcID = nullptr;
     TBAudioCallbackLease* callbackLease = nullptr;
-    TBAudioStereoRingBuffer ring;
-    std::atomic<float> gain{1.0f};
+    TBAudioRealtimeKernelRef kernel = nullptr;
+    uint64_t generation = 0;
+    uint32_t sourceIndex = 0;
+    TBAudioRealtimeFormat realtimeFormat{};
     std::atomic<uint64_t> captureCallbackCount{0};
     std::atomic<uint64_t> captureFrameCount{0};
     std::atomic<uint64_t> lastCaptureHostTime{0};
@@ -131,25 +133,101 @@ struct RouteContext {
         if (outputIOProcID == nullptr && callbackLease != nullptr) {
             TBAudioCallbackLease::RecyclePermanentAfterCallbackSourceDestroyed(callbackLease);
         }
+        TBAudioRealtimeKernelDestroy(kernel);
     }
 
     AudioObjectID outputDeviceID = kAudioObjectUnknown;
     AudioDeviceIOProcID outputIOProcID = nullptr;
     TBAudioCallbackLease* callbackLease = nullptr;
+    TBAudioRealtimeKernelRef kernel = nullptr;
+    uint64_t generation = 0;
     std::vector<std::unique_ptr<SourceContext>> sources;
-    std::atomic<uint64_t> clippedSamples{0};
     std::atomic<uint64_t> outputCallbackCount{0};
     std::atomic<uint64_t> outputFrameCount{0};
     std::atomic<uint64_t> lastOutputHostTime{0};
     std::atomic<uint64_t> formatMismatchCount{0};
     std::atomic<bool> fatalCallbackMismatch{false};
     std::atomic<bool> active{true};
+    uint32_t muteRampFrames = 0;
     uint64_t retirementEpoch = 0;
+};
+
+struct IOProcBridgeContext {
+    TBAudioRealtimeKernelRef kernel = nullptr;
+    uint64_t generation = 0;
+    uint32_t sourceIndex = 0;
 };
 
 uint64_t HostTime(const AudioTimeStamp* timeStamp) noexcept {
     if (timeStamp == nullptr || (timeStamp->mFlags & kAudioTimeStampHostTimeValid) == 0) return 0;
     return timeStamp->mHostTime;
+}
+
+TBAudioRealtimeFormat MakeRealtimeFormat(
+    const AudioStreamBasicDescription& format
+) noexcept {
+    return TBAudioRealtimeFormat{
+        format.mSampleRate,
+        format.mFormatID,
+        format.mFormatFlags,
+        format.mBytesPerPacket,
+        format.mFramesPerPacket,
+        format.mBytesPerFrame,
+        format.mChannelsPerFrame,
+        format.mBitsPerChannel
+    };
+}
+
+TBAudioRealtimeInputView MakeInputView(const AudioBufferList* input) noexcept {
+    TBAudioRealtimeInputView view{};
+    if (input == nullptr || input->mNumberBuffers == 0 || input->mNumberBuffers > 8) return view;
+    view.bufferCount = input->mNumberBuffers;
+    UInt32 frameCount = 0;
+    for (UInt32 index = 0; index < input->mNumberBuffers; ++index) {
+        const AudioBuffer& buffer = input->mBuffers[index];
+        const UInt32 bytesPerFrame = buffer.mNumberChannels * sizeof(float);
+        if (bytesPerFrame == 0 || buffer.mDataByteSize % bytesPerFrame != 0
+            || (buffer.mDataByteSize != 0 && buffer.mData == nullptr)) {
+            return {};
+        }
+        const UInt32 bufferFrames = buffer.mDataByteSize / bytesPerFrame;
+        if (index != 0 && bufferFrames != frameCount) return {};
+        frameCount = bufferFrames;
+        view.buffers[index] = buffer.mData;
+        view.byteSizes[index] = buffer.mDataByteSize;
+    }
+    view.frameCount = frameCount;
+    return view;
+}
+
+TBAudioRealtimeOutputView MakeOutputView(AudioBufferList* output) noexcept {
+    TBAudioRealtimeOutputView view{};
+    if (output == nullptr || output->mNumberBuffers == 0 || output->mNumberBuffers > 8) return view;
+    view.bufferCount = output->mNumberBuffers;
+    UInt32 frameCount = 0;
+    for (UInt32 index = 0; index < output->mNumberBuffers; ++index) {
+        AudioBuffer& buffer = output->mBuffers[index];
+        const UInt32 bytesPerFrame = buffer.mNumberChannels * sizeof(float);
+        if (bytesPerFrame == 0 || buffer.mDataByteSize % bytesPerFrame != 0
+            || (buffer.mDataByteSize != 0 && buffer.mData == nullptr)) {
+            return {};
+        }
+        const UInt32 bufferFrames = buffer.mDataByteSize / bytesPerFrame;
+        if (index != 0 && bufferFrames != frameCount) return {};
+        frameCount = bufferFrames;
+        view.buffers[index] = buffer.mData;
+        view.byteSizes[index] = buffer.mDataByteSize;
+    }
+    view.frameCount = frameCount;
+    return view;
+}
+
+void ZeroBufferList(AudioBufferList* output) noexcept {
+    if (output == nullptr) return;
+    for (UInt32 index = 0; index < output->mNumberBuffers; ++index) {
+        AudioBuffer& buffer = output->mBuffers[index];
+        if (buffer.mData != nullptr) std::memset(buffer.mData, 0, buffer.mDataByteSize);
+    }
 }
 
 NSError* RouteError(OSStatus status, NSString* operation) {
@@ -294,7 +372,11 @@ OSStatus GetStreamFormats(AudioObjectID deviceID,
     return noErr;
 }
 
-OSStatus ValidateOutputDevice(AudioObjectID deviceID, Float64& sampleRate) {
+OSStatus ValidateOutputDevice(
+    AudioObjectID deviceID,
+    Float64& sampleRate,
+    AudioStreamBasicDescription* actualFormat = nullptr
+) {
     std::vector<AudioStreamBasicDescription> outputs;
     OSStatus status = GetStreamFormats(deviceID, kAudioObjectPropertyScopeOutput, outputs);
     if (status != noErr) return status;
@@ -303,10 +385,15 @@ OSStatus ValidateOutputDevice(AudioObjectID deviceID, Float64& sampleRate) {
         return kAudioDeviceUnsupportedFormatError;
     }
     sampleRate = outputs.front().mSampleRate;
+    if (actualFormat != nullptr) *actualFormat = outputs.front();
     return noErr;
 }
 
-OSStatus ValidateCaptureDevice(AudioObjectID deviceID, Float64 sampleRate) {
+OSStatus ValidateCaptureDevice(
+    AudioObjectID deviceID,
+    Float64 sampleRate,
+    AudioStreamBasicDescription* actualFormat = nullptr
+) {
     std::vector<AudioStreamBasicDescription> inputs;
     OSStatus status = GetStreamFormats(deviceID, kAudioObjectPropertyScopeInput, inputs);
     if (status != noErr) return status;
@@ -315,6 +402,7 @@ OSStatus ValidateCaptureDevice(AudioObjectID deviceID, Float64 sampleRate) {
         || !TBAudioSampleRatesCompatible(inputs.front().mSampleRate, sampleRate)) {
         return kAudioDeviceUnsupportedFormatError;
     }
+    if (actualFormat != nullptr) *actualFormat = inputs.front();
     return noErr;
 }
 
@@ -336,21 +424,13 @@ OSStatus CaptureIOProc(AudioObjectID,
     // Capture format mismatches must not poison the whole multi-source route.
     // One bad source (mono/iOS shell/extra streams) should stay silent while siblings
     // keep mixing; only the output IOProc marks the route fatal.
-    if (input == nullptr || input->mNumberBuffers != 1) {
+    const TBAudioRealtimeInputView view = MakeInputView(input);
+    if (!TBAudioRealtimeKernelPushCapture(
+            source->kernel, source->generation, source->sourceIndex, &view)) {
         source->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
         return noErr;
     }
-    const AudioBuffer& buffer = input->mBuffers[0];
-    if (buffer.mData == nullptr || buffer.mNumberChannels != 2
-        || buffer.mDataByteSize % (2 * sizeof(float)) != 0) {
-        source->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
-        return noErr;
-    }
-    const uint32_t frameCount = buffer.mDataByteSize / (2 * sizeof(float));
-    source->ring.Write(
-        static_cast<const float*>(buffer.mData), frameCount
-    );
-    source->captureFrameCount.fetch_add(frameCount, std::memory_order_relaxed);
+    source->captureFrameCount.fetch_add(view.frameCount, std::memory_order_relaxed);
     return noErr;
 }
 
@@ -365,59 +445,42 @@ OSStatus OutputIOProc(AudioObjectID,
     if (lease == nullptr) return noErr;
     auto* route = static_cast<RouteContext*>(lease->Acquire());
     if (route == nullptr) {
-        if (output != nullptr) {
-            for (UInt32 index = 0; index < output->mNumberBuffers; ++index) {
-                AudioBuffer& buffer = output->mBuffers[index];
-                if (buffer.mData != nullptr) std::memset(buffer.mData, 0, buffer.mDataByteSize);
-            }
-        }
+        ZeroBufferList(output);
         return noErr;
     }
     TBAudioCallbackLeaseGuard flight(lease);
     if (!route->active.load(std::memory_order_acquire)) {
-        if (output != nullptr) {
-            for (UInt32 index = 0; index < output->mNumberBuffers; ++index) {
-                AudioBuffer& buffer = output->mBuffers[index];
-                if (buffer.mData != nullptr) std::memset(buffer.mData, 0, buffer.mDataByteSize);
-            }
-        }
+        ZeroBufferList(output);
         return noErr;
     }
     route->outputCallbackCount.fetch_add(1, std::memory_order_relaxed);
     route->lastOutputHostTime.store(HostTime(outputTime), std::memory_order_relaxed);
-    if (output == nullptr) {
+    if (output != nullptr && output->mNumberBuffers > 8) ZeroBufferList(output);
+    TBAudioRealtimeOutputView view = MakeOutputView(output);
+    if (!TBAudioRealtimeKernelRenderOutput(route->kernel, route->generation, &view)) {
         route->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
         route->fatalCallbackMismatch.store(true, std::memory_order_release);
         return noErr;
     }
-    for (UInt32 index = 0; index < output->mNumberBuffers; ++index) {
-        AudioBuffer& buffer = output->mBuffers[index];
-        if (buffer.mData != nullptr) std::memset(buffer.mData, 0, buffer.mDataByteSize);
-    }
-    if (output->mNumberBuffers != 1) {
-        route->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
-        route->fatalCallbackMismatch.store(true, std::memory_order_release);
-        return noErr;
-    }
-    AudioBuffer& destination = output->mBuffers[0];
-    if (destination.mData == nullptr || destination.mNumberChannels != 2
-        || destination.mDataByteSize % (2 * sizeof(float)) != 0) {
-        route->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
-        route->fatalCallbackMismatch.store(true, std::memory_order_release);
-        return noErr;
-    }
-
-    auto* samples = static_cast<float*>(destination.mData);
-    const uint32_t frameCount = destination.mDataByteSize / (2 * sizeof(float));
-    route->outputFrameCount.fetch_add(frameCount, std::memory_order_relaxed);
-    for (const auto& source : route->sources) {
-        source->ring.Mix(samples, frameCount, source->gain.load(std::memory_order_relaxed));
-    }
-    route->clippedSamples.fetch_add(
-        TBAudioClamp(samples, frameCount * 2), std::memory_order_relaxed
-    );
+    route->outputFrameCount.fetch_add(view.frameCount, std::memory_order_relaxed);
     return noErr;
 }
+
+OSStatus CaptureBridgeIOProc(AudioObjectID,
+                             const AudioTimeStamp*,
+                             const AudioBufferList* input,
+                             const AudioTimeStamp*,
+                             AudioBufferList*,
+                             const AudioTimeStamp*,
+                             void* clientData) noexcept;
+
+OSStatus OutputBridgeIOProc(AudioObjectID,
+                            const AudioTimeStamp*,
+                            const AudioBufferList*,
+                            const AudioTimeStamp*,
+                            AudioBufferList* output,
+                            const AudioTimeStamp*,
+                            void* clientData) noexcept;
 
 bool StopIOProc(AudioObjectID deviceID, AudioDeviceIOProcID& ioProcID) {
     if (deviceID == kAudioObjectUnknown || ioProcID == nullptr) return true;
@@ -434,14 +497,15 @@ void BeginFadeOut(RouteContext* route) {
         || !route->active.load(std::memory_order_acquire)) {
         return;
     }
-    for (auto& source : route->sources) {
-        source->gain.store(0, std::memory_order_release);
+    for (uint32_t index = 0; index < route->sources.size(); ++index) {
+        TBAudioRealtimeKernelBeginSourceMute(route->kernel, index, route->muteRampFrames);
     }
 }
 
 API_AVAILABLE(macos(14.2))
 bool StopRoute(RouteContext* route) {
     if (route == nullptr) return true;
+    TBAudioRealtimeKernelDetach(route->kernel);
     for (auto& source : route->sources) {
         source->active.store(false, std::memory_order_release);
         if (source->callbackLease != nullptr) source->callbackLease->Detach();
@@ -473,6 +537,171 @@ bool StopRoute(RouteContext* route) {
     }
     return safeToRetire;
 }
+}
+
+struct TBAudioIOProcLease {
+    TBAudioCallbackLease* lease = nullptr;
+    IOProcBridgeContext* context = nullptr;
+};
+
+namespace {
+OSStatus CaptureBridgeIOProc(AudioObjectID,
+                             const AudioTimeStamp*,
+                             const AudioBufferList* input,
+                             const AudioTimeStamp*,
+                             AudioBufferList*,
+                             const AudioTimeStamp*,
+                             void* clientData) noexcept {
+    auto* wrapper = static_cast<TBAudioIOProcLease*>(clientData);
+    if (wrapper == nullptr || wrapper->lease == nullptr) return noErr;
+    auto* context = static_cast<IOProcBridgeContext*>(wrapper->lease->Acquire());
+    if (context == nullptr) return noErr;
+    TBAudioCallbackLeaseGuard flight(wrapper->lease);
+    const TBAudioRealtimeInputView view = MakeInputView(input);
+    TBAudioRealtimeKernelPushCapture(
+        context->kernel,
+        context->generation,
+        context->sourceIndex,
+        &view
+    );
+    return noErr;
+}
+
+OSStatus OutputBridgeIOProc(AudioObjectID,
+                            const AudioTimeStamp*,
+                            const AudioBufferList*,
+                            const AudioTimeStamp*,
+                            AudioBufferList* output,
+                            const AudioTimeStamp*,
+                            void* clientData) noexcept {
+    auto* wrapper = static_cast<TBAudioIOProcLease*>(clientData);
+    if (wrapper == nullptr || wrapper->lease == nullptr) {
+        ZeroBufferList(output);
+        return noErr;
+    }
+    auto* context = static_cast<IOProcBridgeContext*>(wrapper->lease->Acquire());
+    if (context == nullptr) {
+        ZeroBufferList(output);
+        return noErr;
+    }
+    TBAudioCallbackLeaseGuard flight(wrapper->lease);
+    TBAudioRealtimeOutputView view = MakeOutputView(output);
+    if (!TBAudioRealtimeKernelRenderOutput(context->kernel, context->generation, &view)) {
+        ZeroBufferList(output);
+    }
+    return noErr;
+}
+
+OSStatus CreateBridgeIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef kernel,
+    uint64_t generation,
+    uint32_t sourceIndex,
+    AudioDeviceIOProc callback,
+    AudioDeviceIOProcID* outIOProcID,
+    TBAudioCallbackLeaseRef* outLease
+) {
+    if (deviceID == kAudioObjectUnknown || kernel == nullptr
+        || callback == nullptr || outIOProcID == nullptr || outLease == nullptr) {
+        return kAudioHardwareIllegalOperationError;
+    }
+    *outIOProcID = nullptr;
+    *outLease = nullptr;
+    try {
+        auto wrapper = std::make_unique<TBAudioIOProcLease>();
+        auto context = std::make_unique<IOProcBridgeContext>();
+        context->kernel = kernel;
+        context->generation = generation;
+        context->sourceIndex = sourceIndex;
+        wrapper->lease = TBAudioCallbackLease::CreatePermanent(context.get());
+        if (wrapper->lease == nullptr) return kAudioHardwareUnspecifiedError;
+        wrapper->context = context.get();
+        const OSStatus status = AudioDeviceCreateIOProcID(
+            deviceID,
+            callback,
+            wrapper.get(),
+            outIOProcID
+        );
+        if (status != noErr) {
+            wrapper->lease->Detach();
+            TBAudioCallbackLease::RecyclePermanentAfterCallbackSourceDestroyed(wrapper->lease);
+            *outIOProcID = nullptr;
+            return status;
+        }
+        context.release();
+        *outLease = wrapper.release();
+        return noErr;
+    } catch (...) {
+        *outIOProcID = nullptr;
+        *outLease = nullptr;
+        return kAudioHardwareUnspecifiedError;
+    }
+}
+}
+
+extern "C" OSStatus TBAudioCreateCaptureIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef kernel,
+    uint64_t generation,
+    uint32_t sourceIndex,
+    AudioDeviceIOProcID* outIOProcID,
+    TBAudioCallbackLeaseRef* outLease
+) {
+    return CreateBridgeIOProc(
+        deviceID,
+        kernel,
+        generation,
+        sourceIndex,
+        CaptureBridgeIOProc,
+        outIOProcID,
+        outLease
+    );
+}
+
+extern "C" OSStatus TBAudioCreateOutputIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef kernel,
+    uint64_t generation,
+    AudioDeviceIOProcID* outIOProcID,
+    TBAudioCallbackLeaseRef* outLease
+) {
+    return CreateBridgeIOProc(
+        deviceID,
+        kernel,
+        generation,
+        0,
+        OutputBridgeIOProc,
+        outIOProcID,
+        outLease
+    );
+}
+
+extern "C" void TBAudioDetachIOProcLease(TBAudioCallbackLeaseRef lease) {
+    if (lease != nullptr && lease->lease != nullptr) lease->lease->Detach();
+}
+
+extern "C" uint64_t TBAudioIOProcLeaseInFlight(TBAudioCallbackLeaseRef lease) {
+    return lease != nullptr && lease->lease != nullptr ? lease->lease->InFlight() : 0;
+}
+
+extern "C" bool TBAudioDestroyIOProcLease(TBAudioCallbackLeaseRef lease) {
+    if (lease == nullptr) return true;
+    if (lease->lease == nullptr || !lease->lease->IsDetached()
+        || lease->lease->InFlight() != 0) {
+        return false;
+    }
+    if (!TBAudioCallbackLease::RecyclePermanentAfterCallbackSourceDestroyed(lease->lease)) {
+        return false;
+    }
+    delete lease->context;
+    lease->context = nullptr;
+    lease->lease = nullptr;
+    delete lease;
+    return true;
+}
+
+extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
+    return TBAudioCallbackLease::PermanentInUse();
 }
 
 @interface TBAudioRouteDiagnostics ()
@@ -654,6 +883,7 @@ bool StopRoute(RouteContext* route) {
         return DeviceIDForUID(outputDeviceUID, route->outputDeviceID);
     });
     Float64 outputSampleRate = 0;
+    AudioStreamBasicDescription outputFormat{};
     if (status == noErr && route->outputDeviceID == kAudioObjectUnknown) status = kAudioHardwareBadDeviceError;
     AudioObjectID defaultOutputDeviceID = kAudioObjectUnknown;
     if (status == noErr) {
@@ -664,12 +894,14 @@ bool StopRoute(RouteContext* route) {
     if (status == noErr) {
         failedOperation = @"Validate output device format";
         status = PerformRouteSetupOperation([&] {
-            return ValidateOutputDevice(route->outputDeviceID, outputSampleRate);
+            return ValidateOutputDevice(
+                route->outputDeviceID, outputSampleRate, &outputFormat
+            );
         });
     }
-    route->sources.reserve(processObjectIDs.count);
-
-    for (NSUInteger index = 0; status == noErr && index < processObjectIDs.count; ++index) {
+    uint32_t targetFrames = 0;
+    uint32_t gainRampFrames = 0;
+    if (status == noErr) {
         const uint32_t outputBufferFrames = GetDeviceUInt32Property(
             route->outputDeviceID, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal
         );
@@ -679,11 +911,18 @@ bool StopRoute(RouteContext* route) {
         const uint32_t outputSafetyFrames = GetDeviceUInt32Property(
             route->outputDeviceID, kAudioDevicePropertySafetyOffset, kAudioDevicePropertyScopeOutput
         );
-        const uint32_t targetFrames = TBAudioRecommendedTargetFrames(
+        targetFrames = TBAudioRecommendedTargetFrames(
             outputBufferFrames, outputLatencyFrames, outputSafetyFrames
         );
-        const uint32_t gainRampFrames = std::max<uint32_t>(1, static_cast<uint32_t>(outputSampleRate * 0.010));
-        auto source = std::make_unique<SourceContext>(targetFrames, gainRampFrames);
+        gainRampFrames = std::max<uint32_t>(
+            1, static_cast<uint32_t>(outputSampleRate * 0.010)
+        );
+        route->muteRampFrames = gainRampFrames;
+    }
+    route->sources.reserve(processObjectIDs.count);
+
+    for (NSUInteger index = 0; status == noErr && index < processObjectIDs.count; ++index) {
+        auto source = std::make_unique<SourceContext>();
         source->callbackLease = TBAudioCallbackLease::CreatePermanent(source.get());
         if (source->callbackLease == nullptr) {
             failedOperation = [NSString stringWithFormat:@"Allocate source %lu callback lease", static_cast<unsigned long>(index)];
@@ -795,9 +1034,13 @@ bool StopRoute(RouteContext* route) {
         }
         if (status == noErr) {
             failedOperation = [NSString stringWithFormat:@"Validate source %lu capture format", static_cast<unsigned long>(index)];
+            AudioStreamBasicDescription captureFormat{};
             status = PerformRouteSetupOperation([&] {
-                return ValidateCaptureDevice(source->aggregateID, outputSampleRate);
+                return ValidateCaptureDevice(
+                    source->aggregateID, outputSampleRate, &captureFormat
+                );
             });
+            if (status == noErr) source->realtimeFormat = MakeRealtimeFormat(captureFormat);
         }
         if (status == noErr) {
             failedOperation = [NSString stringWithFormat:@"Create source %lu capture IOProc", static_cast<unsigned long>(index)];
@@ -805,8 +1048,40 @@ bool StopRoute(RouteContext* route) {
                 source->aggregateID, CaptureIOProc, source->callbackLease, &source->captureIOProcID
             );
         }
-        source->gain.store(gains[index].floatValue, std::memory_order_relaxed);
         route->sources.push_back(std::move(source));
+    }
+
+    if (status == noErr) {
+        const TBAudioRealtimeFormat realtimeFormat = MakeRealtimeFormat(outputFormat);
+        std::vector<TBAudioRealtimeFormat> sourceFormats;
+        sourceFormats.reserve(route->sources.size());
+        for (const auto& source : route->sources) {
+            sourceFormats.push_back(source->realtimeFormat);
+        }
+        route->generation = nextKernelGeneration.fetch_add(1, std::memory_order_relaxed);
+        route->kernel = TBAudioRealtimeKernelCreate(
+            route->generation,
+            sourceFormats.data(),
+            static_cast<uint32_t>(sourceFormats.size()),
+            realtimeFormat,
+            targetFrames,
+            kRingCapacityFrames,
+            gainRampFrames
+        );
+        if (route->kernel == nullptr) {
+            failedOperation = @"Allocate realtime audio kernel";
+            status = kAudioHardwareUnspecifiedError;
+        } else {
+            for (uint32_t index = 0; index < route->sources.size(); ++index) {
+                SourceContext* source = route->sources[index].get();
+                source->kernel = route->kernel;
+                source->generation = route->generation;
+                source->sourceIndex = index;
+                TBAudioRealtimeKernelSetSourceGain(
+                    route->kernel, index, gains[index].floatValue
+                );
+            }
+        }
     }
 
     if (status == noErr) {
@@ -846,8 +1121,8 @@ bool StopRoute(RouteContext* route) {
 - (BOOL)updateGainForRoute:(NSString*)identifier sourceIndex:(NSUInteger)sourceIndex gain:(float)gain {
     RouteContext* route = static_cast<RouteContext*>(self.routes[identifier].pointerValue);
     if (route == nullptr || sourceIndex >= route->sources.size() || !std::isfinite(gain)) return NO;
-    route->sources[sourceIndex]->gain.store(
-        std::min(std::max(gain, 0.0f), 3.0f), std::memory_order_relaxed
+    TBAudioRealtimeKernelSetSourceGain(
+        route->kernel, static_cast<uint32_t>(sourceIndex), gain
     );
     return YES;
 }
@@ -896,12 +1171,23 @@ bool StopRoute(RouteContext* route) {
         snapshot.outputCallbackCount = route->outputCallbackCount.load(std::memory_order_relaxed);
         snapshot.outputFrameCount = route->outputFrameCount.load(std::memory_order_relaxed);
         snapshot.lastOutputHostTime = route->lastOutputHostTime.load(std::memory_order_relaxed);
-        snapshot.clippedSampleCount = route->clippedSamples.load(std::memory_order_relaxed);
         snapshot.formatMismatchCount = route->formatMismatchCount.load(std::memory_order_relaxed);
         snapshot.callbacksInFlight = route->callbackLease == nullptr ? 0 : route->callbackLease->InFlight();
         // Output-side fatal only. Per-source capture mismatches are counted below but
         // must not tear down sibling apps sharing this route.
         snapshot.fatalCallbackMismatch = route->fatalCallbackMismatch.load(std::memory_order_acquire);
+
+        TBAudioRealtimeSnapshot realtimeSnapshot{};
+        if (TBAudioRealtimeKernelCopySnapshot(route->kernel, &realtimeSnapshot)) {
+            snapshot.ringOccupancyFrames = realtimeSnapshot.ringOccupancyFrames;
+            snapshot.ringHighWaterFrames = realtimeSnapshot.ringHighWaterFrames;
+            snapshot.warmupFrameCount = realtimeSnapshot.warmupFrameCount;
+            snapshot.underrunFrameCount = realtimeSnapshot.underrunFrameCount;
+            snapshot.overrunFrameCount = realtimeSnapshot.overrunFrameCount;
+            snapshot.forcedResyncCount = realtimeSnapshot.forcedResyncCount;
+            snapshot.nonFiniteSampleCount = realtimeSnapshot.nonFiniteSampleCount;
+            snapshot.clippedSampleCount = realtimeSnapshot.clippedSampleCount;
+        }
 
         for (const auto& source : route->sources) {
             snapshot.captureCallbackCount += source->captureCallbackCount.load(std::memory_order_relaxed);
@@ -910,15 +1196,6 @@ bool StopRoute(RouteContext* route) {
                 snapshot.lastCaptureHostTime,
                 source->lastCaptureHostTime.load(std::memory_order_relaxed)
             );
-            snapshot.ringOccupancyFrames += source->ring.OccupancyFrames();
-            snapshot.ringHighWaterFrames = std::max(
-                snapshot.ringHighWaterFrames, source->ring.HighWaterFrames()
-            );
-            snapshot.warmupFrameCount += source->ring.WarmupFrames();
-            snapshot.underrunFrameCount += source->ring.UnderrunFrames();
-            snapshot.overrunFrameCount += source->ring.DroppedFrames();
-            snapshot.forcedResyncCount += source->ring.ForcedResyncCount();
-            snapshot.nonFiniteSampleCount += source->ring.NonFiniteSamples();
             snapshot.formatMismatchCount += source->formatMismatchCount.load(std::memory_order_relaxed);
             snapshot.callbacksInFlight += source->callbackLease == nullptr ? 0 : source->callbackLease->InFlight();
         }
@@ -942,6 +1219,7 @@ bool StopRoute(RouteContext* route) {
 - (void)resetAfterAudioServerRestart {
     for (NSValue* value in self.routes.allValues) {
         RouteContext* route = static_cast<RouteContext*>(value.pointerValue);
+        TBAudioRealtimeKernelDetach(route->kernel);
         route->active.store(false, std::memory_order_release);
         if (route->callbackLease != nullptr) route->callbackLease->Detach();
         route->outputIOProcID = nullptr;
@@ -955,6 +1233,7 @@ bool StopRoute(RouteContext* route) {
     }
     for (NSValue* value in self.quarantinedRoutes) {
         RouteContext* route = static_cast<RouteContext*>(value.pointerValue);
+        TBAudioRealtimeKernelDetach(route->kernel);
         route->active.store(false, std::memory_order_release);
         if (route->callbackLease != nullptr) route->callbackLease->Detach();
         route->outputIOProcID = nullptr;
@@ -967,7 +1246,9 @@ bool StopRoute(RouteContext* route) {
         [self.abandonedAfterAudioServerRestart addObject:value];
     }
     for (NSValue* value in self.retiredRoutes) {
-        static_cast<RouteContext*>(value.pointerValue)->retirementEpoch = self.controlEpoch;
+        RouteContext* route = static_cast<RouteContext*>(value.pointerValue);
+        TBAudioRealtimeKernelDetach(route->kernel);
+        route->retirementEpoch = self.controlEpoch;
         [self.abandonedAfterAudioServerRestart addObject:value];
     }
     [self.routes removeAllObjects];

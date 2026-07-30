@@ -68,6 +68,15 @@ void TBAudioStereoRingBuffer::Write(const float* source, uint32_t frameCount) no
 }
 
 void TBAudioStereoRingBuffer::Mix(float* destination, uint32_t frameCount, float targetGain) noexcept {
+    MixWithRamp(destination, frameCount, targetGain, gainRampFrames_);
+}
+
+void TBAudioStereoRingBuffer::MixWithRamp(
+    float* destination,
+    uint32_t frameCount,
+    float targetGain,
+    uint32_t rampFrames
+) noexcept {
     if (destination == nullptr || frameCount == 0) return;
     const uint64_t write = writeFrame_.load(std::memory_order_acquire);
     uint64_t read = readFrame_.load(std::memory_order_relaxed);
@@ -132,8 +141,14 @@ void TBAudioStereoRingBuffer::Mix(float* destination, uint32_t frameCount, float
         : 0.0f;
     if (boundedTargetGain != targetGain_) {
         targetGain_ = boundedTargetGain;
-        gainStep_ = (targetGain_ - currentGain_) / gainRampFrames_;
-        gainRampFramesRemaining_ = gainRampFrames_;
+        if (rampFrames == 0) {
+            currentGain_ = targetGain_;
+            gainStep_ = 0;
+            gainRampFramesRemaining_ = 0;
+        } else {
+            gainStep_ = (targetGain_ - currentGain_) / rampFrames;
+            gainRampFramesRemaining_ = rampFrames;
+        }
     }
     for (uint32_t frame = 0; frame < frameCount; ++frame) {
         if (gainRampFramesRemaining_ > 0) {

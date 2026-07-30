@@ -1,4 +1,39 @@
 #import <Foundation/Foundation.h>
+#import <CoreAudio/CoreAudio.h>
+
+#import "AudioRouteRealtimeKernel.h"
+
+typedef struct TBAudioIOProcLease* TBAudioCallbackLeaseRef;
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+OSStatus TBAudioCreateCaptureIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef _Nonnull kernel,
+    uint64_t generation,
+    uint32_t sourceIndex,
+    AudioDeviceIOProcID _Nullable* _Nonnull outIOProcID,
+    TBAudioCallbackLeaseRef _Nullable* _Nonnull outLease
+);
+OSStatus TBAudioCreateOutputIOProc(
+    AudioObjectID deviceID,
+    TBAudioRealtimeKernelRef _Nonnull kernel,
+    uint64_t generation,
+    AudioDeviceIOProcID _Nullable* _Nonnull outIOProcID,
+    TBAudioCallbackLeaseRef _Nullable* _Nonnull outLease
+);
+void TBAudioDetachIOProcLease(TBAudioCallbackLeaseRef _Nullable lease);
+uint64_t TBAudioIOProcLeaseInFlight(TBAudioCallbackLeaseRef _Nullable lease);
+bool TBAudioDestroyIOProcLease(TBAudioCallbackLeaseRef _Nullable lease);
+uint32_t TBAudioCallbackLeasePermanentInUse(void);
+uint32_t TBAudioIOProcTeardownDisposition(OSStatus stopStatus, OSStatus destroyStatus);
+bool TBAudioObjectDestructionComplete(OSStatus status);
+
+#ifdef __cplusplus
+}
+#endif
 
 NS_ASSUME_NONNULL_BEGIN
 
