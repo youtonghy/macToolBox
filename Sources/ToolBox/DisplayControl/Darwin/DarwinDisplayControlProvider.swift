@@ -168,8 +168,9 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 throw DisplayColorPresetError.valueNotAdvertised(rawValue)
             }
 
+            let identityDescription = DDCDiagnostics.identity(identity)
             self.logger.info(
-                "Writing VCP 0x14 value \(rawValue, privacy: .public) to display \(displayID, privacy: .public) via \(transport.backendName, privacy: .public)."
+                "preset-write display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public)"
             )
             guard transport.write(
                 command: 0x14,
@@ -191,6 +192,10 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 case .success(let result):
                     receivedValidRead = true
                     lastObserved = UInt8(exactly: result.current)
+                    let disposition = lastObserved == rawValue ? "match" : "mismatch"
+                    self.logger.debug(
+                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) current=\(DDCDiagnostics.hex(result.current), privacy: .public) maximum=\(DDCDiagnostics.hex(result.maximum), privacy: .public) result=\(disposition, privacy: .public)"
+                    )
                     if lastObserved == rawValue {
                         self.valueStore.invalidate(
                             displayID: displayID,
@@ -204,13 +209,16 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                         )
                     }
                 case .failure(.unsupportedReply):
+                    self.logger.debug(
+                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) result=unsupported-reply"
+                    )
                     self.logger.error(
                         "VCP 0x14 readback was unsupported for display \(displayID, privacy: .public)."
                     )
                     throw DisplayColorPresetError.readbackFailed
                 case .failure(let failure):
-                    self.logger.info(
-                        "VCP 0x14 readback attempt \(attempt, privacy: .public) failed for display \(displayID, privacy: .public): \(String(describing: failure), privacy: .public)."
+                    self.logger.debug(
+                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) result=\(String(describing: failure), privacy: .public)"
                     )
                 }
                 if attempt < maximumReadAttempts {
@@ -412,6 +420,23 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                   case let .success(parsed) = DDCCapabilityParser.parse(rawString) else {
                 return unavailableColorPreset(reason: "The display capability report could not be read and validated.")
             }
+            let advertisedPresetValues: String
+            switch parsed.support(for: 0x14) {
+            case .advertisedWithSubset(let values):
+                advertisedPresetValues = values
+                    .sorted()
+                    .map(DDCDiagnostics.hex)
+                    .joined(separator: ",")
+            case .advertisedNoEnumSubset:
+                advertisedPresetValues = "no-enum-subset"
+            case .notAdvertised:
+                advertisedPresetValues = "not-advertised"
+            case .capabilityStringUnavailable:
+                advertisedPresetValues = "unavailable"
+            }
+            self.logger.debug(
+                "capability-report display=\(displayID, privacy: .public) \(DDCDiagnostics.identity(identity), privacy: .public) backend=\(transport.backendName, privacy: .public) bytes=\(rawString.utf8.count, privacy: .public) vcp-0x14=\(advertisedPresetValues, privacy: .public)"
+            )
             capabilityStore.record(parsed, for: cacheKey)
             report = parsed
         }

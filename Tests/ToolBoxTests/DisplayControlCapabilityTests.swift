@@ -2,6 +2,19 @@ import XCTest
 @testable import ToolBox
 
 final class DisplayControlCapabilityTests: XCTestCase {
+    func testDDCDiagnosticsUsesStableUppercaseHexFormatting() {
+        XCTAssertEqual(DDCDiagnostics.hex(UInt8(0x0B)), "0x0B")
+        XCTAssertEqual(DDCDiagnostics.hex(UInt16(0x0141)), "0x0141")
+        XCTAssertEqual(DDCDiagnostics.bytes([0x00, 0x0B, 0xA7]), "00 0B A7")
+        XCTAssertEqual(DDCDiagnostics.bytes(nil), "transport-failure")
+        XCTAssertEqual(
+            DDCDiagnostics.outcome(
+                .success(DDCReadResult(current: 0x000B, maximum: 0xFFFF))
+            ),
+            "success current=0x000B maximum=0xFFFF"
+        )
+    }
+
     func testGetVCPReplyParserUsesStatusEchoAndCurrentOffsets() {
         let reply = featureReply(command: 0x10, maximum: 100, current: 75)
 

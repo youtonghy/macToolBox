@@ -1,5 +1,37 @@
 import Foundation
 
+enum DDCDiagnostics {
+    static func hex(_ value: UInt8) -> String {
+        String(format: "0x%02X", value)
+    }
+
+    static func hex(_ value: UInt16) -> String {
+        String(format: "0x%04X", value)
+    }
+
+    static func bytes(_ values: [UInt8]?) -> String {
+        guard let values else { return "transport-failure" }
+        return values.map { String(format: "%02X", $0) }.joined(separator: " ")
+    }
+
+    static func identity(_ identity: DisplayHardwareIdentity) -> String {
+        [
+            "vendor=\(identity.vendorNumber.map { String(format: "0x%08X", $0) } ?? "unknown")",
+            "model=\(identity.modelNumber.map { String(format: "0x%08X", $0) } ?? "unknown")",
+            "serial=\(identity.serialNumber.map { String(format: "0x%08X", $0) } ?? "unknown")",
+        ].joined(separator: " ")
+    }
+
+    static func outcome(_ outcome: DDCReadOutcome) -> String {
+        switch outcome {
+        case .success(let result):
+            return "success current=\(hex(result.current)) maximum=\(hex(result.maximum))"
+        case .failure(let failure):
+            return "failure=\(String(describing: failure))"
+        }
+    }
+}
+
 struct DDCReadResult: Equatable {
     var current: UInt16
     var maximum: UInt16

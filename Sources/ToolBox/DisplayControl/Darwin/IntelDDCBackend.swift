@@ -158,10 +158,20 @@ final class IntelDDCBackend: DDCTransport {
                 }
             }
             guard didSend else {
+                Self.logger.debug(
+                    "vcp-read display=\(self.displayID, privacy: .public) backend=\(self.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(command), privacy: .public) attempt=\(attempt, privacy: .public) request=\(DDCDiagnostics.bytes(data), privacy: .public) reply=transport-failure"
+                )
                 continue
             }
 
-            switch DDCFeatureReplyParser.parse(replyData, expectedCommand: command) {
+            let outcome = DDCFeatureReplyParser.parse(
+                replyData,
+                expectedCommand: command
+            )
+            Self.logger.debug(
+                "vcp-read display=\(self.displayID, privacy: .public) backend=\(self.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(command), privacy: .public) attempt=\(attempt, privacy: .public) request=\(DDCDiagnostics.bytes(data), privacy: .public) reply=\(DDCDiagnostics.bytes(replyData), privacy: .public) outcome=\(DDCDiagnostics.outcome(outcome), privacy: .public)"
+            )
+            switch outcome {
             case .success(let result):
                 return .success(result)
             case .failure(.unsupportedReply(let resultCode)):
@@ -193,10 +203,14 @@ final class IntelDDCBackend: DDCTransport {
                 offsetHigh ^ offsetLow ^ 0x4F,
             ]
             self.sleepMicros(options.writeSleepMicros)
-            return self.performCapabilityTransaction(
+            let reply = self.performCapabilityTransaction(
                 request,
                 DDCCapabilityBlockParser.readBufferLength
             )
+            Self.logger.debug(
+                "capability-block display=\(self.displayID, privacy: .public) backend=\(self.backendName, privacy: .public) offset=\(DDCDiagnostics.hex(expectedOffset), privacy: .public) request=\(DDCDiagnostics.bytes(request), privacy: .public) reply=\(DDCDiagnostics.bytes(reply), privacy: .public)"
+            )
+            return reply
         }
     }
 

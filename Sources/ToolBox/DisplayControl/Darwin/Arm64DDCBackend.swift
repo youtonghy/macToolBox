@@ -4,6 +4,7 @@
 import CoreGraphics
 import Foundation
 import IOKit
+import OSLog
 
 final class Arm64DDCBackend: DDCTransport {
     #if arch(arm64)
@@ -13,6 +14,7 @@ final class Arm64DDCBackend: DDCTransport {
     #endif
 
     static let maxMatchScore = 20
+    private static let logger = Logger(subsystem: "ToolBox", category: "Arm64DDC")
 
     let service: IOAVService?
     let backendName: String
@@ -71,7 +73,7 @@ final class Arm64DDCBackend: DDCTransport {
         var send = [command]
         var reply = [UInt8](repeating: 0, count: 11)
 
-        guard Self.performDDCCommunication(
+        let communicated = Self.performDDCCommunication(
             service: service,
             send: &send,
             reply: &reply,
@@ -80,11 +82,20 @@ final class Arm64DDCBackend: DDCTransport {
             readSleepMicros: options.minReplyDelayMicros.map { UInt32($0) },
             retryAttempts: UInt8(min(options.readAttempts, UInt(UInt8.max))),
             retrySleepMicros: options.errorRecoveryWaitMicros
-        ) else {
-            return .failure(.transportFailure)
+        )
+        guard communicated else {
+            let outcome = DDCReadOutcome.failure(.transportFailure)
+            Self.logger.debug(
+                "vcp-read backend=\(self.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(command), privacy: .public) reply=\(DDCDiagnostics.bytes(reply), privacy: .public) outcome=\(DDCDiagnostics.outcome(outcome), privacy: .public)"
+            )
+            return outcome
         }
 
-        return DDCFeatureReplyParser.parse(reply, expectedCommand: command)
+        let outcome = DDCFeatureReplyParser.parse(reply, expectedCommand: command)
+        Self.logger.debug(
+            "vcp-read backend=\(self.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(command), privacy: .public) reply=\(DDCDiagnostics.bytes(reply), privacy: .public) outcome=\(DDCDiagnostics.outcome(outcome), privacy: .public)"
+        )
+        return outcome
     }
 
     func write(command: UInt8, value: UInt16, options: DDCRequestOptions) -> Bool {
@@ -117,10 +128,19 @@ final class Arm64DDCBackend: DDCTransport {
                 offsetHigh ^ offsetLow ^ 0x4F,
             ]
             guard self.capabilityWriteI2C(request) else {
+                Self.logger.debug(
+                    "capability-block backend=\(self.backendName, privacy: .public) offset=\(DDCDiagnostics.hex(expectedOffset), privacy: .public) request=\(DDCDiagnostics.bytes(request), privacy: .public) reply=transport-failure"
+                )
                 return nil
             }
             self.sleepMicros(60_000)
-            return self.capabilityReadI2C(DDCCapabilityBlockParser.readBufferLength)
+            let reply = self.capabilityReadI2C(
+                DDCCapabilityBlockParser.readBufferLength
+            )
+            Self.logger.debug(
+                "capability-block backend=\(self.backendName, privacy: .public) offset=\(DDCDiagnostics.hex(expectedOffset), privacy: .public) request=\(DDCDiagnostics.bytes(request), privacy: .public) reply=\(DDCDiagnostics.bytes(reply), privacy: .public)"
+            )
+            return reply
         }
     }
 }
