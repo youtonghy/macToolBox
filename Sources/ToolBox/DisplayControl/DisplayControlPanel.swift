@@ -1,5 +1,41 @@
 import SwiftUI
 
+enum DisplayControlPanelRow: Hashable {
+    case brightness
+    case contrast
+    case preset
+    case volume
+}
+
+enum DisplayControlPanelLayout {
+    static let iconWidth: CGFloat = 18
+    static let labelWidth: CGFloat = 66
+    static let rowSpacing: CGFloat = 8
+    static let displayPickerWidth: CGFloat = 210
+    static let minimumPresetControlWidth: CGFloat = 210
+    static let panelPadding: CGFloat = 8
+
+    static func rows(showsPreset: Bool) -> [DisplayControlPanelRow] {
+        showsPreset
+            ? [.brightness, .contrast, .preset, .volume]
+            : [.brightness, .contrast, .volume]
+    }
+
+    static func availablePresetControlWidth(panelWidth: CGFloat) -> CGFloat {
+        max(
+            0,
+            panelWidth
+                - MenuPanelLayout.contentInsets.left
+                - MenuPanelLayout.contentInsets.right
+                - MenuPanelLayout.sectionPadding * 2
+                - panelPadding * 2
+                - iconWidth
+                - labelWidth
+                - rowSpacing * 2
+        )
+    }
+}
+
 struct DisplayControlPanel: View {
     @ObservedObject var model: DisplayControlMenuModel
 
@@ -29,17 +65,20 @@ struct DisplayControlPanel: View {
                         }
                     }
                     .labelsHidden()
-                    .frame(width: 210)
+                    .frame(width: DisplayControlPanelLayout.displayPickerWidth)
                     .disabled(model.displayItems.count <= 1)
                 }
 
                 VStack(spacing: MenuPanelLayout.controlRowSpacing) {
-                    sliderRow(kind: .brightness)
-                    sliderRow(kind: .contrast)
-                    sliderRow(kind: .volume)
+                    ForEach(
+                        DisplayControlPanelLayout.rows(showsPreset: model.presetAvailable),
+                        id: \.self
+                    ) { row in
+                        controlRow(row)
+                    }
                 }
             }
-            .padding(8)
+            .padding(DisplayControlPanelLayout.panelPadding)
         }
     }
 
@@ -54,19 +93,76 @@ struct DisplayControlPanel: View {
         )
     }
 
+    @ViewBuilder
+    private func controlRow(_ row: DisplayControlPanelRow) -> some View {
+        switch row {
+        case .brightness:
+            sliderRow(kind: .brightness)
+        case .contrast:
+            sliderRow(kind: .contrast)
+        case .preset:
+            presetRow
+        case .volume:
+            sliderRow(kind: .volume)
+        }
+    }
+
+    private var presetRow: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: DisplayControlPanelLayout.rowSpacing) {
+                Image(systemName: "paintpalette.fill")
+                    .frame(width: DisplayControlPanelLayout.iconWidth)
+
+                Text("色彩预设")
+                    .frame(width: DisplayControlPanelLayout.labelWidth, alignment: .leading)
+
+                Picker("", selection: presetSelectionBinding) {
+                    ForEach(model.presetItems) { item in
+                        Text(item.name)
+                            .lineLimit(1)
+                            .tag(Optional(item.rawValue))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(
+                    minWidth: DisplayControlPanelLayout.minimumPresetControlWidth,
+                    maxWidth: .infinity,
+                    alignment: .trailing
+                )
+            }
+            .accessibilityIdentifier("display-control-preset-row")
+
+            if let errorText = model.presetErrorText {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(
+                        .leading,
+                        DisplayControlPanelLayout.iconWidth
+                            + DisplayControlPanelLayout.labelWidth
+                            + DisplayControlPanelLayout.rowSpacing * 2
+                    )
+                    .accessibilityIdentifier("display-control-preset-error")
+            }
+        }
+    }
+
     private func sliderRow(kind: DisplayControlKind) -> some View {
         guard let item = model.sliderItems.first(where: { $0.kind == kind }) else {
             return AnyView(EmptyView())
         }
 
         return AnyView(
-            HStack(spacing: 8) {
+            HStack(spacing: DisplayControlPanelLayout.rowSpacing) {
                 Image(systemName: item.symbolName)
-                    .frame(width: 18)
+                    .frame(width: DisplayControlPanelLayout.iconWidth)
                     .foregroundStyle(item.isEnabled ? .primary : .secondary)
 
                 Text(item.title)
-                    .frame(width: 66, alignment: .leading)
+                    .frame(width: DisplayControlPanelLayout.labelWidth, alignment: .leading)
 
                 ScrollWheelSlider(value: binding(for: kind), in: 0...1, step: item.step)
                     .disabled(!item.isEnabled)
@@ -85,6 +181,17 @@ struct DisplayControlPanel: View {
                     .buttonStyle(.borderless)
                     .disabled(!model.muteAvailable)
                     .help("切换静音")
+                }
+            }
+        )
+    }
+
+    private var presetSelectionBinding: Binding<UInt8?> {
+        Binding(
+            get: { model.selectedPresetRawValue },
+            set: { rawValue in
+                if let rawValue {
+                    model.setColorPreset(rawValue: rawValue)
                 }
             }
         )

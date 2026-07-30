@@ -62,7 +62,8 @@ final class MenuPanelLayoutTests: XCTestCase {
             MenuPanelLayout.size.height,
             MenuPanelLayout.panelHeight(
                 cableItemCount: HardwareMenuLayout.maxCableItemCount,
-                showsDisplayControl: true
+                showsDisplayControl: true,
+                showsColorPreset: true
             )
         )
         XCTAssertEqual(MenuPanelLayout.contentInsets.top, 14)
@@ -122,7 +123,8 @@ final class MenuPanelLayoutTests: XCTestCase {
             maximumContentHeight,
             MenuPanelLayout.contentHeight(
                 cableItemCount: HardwareMenuLayout.maxCableItemCount,
-                showsDisplayControl: true
+                showsDisplayControl: true,
+                showsColorPreset: true
             )
         )
     }
@@ -131,32 +133,38 @@ final class MenuPanelLayoutTests: XCTestCase {
         let fullHeight = MenuPanelLayout.panelHeight(
             cableItemCount: 1,
             showsDisplayControl: true,
-            showsAudioSection: true
+            showsAudioSection: true,
+            showsColorPreset: true
         )
         let withoutDisplay = MenuPanelLayout.panelHeight(
             cableItemCount: 1,
             showsDisplayControl: false,
-            showsAudioSection: true
+            showsAudioSection: true,
+            showsColorPreset: true
         )
         let withoutCables = MenuPanelLayout.panelHeight(
             cableItemCount: 0,
             showsDisplayControl: true,
-            showsAudioSection: true
+            showsAudioSection: true,
+            showsColorPreset: true
         )
         let withoutAudio = MenuPanelLayout.panelHeight(
             cableItemCount: 1,
             showsDisplayControl: true,
-            showsAudioSection: false
+            showsAudioSection: false,
+            showsColorPreset: true
         )
         let compactHeight = MenuPanelLayout.panelHeight(
             cableItemCount: 0,
             showsDisplayControl: false,
-            showsAudioSection: false
+            showsAudioSection: false,
+            showsColorPreset: true
         )
         let twoRowCables = MenuPanelLayout.panelHeight(
             cableItemCount: 3,
             showsDisplayControl: true,
-            showsAudioSection: true
+            showsAudioSection: true,
+            showsColorPreset: true
         )
 
         XCTAssertLessThan(withoutDisplay, fullHeight)
@@ -166,7 +174,8 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertLessThan(compactHeight, withoutCables)
         XCTAssertEqual(
             fullHeight - withoutDisplay,
-            MenuPanelLayout.contentSpacing + MenuPanelLayout.displaySectionHeight
+            MenuPanelLayout.contentSpacing
+                + MenuPanelLayout.displaySectionHeight(showsColorPreset: true)
         )
         XCTAssertEqual(
             fullHeight - withoutCables,
@@ -191,6 +200,25 @@ final class MenuPanelLayoutTests: XCTestCase {
         )
     }
 
+    func testPanelHeightExpandsOnlyWhenPresetIsVisible() {
+        let withoutPreset = MenuPanelLayout.panelHeight(
+            cableItemCount: 1,
+            showsDisplayControl: true,
+            showsColorPreset: false
+        )
+        let withPreset = MenuPanelLayout.panelHeight(
+            cableItemCount: 1,
+            showsDisplayControl: true,
+            showsColorPreset: true
+        )
+
+        XCTAssertEqual(
+            withPreset - withoutPreset,
+            MenuPanelLayout.displayPresetSectionHeight
+                - MenuPanelLayout.displaySectionHeight
+        )
+    }
+
     func testMenuPopoverUsesSharedContentInsets() {
         let runtimeInsets = MenuBarPanelConfiguration.contentInsets
 
@@ -198,6 +226,100 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertEqual(runtimeInsets.left, MenuPanelLayout.contentInsets.left)
         XCTAssertEqual(runtimeInsets.bottom, MenuPanelLayout.contentInsets.bottom)
         XCTAssertEqual(runtimeInsets.right, MenuPanelLayout.contentInsets.right)
+    }
+
+    func testDisplayPresetRowAppearsImmediatelyBelowContrast() {
+        XCTAssertEqual(
+            DisplayControlPanelLayout.rows(showsPreset: false),
+            [.brightness, .contrast, .volume]
+        )
+        XCTAssertEqual(
+            DisplayControlPanelLayout.rows(showsPreset: true),
+            [.brightness, .contrast, .preset, .volume]
+        )
+    }
+
+    func testDisplayPresetRowUsesStableTracks() {
+        XCTAssertEqual(DisplayControlPanelLayout.iconWidth, 18)
+        XCTAssertEqual(DisplayControlPanelLayout.labelWidth, 66)
+        XCTAssertEqual(DisplayControlPanelLayout.rowSpacing, 8)
+        XCTAssertEqual(DisplayControlPanelLayout.displayPickerWidth, 210)
+        XCTAssertGreaterThanOrEqual(
+            DisplayControlPanelLayout.availablePresetControlWidth(
+                panelWidth: MenuPanelLayout.size.width
+            ),
+            DisplayControlPanelLayout.minimumPresetControlWidth
+        )
+    }
+
+    func testLongestFixturePresetNameFitsControlTrack() {
+        let textWidth = ("Verified HDR Preview" as NSString).size(
+            withAttributes: [.font: NSFont.systemFont(ofSize: NSFont.systemFontSize)]
+        ).width
+        let controlWidth = DisplayControlPanelLayout.availablePresetControlWidth(
+            panelWidth: MenuPanelLayout.size.width
+        )
+
+        XCTAssertLessThan(textWidth, controlWidth)
+        XCTAssertLessThan(
+            DisplayControlPanelLayout.displayPickerWidth,
+            MenuPanelLayout.size.width
+        )
+    }
+
+    @MainActor
+    func testDisplayPanelWithPresetFitsAllocatedSection() {
+        let snapshot = DisplayControlSnapshot(
+            timestamp: Date(),
+            displays: [
+                DisplayControlDisplay(
+                    id: 42,
+                    name: "Preset Display",
+                    vendorNumber: 1,
+                    modelNumber: 2,
+                    serialNumber: 3,
+                    isBuiltIn: false,
+                    isVirtual: false,
+                    supportsHardwareDDC: true,
+                    backendName: "Test DDC",
+                    unavailableReason: nil,
+                    controls: [],
+                    colorPreset: DisplayColorPresetCapability(
+                        status: .available,
+                        currentRawValue: 0x41,
+                        options: [
+                            DisplayColorPresetOption(
+                                rawValue: 0x41,
+                                name: "Verified HDR Preview"
+                            ),
+                        ],
+                        advertisedRawValues: [0x41],
+                        unavailableReason: nil
+                    )
+                ),
+            ]
+        )
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+        model.start()
+
+        let hostingView = NSHostingView(rootView: DisplayControlPanel(model: model))
+        let fittingSize = hostingView.fittingSize
+        let availableWidth = MenuPanelLayout.size.width
+            - MenuPanelLayout.contentInsets.left
+            - MenuPanelLayout.contentInsets.right
+            - MenuPanelLayout.sectionPadding * 2
+
+        XCTAssertLessThanOrEqual(fittingSize.width, availableWidth)
+        XCTAssertLessThanOrEqual(
+            fittingSize.height + MenuPanelLayout.sectionChromeHeight,
+            MenuPanelLayout.displaySectionHeight(showsColorPreset: true)
+        )
     }
 
     @MainActor

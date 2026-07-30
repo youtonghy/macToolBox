@@ -11,7 +11,8 @@ enum MenuPanelLayout {
         height: panelHeight(
             cableItemCount: HardwareMenuLayout.maxCableItemCount,
             showsDisplayControl: true,
-            showsAudioSection: true
+            showsAudioSection: true,
+            showsColorPreset: true
         )
     )
     static let contentInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
@@ -34,6 +35,7 @@ enum MenuPanelLayout {
     static let hardwareSectionHeight = chartHeight + sectionChromeHeight
     static let cableSectionHeight = cableRowHeight + sectionChromeHeight
     static let displaySectionHeight: CGFloat = 154
+    static let displayPresetSectionHeight: CGFloat = 232
     static let audioSectionContentHeight: CGFloat = 112
     static let audioSectionHeight = audioSectionContentHeight + sectionChromeHeight
     static let wifiSectionContentHeight: CGFloat = 82
@@ -42,8 +44,13 @@ enum MenuPanelLayout {
     static let standardContentHeight = contentHeight(
         cableItemCount: 1,
         showsDisplayControl: true,
-        showsAudioSection: true
+        showsAudioSection: true,
+        showsColorPreset: true
     )
+
+    static func displaySectionHeight(showsColorPreset: Bool) -> CGFloat {
+        showsColorPreset ? displayPresetSectionHeight : displaySectionHeight
+    }
 
     static func cableSectionHeight(itemCount: Int) -> CGFloat {
         let listHeight = HardwareMenuLayout.cableListHeight(itemCount: itemCount)
@@ -54,7 +61,8 @@ enum MenuPanelLayout {
     static func contentHeight(
         cableItemCount: Int,
         showsDisplayControl: Bool,
-        showsAudioSection: Bool = true
+        showsAudioSection: Bool = true,
+        showsColorPreset: Bool = false
     ) -> CGFloat {
         var height = headerHeight
             + outerSpacing
@@ -74,7 +82,9 @@ enum MenuPanelLayout {
         }
 
         if showsDisplayControl {
-            height += contentSpacing + displaySectionHeight
+            height += contentSpacing + displaySectionHeight(
+                showsColorPreset: showsColorPreset
+            )
         }
 
         return height
@@ -83,12 +93,14 @@ enum MenuPanelLayout {
     static func panelHeight(
         cableItemCount: Int,
         showsDisplayControl: Bool,
-        showsAudioSection: Bool = true
+        showsAudioSection: Bool = true,
+        showsColorPreset: Bool = false
     ) -> CGFloat {
         contentHeight(
             cableItemCount: cableItemCount,
             showsDisplayControl: showsDisplayControl,
-            showsAudioSection: showsAudioSection
+            showsAudioSection: showsAudioSection,
+            showsColorPreset: showsColorPreset
         )
             + contentInsets.top
             + contentInsets.bottom
@@ -97,14 +109,16 @@ enum MenuPanelLayout {
     static func panelSize(
         cableItemCount: Int,
         showsDisplayControl: Bool,
-        showsAudioSection: Bool = true
+        showsAudioSection: Bool = true,
+        showsColorPreset: Bool = false
     ) -> NSSize {
         NSSize(
             width: size.width,
             height: panelHeight(
                 cableItemCount: cableItemCount,
                 showsDisplayControl: showsDisplayControl,
-                showsAudioSection: showsAudioSection
+                showsAudioSection: showsAudioSection,
+                showsColorPreset: showsColorPreset
             )
         )
     }

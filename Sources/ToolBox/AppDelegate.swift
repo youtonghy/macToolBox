@@ -87,7 +87,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         MenuPanelLayout.panelSize(
             cableItemCount: hardware.cableItems.count,
             showsDisplayControl: displayControlMenu.hasExternalDisplay,
-            showsAudioSection: !audioRouting.menuRows.isEmpty
+            showsAudioSection: !audioRouting.menuRows.isEmpty,
+            showsColorPreset: displayControlMenu.presetAvailable
         )
     }
 
@@ -134,15 +135,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observePanelSizeChanges() {
-        Publishers.CombineLatest3(
+        Publishers.CombineLatest4(
             hardware.$cableItems.map(\.count).removeDuplicates(),
             displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
             audioRouting.$rows.map { rows in
                 rows.contains(where: \.isCurrentlyPlaying)
-            }.removeDuplicates()
+            }.removeDuplicates(),
+            displayControlMenu.$presetAvailable.removeDuplicates()
         )
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _, _ in
+            .sink { [weak self] _, _, _, _ in
                 self?.refreshPanelSize()
             }
             .store(in: &cancellables)

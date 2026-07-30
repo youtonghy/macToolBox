@@ -266,6 +266,25 @@ final class DisplayControlMenuModelTests: XCTestCase {
         XCTAssertEqual(model.selectedPresetRawValue, 0x41)
     }
 
+    func testNoDisplayStateDoesNotExposePresetProjection() {
+        let snapshot = DisplayControlSnapshot(timestamp: Date(), displays: [])
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+
+        model.start()
+
+        XCTAssertFalse(model.hasExternalDisplay)
+        XCTAssertFalse(model.presetAvailable)
+        XCTAssertTrue(model.presetItems.isEmpty)
+        XCTAssertNil(model.selectedPresetRawValue)
+        XCTAssertNil(model.presetErrorText)
+    }
+
     private static let snapshot = DisplayControlSnapshot(
         timestamp: Date(),
         displays: [
