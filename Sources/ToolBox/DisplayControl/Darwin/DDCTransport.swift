@@ -38,17 +38,25 @@ struct DDCRequestOptions {
 
 protocol DDCTransport: AnyObject {
     var backendName: String { get }
+    var connectionToken: UInt64? { get }
 
     func readOutcome(command: UInt8, options: DDCRequestOptions) -> DDCReadOutcome
+    func readCapabilityString(options: DDCRequestOptions) -> Result<String, DDCCapabilityReadFailure>
     func write(command: UInt8, value: UInt16, options: DDCRequestOptions) -> Bool
 }
 
 extension DDCTransport {
+    var connectionToken: UInt64? { nil }
+
     func read(command: UInt8, options: DDCRequestOptions) -> DDCReadResult? {
         guard case let .success(result) = readOutcome(command: command, options: options) else {
             return nil
         }
         return result
+    }
+
+    func readCapabilityString(options _: DDCRequestOptions) -> Result<String, DDCCapabilityReadFailure> {
+        .failure(.transportFailure)
     }
 }
 
@@ -105,6 +113,117 @@ enum DDCFeatureReplyParser {
                 valueType: bytes[5]
             )
         )
+    }
+}
+
+struct DDCCapabilityBlock: Equatable {
+    var offset: UInt16
+    var payload: [UInt8]
+
+    var isTerminator: Bool { payload.isEmpty }
+}
+
+enum DDCCapabilityReadFailure: Error, Equatable {
+    case transportFailure
+    case invalidBlock
+    case unexpectedOffset(expected: UInt16, actual: UInt16)
+    case invalidASCII
+    case exceededMaximumLength
+    case tooManyConsecutiveFailures
+}
+
+enum DDCCapabilityBlockParser {
+    static let readBufferLength = 50
+
+    static func parse(
+        _ bytes: [UInt8],
+        expectedOffset: UInt16
+    ) -> Result<DDCCapabilityBlock, DDCCapabilityReadFailure> {
+        guard bytes.count == readBufferLength,
+              bytes[0] == 0x6E,
+              bytes[2] == 0xE3 else {
+            return .failure(.invalidBlock)
+        }
+
+        let encodedLength = Int(bytes[1] & 0x7F)
+        guard bytes[1] & 0x80 != 0, encodedLength >= 3 else {
+            return .failure(.invalidBlock)
+        }
+
+        let payloadLength = encodedLength - 3
+        let checksumIndex = 5 + payloadLength
+        guard checksumIndex < bytes.count else {
+            return .failure(.invalidBlock)
+        }
+
+        var checksum: UInt8 = 0x50
+        for byte in bytes[..<checksumIndex] {
+            checksum ^= byte
+        }
+        guard checksum == bytes[checksumIndex] else {
+            return .failure(.invalidBlock)
+        }
+
+        let actualOffset = UInt16(bytes[3]) << 8 | UInt16(bytes[4])
+        guard actualOffset == expectedOffset else {
+            return .failure(.unexpectedOffset(expected: expectedOffset, actual: actualOffset))
+        }
+
+        return .success(
+            DDCCapabilityBlock(
+                offset: actualOffset,
+                payload: Array(bytes[5..<checksumIndex])
+            )
+        )
+    }
+}
+
+enum DDCCapabilityStringAssembler {
+    static let maximumLength = 16_384
+    static let maximumConsecutiveFailures = 10
+
+    static func assemble(
+        readBlock: (_ expectedOffset: UInt16) -> [UInt8]?
+    ) -> Result<String, DDCCapabilityReadFailure> {
+        var bytes: [UInt8] = []
+        var expectedOffset: UInt16 = 0
+        var consecutiveFailures = 0
+
+        while true {
+            let parseResult = readBlock(expectedOffset).map {
+                DDCCapabilityBlockParser.parse($0, expectedOffset: expectedOffset)
+            }
+
+            guard let parseResult else {
+                consecutiveFailures += 1
+                if consecutiveFailures > maximumConsecutiveFailures {
+                    return .failure(.tooManyConsecutiveFailures)
+                }
+                continue
+            }
+
+            switch parseResult {
+            case .failure:
+                consecutiveFailures += 1
+                if consecutiveFailures > maximumConsecutiveFailures {
+                    return .failure(.tooManyConsecutiveFailures)
+                }
+            case .success(let block):
+                consecutiveFailures = 0
+                if block.isTerminator {
+                    guard let string = String(bytes: bytes, encoding: .ascii) else {
+                        return .failure(.invalidASCII)
+                    }
+                    return .success(string)
+                }
+
+                guard bytes.count + block.payload.count <= maximumLength else {
+                    return .failure(.exceededMaximumLength)
+                }
+                bytes.append(contentsOf: block.payload)
+                expectedOffset += UInt16(block.payload.count)
+            }
+        }
     }
 }
 

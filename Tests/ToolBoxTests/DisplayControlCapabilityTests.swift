@@ -92,6 +92,72 @@ final class DisplayControlCapabilityTests: XCTestCase {
         )
     }
 
+    func testCapabilityBlockParsesPayloadAndOffset() throws {
+        let bytes = capabilityBlock(offset: 0x0123, payload: Array("vcp(10)".utf8))
+        let block = try DDCCapabilityBlockParser.parse(bytes, expectedOffset: 0x0123).get()
+
+        XCTAssertEqual(block.offset, 0x0123)
+        XCTAssertEqual(block.payload, Array("vcp(10)".utf8))
+        XCTAssertFalse(block.isTerminator)
+    }
+
+    func testCapabilityBlockAcceptsZeroLengthTerminator() throws {
+        let block = try DDCCapabilityBlockParser.parse(
+            capabilityBlock(offset: 8, payload: []),
+            expectedOffset: 8
+        ).get()
+
+        XCTAssertTrue(block.isTerminator)
+    }
+
+    func testCapabilityBlockRejectsLengthPastBuffer() {
+        var bytes = capabilityBlock(offset: 0, payload: [])
+        bytes[1] = 0xFF
+
+        XCTAssertEqual(
+            DDCCapabilityBlockParser.parse(bytes, expectedOffset: 0),
+            .failure(.invalidBlock)
+        )
+    }
+
+    func testCapabilityBlockRejectsChecksumMismatch() {
+        var bytes = capabilityBlock(offset: 0, payload: Array("abc".utf8))
+        bytes[8] ^= 0xFF
+
+        XCTAssertEqual(
+            DDCCapabilityBlockParser.parse(bytes, expectedOffset: 0),
+            .failure(.invalidBlock)
+        )
+    }
+
+    func testCapabilityBlockRejectsUnexpectedOffset() {
+        XCTAssertEqual(
+            DDCCapabilityBlockParser.parse(
+                capabilityBlock(offset: 5, payload: Array("abc".utf8)),
+                expectedOffset: 4
+            ),
+            .failure(.unexpectedOffset(expected: 4, actual: 5))
+        )
+    }
+
+    func testCapabilityStringAssemblerRejectsNonASCIIAndOversizedOutput() {
+        XCTAssertEqual(
+            DDCCapabilityStringAssembler.assemble { offset in
+                offset == 0
+                    ? self.capabilityBlock(offset: 0, payload: [0xFF])
+                    : self.capabilityBlock(offset: 1, payload: [])
+            },
+            .failure(.invalidASCII)
+        )
+
+        XCTAssertEqual(
+            DDCCapabilityStringAssembler.assemble { offset in
+                self.capabilityBlock(offset: offset, payload: [UInt8](repeating: 0x41, count: 44))
+            },
+            .failure(.exceededMaximumLength)
+        )
+    }
+
     func testWriteOnlyControlsRemainWritable() {
         XCTAssertTrue(DisplayControlStatus.available.isWritable)
         XCTAssertTrue(DisplayControlStatus.writeOnly.isWritable)
@@ -159,6 +225,25 @@ final class DisplayControlCapabilityTests: XCTestCase {
             checksum ^= byte
         }
         reply[10] = checksum
+        return reply
+    }
+
+    private func capabilityBlock(offset: UInt16, payload: [UInt8]) -> [UInt8] {
+        precondition(payload.count <= 44)
+        var reply = [UInt8](repeating: 0, count: 50)
+        reply[0] = 0x6E
+        reply[1] = 0x83 + UInt8(payload.count)
+        reply[2] = 0xE3
+        reply[3] = UInt8(offset >> 8)
+        reply[4] = UInt8(offset & 0xFF)
+        reply.replaceSubrange(5..<(5 + payload.count), with: payload)
+
+        let checksumIndex = 5 + payload.count
+        var checksum: UInt8 = 0x50
+        for byte in reply[..<checksumIndex] {
+            checksum ^= byte
+        }
+        reply[checksumIndex] = checksum
         return reply
     }
 }
