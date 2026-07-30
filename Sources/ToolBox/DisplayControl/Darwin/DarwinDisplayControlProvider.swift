@@ -98,7 +98,10 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                     nextReasons[match.displayID] = "No IOAVService was matched for this display."
                     continue
                 }
-                nextTransports[match.displayID] = Arm64DDCBackend(service: service)
+                nextTransports[match.displayID] = Arm64DDCBackend(
+                    service: service,
+                    connectionToken: match.connectionToken
+                )
             }
         } else {
             for displayID in displayIDs {

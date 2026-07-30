@@ -158,6 +158,107 @@ final class DisplayControlCapabilityTests: XCTestCase {
         )
     }
 
+    func testArm64CapabilitySequenceBuildsRequestsAndAssemblesBlocks() throws {
+        var requests: [[UInt8]] = []
+        var readLengths: [Int] = []
+        var sleeps: [UInt32] = []
+        var replies = [
+            capabilityBlock(offset: 0, payload: Array("vcp(".utf8)),
+            capabilityBlock(offset: 4, payload: Array("10)".utf8)),
+            capabilityBlock(offset: 7, payload: []),
+        ]
+        let backend = Arm64DDCBackend(
+            backendName: "test",
+            connectionToken: 42,
+            writeI2C: {
+                requests.append($0)
+                return true
+            },
+            readI2C: {
+                readLengths.append($0)
+                return replies.removeFirst()
+            },
+            sleepMicros: { sleeps.append($0) }
+        )
+
+        XCTAssertEqual(try backend.readCapabilityString(options: .probe).get(), "vcp(10)")
+        XCTAssertEqual(
+            requests,
+            [
+                [0x83, 0xF3, 0x00, 0x00, 0x4F],
+                [0x83, 0xF3, 0x00, 0x04, 0x4B],
+                [0x83, 0xF3, 0x00, 0x07, 0x48],
+            ]
+        )
+        XCTAssertEqual(readLengths, [50, 50, 50])
+        XCTAssertEqual(sleeps, [60_000, 60_000, 60_000])
+    }
+
+    func testArm64CapabilitySequenceRetriesSameOffset() throws {
+        var requests: [[UInt8]] = []
+        var replies: [[UInt8]?] = [
+            nil,
+            capabilityBlock(offset: 0, payload: Array("abc".utf8)),
+            capabilityBlock(offset: 3, payload: []),
+        ]
+        let backend = Arm64DDCBackend(
+            backendName: "test",
+            connectionToken: 7,
+            writeI2C: {
+                requests.append($0)
+                return true
+            },
+            readI2C: { _ in replies.removeFirst() },
+            sleepMicros: { _ in }
+        )
+
+        XCTAssertEqual(try backend.readCapabilityString(options: .probe).get(), "abc")
+        XCTAssertEqual(requests.map { Array($0[2...3]) }, [[0x00, 0x00], [0x00, 0x00], [0x00, 0x03]])
+    }
+
+    func testArm64CapabilitySequenceStopsAfterElevenFailures() {
+        var requestCount = 0
+        let backend = Arm64DDCBackend(
+            backendName: "test",
+            connectionToken: 9,
+            writeI2C: { _ in
+                requestCount += 1
+                return true
+            },
+            readI2C: { _ in nil },
+            sleepMicros: { _ in }
+        )
+
+        XCTAssertEqual(
+            backend.readCapabilityString(options: .probe),
+            .failure(.tooManyConsecutiveFailures)
+        )
+        XCTAssertEqual(requestCount, 11)
+    }
+
+    func testArm64MissingConnectionTokenDoesNotAttemptCapabilityFallback() {
+        var attemptedI2C = false
+        let backend = Arm64DDCBackend(
+            backendName: "test",
+            connectionToken: nil,
+            writeI2C: { _ in
+                attemptedI2C = true
+                return false
+            },
+            readI2C: { _ in
+                attemptedI2C = true
+                return nil
+            },
+            sleepMicros: { _ in }
+        )
+
+        XCTAssertEqual(
+            backend.readCapabilityString(options: .probe),
+            .failure(.transportFailure)
+        )
+        XCTAssertFalse(attemptedI2C)
+    }
+
     func testWriteOnlyControlsRemainWritable() {
         XCTAssertTrue(DisplayControlStatus.available.isWritable)
         XCTAssertTrue(DisplayControlStatus.writeOnly.isWritable)

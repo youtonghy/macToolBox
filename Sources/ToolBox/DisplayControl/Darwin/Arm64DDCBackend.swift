@@ -14,11 +14,57 @@ final class Arm64DDCBackend: DDCTransport {
 
     static let maxMatchScore = 20
 
-    let service: IOAVService
-    let backendName = "DDC/CI over IOAVService"
+    let service: IOAVService?
+    let backendName: String
+    let connectionToken: UInt64?
 
-    init(service: IOAVService) {
+    private let capabilityWriteI2C: ([UInt8]) -> Bool
+    private let capabilityReadI2C: (Int) -> [UInt8]?
+    private let sleepMicros: (UInt32) -> Void
+
+    init(service: IOAVService, connectionToken: UInt64? = nil) {
         self.service = service
+        backendName = "DDC/CI over IOAVService"
+        self.connectionToken = connectionToken
+        capabilityWriteI2C = { request in
+            var bytes = request
+            return IOAVServiceWriteI2C(
+                service,
+                UInt32(Arm64DDCConstants.ddcAddress),
+                UInt32(Arm64DDCConstants.dataAddress),
+                &bytes,
+                UInt32(bytes.count)
+            ) == 0
+        }
+        capabilityReadI2C = { length in
+            var reply = [UInt8](repeating: 0, count: length)
+            guard IOAVServiceReadI2C(
+                service,
+                UInt32(Arm64DDCConstants.ddcAddress),
+                UInt32(Arm64DDCConstants.dataAddress),
+                &reply,
+                UInt32(reply.count)
+            ) == 0 else {
+                return nil
+            }
+            return reply
+        }
+        sleepMicros = { _ = usleep($0) }
+    }
+
+    init(
+        backendName: String,
+        connectionToken: UInt64?,
+        writeI2C: @escaping ([UInt8]) -> Bool,
+        readI2C: @escaping (Int) -> [UInt8]?,
+        sleepMicros: @escaping (UInt32) -> Void
+    ) {
+        service = nil
+        self.backendName = backendName
+        self.connectionToken = connectionToken
+        capabilityWriteI2C = writeI2C
+        capabilityReadI2C = readI2C
+        self.sleepMicros = sleepMicros
     }
 
     func readOutcome(command: UInt8, options: DDCRequestOptions) -> DDCReadOutcome {
@@ -54,11 +100,35 @@ final class Arm64DDCBackend: DDCTransport {
             retrySleepMicros: options.errorRecoveryWaitMicros
         )
     }
+
+    func readCapabilityString(options _: DDCRequestOptions) -> Result<String, DDCCapabilityReadFailure> {
+        guard connectionToken != nil else {
+            return .failure(.transportFailure)
+        }
+
+        return DDCCapabilityStringAssembler.assemble { expectedOffset in
+            let offsetHigh = UInt8(expectedOffset >> 8)
+            let offsetLow = UInt8(expectedOffset & 0xFF)
+            let request: [UInt8] = [
+                0x83,
+                0xF3,
+                offsetHigh,
+                offsetLow,
+                offsetHigh ^ offsetLow ^ 0x4F,
+            ]
+            guard self.capabilityWriteI2C(request) else {
+                return nil
+            }
+            self.sleepMicros(60_000)
+            return self.capabilityReadI2C(DDCCapabilityBlockParser.readBufferLength)
+        }
+    }
 }
 
 struct Arm64DDCServiceMatch {
     var displayID: CGDirectDisplayID
     var service: IOAVService?
+    var connectionToken: UInt64?
     var serviceLocation: Int
     var discouraged: Bool
     var dummy: Bool
@@ -76,6 +146,7 @@ private struct Arm64IORegService {
     var transportUpstream = ""
     var transportDownstream = ""
     var service: IOAVService?
+    var connectionToken: UInt64?
     var serviceLocation = 0
     var displayAttributes: NSDictionary?
 }
@@ -102,6 +173,7 @@ extension Arm64DDCBackend {
                 let match = Arm64DDCServiceMatch(
                     displayID: displayID,
                     service: service.service,
+                    connectionToken: service.connectionToken,
                     serviceLocation: service.serviceLocation,
                     discouraged: checkIfDiscouraged(ioregService: service),
                     dummy: checkIfDummy(ioregService: service),
@@ -382,6 +454,10 @@ extension Arm64DDCBackend {
 
         ioregService.location = location
         if location == "External" {
+            var connectionToken: UInt64 = 0
+            if IORegistryEntryGetRegistryEntryID(entry, &connectionToken) == KERN_SUCCESS {
+                ioregService.connectionToken = connectionToken
+            }
             ioregService.service = IOAVServiceCreateWithService(kCFAllocatorDefault, entry)?.takeRetainedValue() as IOAVService
         }
     }
