@@ -75,7 +75,7 @@ final class IntelDDCBackend: DDCTransport {
         return success
     }
 
-    func read(command: UInt8, options: DDCRequestOptions) -> DDCReadResult? {
+    func readOutcome(command: UInt8, options: DDCRequestOptions) -> DDCReadOutcome {
         var data: [UInt8] = Array(repeating: 0, count: 5)
         var replyData: [UInt8] = Array(repeating: 0, count: 11)
 
@@ -120,30 +120,19 @@ final class IntelDDCBackend: DDCTransport {
                 continue
             }
 
-            let checksum = replyData.last ?? 0
-            var calculated = UInt8(0x50)
-            for byte in replyData.dropLast() {
-                calculated ^= byte
-            }
-            guard checksum == calculated else {
-                Self.logger.info("DDC checksum mismatch for display \(self.displayID, privacy: .public), attempt \(attempt, privacy: .public).")
-                continue
-            }
-            guard replyData[2] == 0x02 else {
-                Self.logger.info("Unexpected DDC response type \(replyData[2], privacy: .public) for display \(self.displayID, privacy: .public).")
-                continue
-            }
-            guard replyData[3] == 0x00 else {
+            switch DDCFeatureReplyParser.parse(replyData, expectedCommand: command) {
+            case .success(let result):
+                return .success(result)
+            case .failure(.unsupportedReply(let resultCode)):
                 Self.logger.info("DDC command \(command, privacy: .public) unsupported for display \(self.displayID, privacy: .public).")
-                return nil
+                return .failure(.unsupportedReply(resultCode: resultCode))
+            case .failure:
+                Self.logger.info("Invalid DDC response for display \(self.displayID, privacy: .public), attempt \(attempt, privacy: .public).")
+                continue
             }
-
-            let maximum = UInt16(replyData[6]) << 8 | UInt16(replyData[7])
-            let current = UInt16(replyData[8]) << 8 | UInt16(replyData[9])
-            return DDCReadResult(current: current, maximum: maximum)
         }
 
-        return nil
+        return .failure(.transportFailure)
     }
 
     private static func supportedTransactionType() -> IOOptionBits? {

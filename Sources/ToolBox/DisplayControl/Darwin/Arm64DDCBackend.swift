@@ -21,7 +21,7 @@ final class Arm64DDCBackend: DDCTransport {
         self.service = service
     }
 
-    func read(command: UInt8, options: DDCRequestOptions) -> DDCReadResult? {
+    func readOutcome(command: UInt8, options: DDCRequestOptions) -> DDCReadOutcome {
         var send = [command]
         var reply = [UInt8](repeating: 0, count: 11)
 
@@ -35,12 +35,10 @@ final class Arm64DDCBackend: DDCTransport {
             retryAttempts: UInt8(min(options.readAttempts, UInt(UInt8.max))),
             retrySleepMicros: options.errorRecoveryWaitMicros
         ) else {
-            return nil
+            return .failure(.transportFailure)
         }
 
-        let maximum = UInt16(reply[6]) << 8 | UInt16(reply[7])
-        let current = UInt16(reply[8]) << 8 | UInt16(reply[9])
-        return DDCReadResult(current: current, maximum: maximum)
+        return DDCFeatureReplyParser.parse(reply, expectedCommand: command)
     }
 
     func write(command: UInt8, value: UInt16, options: DDCRequestOptions) -> Bool {
