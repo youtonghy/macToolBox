@@ -115,6 +115,18 @@ struct DisplayControlValueStore {
         }
     }
 
+    mutating func invalidate(
+        displayID: CGDirectDisplayID,
+        kinds: Set<DisplayControlKind>
+    ) {
+        values = values.filter {
+            $0.key.displayID != displayID || !kinds.contains($0.key.kind)
+        }
+        lastSuccessfulRawValues = lastSuccessfulRawValues.filter {
+            $0.key.displayID != displayID || !kinds.contains($0.key.kind)
+        }
+    }
+
     private static func fallbackValue(
         kind: DisplayControlKind,
         normalized rememberedValue: Double? = nil

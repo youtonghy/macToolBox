@@ -28,6 +28,18 @@ struct DisplayColorPresetWriteResult: Equatable, Sendable {
     var verifiedAt: Date
 }
 
+struct DisplayColorPresetVerificationPolicy: Sendable {
+    var initialDelayNanos: UInt64
+    var retryDelayNanos: UInt64
+    var maximumReadAttempts: Int
+
+    static let poc = DisplayColorPresetVerificationPolicy(
+        initialDelayNanos: 200_000_000,
+        retryDelayNanos: 200_000_000,
+        maximumReadAttempts: 3
+    )
+}
+
 enum DisplayColorPresetError: Error, Equatable, LocalizedError {
     case providerUnsupported
     case capabilityUnavailable
@@ -91,5 +103,13 @@ struct DisplayColorPresetCatalog: Sendable {
             return []
         }
         return verifiedOptions.filter { advertisedValues.contains($0.rawValue) }
+    }
+
+    func contains(identity: DisplayHardwareIdentity) -> Bool {
+        entries[identity] != nil
+    }
+
+    func authorizes(identity: DisplayHardwareIdentity, rawValue: UInt8) -> Bool {
+        entries[identity]?.contains { $0.rawValue == rawValue } == true
     }
 }

@@ -148,6 +148,39 @@ final class DisplayControlValueStoreTests: XCTestCase {
 
         XCTAssertThrowsError(try store.rawValue(for: key, normalized: 0.5))
     }
+
+    func testInvalidationClearsSelectedRuntimeValuesButPreservesBrightnessMemory() throws {
+        let memory = InMemoryDisplayBrightnessMemory()
+        let identity = DisplayBrightnessMemoryIdentity(
+            vendorNumber: 0x10AC,
+            modelNumber: 0xA419,
+            serialNumber: 123_456
+        )
+        var store = DisplayControlValueStore(brightnessMemory: memory)
+        let brightnessKey = DisplayControlValueKey(
+            displayID: displayID,
+            kind: .brightness
+        )
+        let volumeKey = DisplayControlValueKey(
+            displayID: displayID,
+            kind: .volume
+        )
+        store.recordSuccessfulWrite(
+            38,
+            normalized: 0.38,
+            for: brightnessKey,
+            identity: identity
+        )
+        store.recordSuccessfulWrite(24, normalized: 0.24, for: volumeKey)
+
+        store.invalidate(displayID: displayID, kinds: [.brightness, .contrast])
+
+        XCTAssertTrue(store.shouldWrite(38, for: brightnessKey))
+        XCTAssertFalse(store.shouldWrite(24, for: volumeKey))
+        XCTAssertEqual(store.value(for: brightnessKey).rawCurrent, 100)
+        XCTAssertEqual(store.value(for: volumeKey).rawCurrent, 24)
+        XCTAssertEqual(try XCTUnwrap(memory.load(for: identity)), 0.38, accuracy: 0.0001)
+    }
 }
 
 final class DarwinDisplayControlValueDecodingTests: XCTestCase {

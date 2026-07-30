@@ -12,6 +12,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     private let injectedTransportFactory: ((CGDirectDisplayID) -> DDCTransport?)?
     private let presetCatalog: DisplayColorPresetCatalog
     private let colorPresetPOCEnabled: () -> Bool
+    private let verificationPolicy: DisplayColorPresetVerificationPolicy
+    private let sleepNanos: (UInt64) -> Void
     private var transports: [CGDirectDisplayID: DDCTransport] = [:]
     private var unavailableReasons: [CGDirectDisplayID: String] = [:]
     private var valueStore = DisplayControlValueStore()
@@ -24,6 +26,10 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         injectedTransportFactory = nil
         presetCatalog = .production
         colorPresetPOCEnabled = { experimentalFeatures.colorPresetPOCEnabled }
+        verificationPolicy = .poc
+        sleepNanos = { nanos in
+            Thread.sleep(forTimeInterval: Double(nanos) / 1_000_000_000)
+        }
     }
 
     init(
@@ -31,13 +37,19 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         identity: @escaping (CGDirectDisplayID) -> DisplayHardwareIdentity,
         transportFactory: @escaping (CGDirectDisplayID) -> DDCTransport?,
         presetCatalog: DisplayColorPresetCatalog,
-        colorPresetPOCEnabled: @escaping () -> Bool
+        colorPresetPOCEnabled: @escaping () -> Bool,
+        verificationPolicy: DisplayColorPresetVerificationPolicy = .poc,
+        sleepNanos: @escaping (UInt64) -> Void = { nanos in
+            Thread.sleep(forTimeInterval: Double(nanos) / 1_000_000_000)
+        }
     ) {
         onlineDisplayIDsProvider = onlineDisplayIDs
         hardwareIdentityProvider = identity
         injectedTransportFactory = transportFactory
         self.presetCatalog = presetCatalog
         self.colorPresetPOCEnabled = colorPresetPOCEnabled
+        self.verificationPolicy = verificationPolicy
+        self.sleepNanos = sleepNanos
     }
 
     func refresh() async throws {
@@ -105,6 +117,114 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 )
             }
             return self.valueStore.value(for: key)
+        }
+    }
+
+    func writeColorPreset(
+        displayID: CGDirectDisplayID,
+        rawValue: UInt8
+    ) async throws -> DisplayColorPresetWriteResult {
+        try await queue.asyncCancellable {
+            guard self.colorPresetPOCEnabled() else {
+                throw DisplayColorPresetError.capabilityUnavailable
+            }
+            do {
+                try self.ensureDisplayOnline(displayID)
+            } catch {
+                throw DisplayColorPresetError.capabilityUnavailable
+            }
+            guard let transport = self.transports[displayID],
+                  let connectionToken = transport.connectionToken else {
+                throw DisplayColorPresetError.capabilityUnavailable
+            }
+
+            let identity = self.hardwareIdentityProvider(displayID)
+            let cacheKey = DisplayCapabilityCacheKey(
+                displayID: displayID,
+                hardwareIdentity: identity,
+                backendName: transport.backendName,
+                connectionToken: connectionToken
+            )
+            guard let report = self.capabilityStore.report(for: cacheKey) else {
+                throw DisplayColorPresetError.capabilityUnavailable
+            }
+
+            let advertisedValues: Set<UInt8>
+            switch report.support(for: 0x14) {
+            case .advertisedWithSubset(let values):
+                advertisedValues = values
+            case .notAdvertised, .advertisedNoEnumSubset:
+                throw DisplayColorPresetError.presetNotAdvertised
+            case .capabilityStringUnavailable:
+                throw DisplayColorPresetError.capabilityUnavailable
+            }
+            guard advertisedValues.contains(rawValue) else {
+                throw DisplayColorPresetError.valueNotAdvertised(rawValue)
+            }
+            guard self.presetCatalog.contains(identity: identity) else {
+                throw DisplayColorPresetError.unverifiedDisplayIdentity
+            }
+            guard self.presetCatalog.authorizes(identity: identity, rawValue: rawValue) else {
+                throw DisplayColorPresetError.valueNotAdvertised(rawValue)
+            }
+
+            self.logger.info(
+                "Writing VCP 0x14 value \(rawValue, privacy: .public) to display \(displayID, privacy: .public) via \(transport.backendName, privacy: .public)."
+            )
+            guard transport.write(
+                command: 0x14,
+                value: UInt16(rawValue),
+                options: .interactive
+            ) else {
+                self.logger.error(
+                    "VCP 0x14 write failed for display \(displayID, privacy: .public)."
+                )
+                throw DisplayColorPresetError.transportWriteFailed
+            }
+
+            self.sleepNanos(self.verificationPolicy.initialDelayNanos)
+            let maximumReadAttempts = max(self.verificationPolicy.maximumReadAttempts, 1)
+            var lastObserved: UInt8?
+            var receivedValidRead = false
+            for attempt in 1...maximumReadAttempts {
+                switch transport.readOutcome(command: 0x14, options: .interactive) {
+                case .success(let result):
+                    receivedValidRead = true
+                    lastObserved = UInt8(exactly: result.current)
+                    if lastObserved == rawValue {
+                        self.valueStore.invalidate(
+                            displayID: displayID,
+                            kinds: [.brightness, .contrast]
+                        )
+                        return DisplayColorPresetWriteResult(
+                            displayID: displayID,
+                            requestedRawValue: rawValue,
+                            verifiedRawValue: rawValue,
+                            verifiedAt: Date()
+                        )
+                    }
+                case .failure(.unsupportedReply):
+                    self.logger.error(
+                        "VCP 0x14 readback was unsupported for display \(displayID, privacy: .public)."
+                    )
+                    throw DisplayColorPresetError.readbackFailed
+                case .failure(let failure):
+                    self.logger.info(
+                        "VCP 0x14 readback attempt \(attempt, privacy: .public) failed for display \(displayID, privacy: .public): \(String(describing: failure), privacy: .public)."
+                    )
+                }
+                if attempt < maximumReadAttempts {
+                    self.sleepNanos(self.verificationPolicy.retryDelayNanos)
+                }
+            }
+
+            if receivedValidRead {
+                throw DisplayColorPresetError.verificationMismatch(
+                    requested: rawValue,
+                    lastObserved: lastObserved
+                )
+            }
+            throw DisplayColorPresetError.readbackFailed
         }
     }
 
