@@ -22,6 +22,12 @@ struct DisplayControlSliderItem: Identifiable, Equatable {
     var unavailableReason: String?
 }
 
+struct DisplayControlPresetItem: Identifiable, Equatable {
+    var id: UInt8 { rawValue }
+    var rawValue: UInt8
+    var name: String
+}
+
 @MainActor
 final class DisplayControlMenuModel: ObservableObject {
     @Published private(set) var displayItems: [DisplayControlPickerItem] = []
@@ -30,10 +36,15 @@ final class DisplayControlMenuModel: ObservableObject {
     @Published private(set) var statusText = "No controllable external display"
     @Published private(set) var selectedMuted = false
     @Published private(set) var muteAvailable = false
+    @Published private(set) var presetItems: [DisplayControlPresetItem] = []
+    @Published private(set) var selectedPresetRawValue: UInt8?
+    @Published private(set) var presetAvailable = false
+    @Published private(set) var presetErrorText: String?
     @Published var selectedDisplayID: CGDirectDisplayID?
 
     private let service: DisplayControlService
     private let pendingValueLifetimeNanos: UInt64
+    private let colorPresetPOCEnabled: () -> Bool
     private var cancellables = Set<AnyCancellable>()
     private var pendingValues: [DisplayControlPendingKey: Double] = [:]
     private var pendingClearTasks: [DisplayControlPendingKey: Task<Void, Never>] = [:]
@@ -43,12 +54,26 @@ final class DisplayControlMenuModel: ObservableObject {
         self.init(service: .shared)
     }
 
-    init(
+    convenience init(
         service: DisplayControlService,
         pendingValueLifetimeNanos: UInt64 = 750_000_000
     ) {
+        let experimentalFeatures = DisplayControlExperimentalFeatures()
+        self.init(
+            service: service,
+            pendingValueLifetimeNanos: pendingValueLifetimeNanos,
+            colorPresetPOCEnabled: { experimentalFeatures.colorPresetPOCEnabled }
+        )
+    }
+
+    init(
+        service: DisplayControlService,
+        pendingValueLifetimeNanos: UInt64 = 750_000_000,
+        colorPresetPOCEnabled: @escaping () -> Bool
+    ) {
         self.service = service
         self.pendingValueLifetimeNanos = pendingValueLifetimeNanos
+        self.colorPresetPOCEnabled = colorPresetPOCEnabled
     }
 
     var hasExternalDisplay: Bool {
@@ -62,6 +87,13 @@ final class DisplayControlMenuModel: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] snapshot in
                 self?.ingest(snapshot)
+            }
+            .store(in: &cancellables)
+        service.$colorPresetErrors
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                guard let self else { return }
+                self.ingest(self.service.snapshot)
             }
             .store(in: &cancellables)
         ingest(service.snapshot)
@@ -107,6 +139,16 @@ final class DisplayControlMenuModel: ObservableObject {
         service.stepValue(displayID: displayID, kind: kind, delta: delta)
     }
 
+    func setColorPreset(rawValue: UInt8) {
+        guard presetAvailable,
+              presetItems.contains(where: { $0.rawValue == rawValue }),
+              let displayID = selectedDisplayID else {
+            return
+        }
+        service.setColorPreset(displayID: displayID, rawValue: rawValue)
+        ingest(service.snapshot)
+    }
+
     private func ingest(_ snapshot: DisplayControlSnapshot) {
         let externalDisplays = snapshot.displays.filter { !$0.isBuiltIn && !$0.isVirtual }
         displayItems = externalDisplays.map { display in
@@ -131,6 +173,7 @@ final class DisplayControlMenuModel: ObservableObject {
             selectedMuted = false
             muteAvailable = false
             sliderItems = Self.makeEmptySliderItems()
+            resetPresetProjection()
             return
         }
 
@@ -146,6 +189,32 @@ final class DisplayControlMenuModel: ObservableObject {
         selectedMuted = (muteCapability?.value?.normalized ?? 0) >= 0.5
         muteAvailable = muteCapability?.status.isWritable == true
         sliderItems = Self.controlKinds.map { makeSliderItem(kind: $0, display: selected) }
+        projectColorPreset(for: selected)
+    }
+
+    private func projectColorPreset(for display: DisplayControlDisplay) {
+        guard colorPresetPOCEnabled(),
+              display.colorPreset?.status == .available,
+              let capability = display.colorPreset,
+              !capability.options.isEmpty else {
+            resetPresetProjection()
+            return
+        }
+
+        presetItems = capability.options.map {
+            DisplayControlPresetItem(rawValue: $0.rawValue, name: $0.name)
+        }
+        selectedPresetRawValue = service.presentedColorPreset(displayID: display.id)
+            ?? capability.currentRawValue
+        presetAvailable = true
+        presetErrorText = service.colorPresetError(displayID: display.id)
+    }
+
+    private func resetPresetProjection() {
+        presetItems = []
+        selectedPresetRawValue = nil
+        presetAvailable = false
+        presetErrorText = nil
     }
 
     private func preferredDisplayID(from displays: [DisplayControlDisplay]) -> CGDirectDisplayID? {

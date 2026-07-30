@@ -108,6 +108,164 @@ final class DisplayControlMenuModelTests: XCTestCase {
         await provider.releaseFirstWrite()
     }
 
+    func testDisabledPresetFeatureHidesAdvertisedOptionsAndRejectsSelection() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { false }
+        )
+
+        model.start()
+
+        XCTAssertFalse(model.presetAvailable)
+        XCTAssertTrue(model.presetItems.isEmpty)
+        XCTAssertNil(model.selectedPresetRawValue)
+        model.setColorPreset(rawValue: 0x41)
+        for _ in 0..<10 {
+            await Task.yield()
+        }
+        let writes = await provider.recordedPresetWrites()
+        XCTAssertTrue(writes.isEmpty)
+    }
+
+    func testEnabledPresetFeatureProjectsAvailableOptions() {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+
+        model.start()
+
+        XCTAssertTrue(model.presetAvailable)
+        XCTAssertEqual(model.presetItems.map(\.rawValue), [0x0B, 0x41])
+        XCTAssertEqual(model.selectedPresetRawValue, 0x0B)
+        XCTAssertNil(model.presetErrorText)
+    }
+
+    func testUnavailablePresetCapabilityDoesNotExposePicker() {
+        let snapshot = Self.makePresetSnapshot(
+            displays: [
+                Self.makePresetDisplay(
+                    id: 42,
+                    currentRawValue: nil,
+                    status: .unavailable,
+                    options: []
+                ),
+            ]
+        )
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+
+        model.start()
+
+        XCTAssertFalse(model.presetAvailable)
+        XCTAssertTrue(model.presetItems.isEmpty)
+        XCTAssertNil(model.selectedPresetRawValue)
+    }
+
+    func testUnmappedPresetCapabilityDoesNotExposePicker() {
+        let snapshot = Self.makePresetSnapshot(
+            displays: [
+                Self.makePresetDisplay(
+                    id: 42,
+                    currentRawValue: 0x0B,
+                    options: []
+                ),
+            ]
+        )
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+
+        model.start()
+
+        XCTAssertFalse(model.presetAvailable)
+        XCTAssertTrue(model.presetItems.isEmpty)
+        XCTAssertNil(model.selectedPresetRawValue)
+    }
+
+    func testSelectingPresetImmediatelyPublishesPendingSelection() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        await provider.blockFirstPresetWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+        model.start()
+
+        model.setColorPreset(rawValue: 0x41)
+
+        XCTAssertEqual(model.selectedPresetRawValue, 0x41)
+        await provider.waitUntilFirstPresetWriteIsBlocked()
+        await provider.releaseFirstPresetWrite()
+    }
+
+    func testPresetFailureRestoresSelectionAndExposesError() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        await provider.failPresetWrite(rawValue: 0x41)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+        model.start()
+
+        model.setColorPreset(rawValue: 0x41)
+        await provider.waitUntilPresetWriteCount(1)
+        for _ in 0..<100 where model.presetErrorText == nil {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(model.selectedPresetRawValue, 0x0B)
+        XCTAssertEqual(model.presetErrorText, "The color preset could not be read back.")
+    }
+
+    func testSwitchingDisplaysProjectsIndependentPresetOptions() {
+        let snapshot = Self.makePresetSnapshot(
+            displays: [
+                Self.makePresetDisplay(id: 42, currentRawValue: 0x0B),
+                Self.makePresetDisplay(
+                    id: 77,
+                    currentRawValue: 0x41,
+                    options: [DisplayColorPresetOption(rawValue: 0x41, name: "HDR Preview")]
+                ),
+            ]
+        )
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
+        let model = DisplayControlMenuModel(
+            service: service,
+            colorPresetPOCEnabled: { true }
+        )
+        model.start()
+
+        model.select(displayID: 42)
+        XCTAssertEqual(model.presetItems.map(\.rawValue), [0x0B, 0x41])
+        XCTAssertEqual(model.selectedPresetRawValue, 0x0B)
+
+        model.select(displayID: 77)
+        XCTAssertEqual(model.presetItems.map(\.rawValue), [0x41])
+        XCTAssertEqual(model.selectedPresetRawValue, 0x41)
+    }
+
     private static let snapshot = DisplayControlSnapshot(
         timestamp: Date(),
         displays: [
@@ -173,4 +331,45 @@ final class DisplayControlMenuModelTests: XCTestCase {
             ),
         ]
     )
+
+    private static let presetSnapshot = makePresetSnapshot(
+        displays: [makePresetDisplay(id: 42, currentRawValue: 0x0B)]
+    )
+
+    private static func makePresetSnapshot(
+        displays: [DisplayControlDisplay]
+    ) -> DisplayControlSnapshot {
+        DisplayControlSnapshot(timestamp: Date(), displays: displays)
+    }
+
+    private static func makePresetDisplay(
+        id: CGDirectDisplayID,
+        currentRawValue: UInt8?,
+        status: DisplayColorPresetStatus = .available,
+        options: [DisplayColorPresetOption] = [
+            DisplayColorPresetOption(rawValue: 0x0B, name: "sRGB"),
+            DisplayColorPresetOption(rawValue: 0x41, name: "HDR Preview"),
+        ]
+    ) -> DisplayControlDisplay {
+        DisplayControlDisplay(
+            id: id,
+            name: "Preset Display \(id)",
+            vendorNumber: 1,
+            modelNumber: 2,
+            serialNumber: id,
+            isBuiltIn: false,
+            isVirtual: false,
+            supportsHardwareDDC: true,
+            backendName: "Test DDC",
+            unavailableReason: nil,
+            controls: [],
+            colorPreset: DisplayColorPresetCapability(
+                status: status,
+                currentRawValue: currentRawValue,
+                options: options,
+                advertisedRawValues: options.map(\.rawValue),
+                unavailableReason: status == .available ? nil : "Capability unavailable"
+            )
+        )
+    }
 }
