@@ -99,6 +99,7 @@ final class DisplayControlService: ObservableObject {
     static let shared = DisplayControlService()
 
     @Published private(set) var snapshot = DisplayControlSnapshot(timestamp: Date(), displays: [])
+    @Published private(set) var colorPresetErrors: [CGDirectDisplayID: String] = [:]
 
     private let provider: DisplayControlProviding
     private let timing: DisplayControlTiming
@@ -132,6 +133,12 @@ final class DisplayControlService: ObservableObject {
     private var pendingVolumeTargets: [CGDirectDisplayID: Double] = [:]
     private var volumeWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
     private var volumeWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+
+    private var pendingPresetTargets: [CGDirectDisplayID: UInt8] = [:]
+    private var presetWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
+    private var presetWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+    private var desiredPresetValues: [CGDirectDisplayID: UInt8] = [:]
+    private var lastVerifiedPresetValues: [CGDirectDisplayID: UInt8] = [:]
 
     private var displayCallbackRegistered = false
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -238,6 +245,14 @@ final class DisplayControlService: ObservableObject {
         desiredValues[ControlWriteKey(displayID: displayID, kind: kind)]
     }
 
+    func presentedColorPreset(displayID: CGDirectDisplayID) -> UInt8? {
+        desiredPresetValues[displayID]
+    }
+
+    func colorPresetError(displayID: CGDirectDisplayID) -> String? {
+        colorPresetErrors[displayID]
+    }
+
     func normalizedStep(displayID: CGDirectDisplayID, kind: DisplayControlKind) -> Double {
         let value = snapshot.displays
             .first(where: { $0.id == displayID })?
@@ -336,6 +351,20 @@ final class DisplayControlService: ObservableObject {
         volumeWorkerIDs[displayID] = workerID
         volumeWorkers[displayID] = Task { [weak self] in
             await self?.runVolumeWorker(displayID: displayID, workerID: workerID)
+        }
+    }
+
+    func setColorPreset(displayID: CGDirectDisplayID, rawValue: UInt8) {
+        guard !isSuspended else { return }
+        desiredPresetValues[displayID] = rawValue
+        colorPresetErrors[displayID] = nil
+        pendingPresetTargets[displayID] = rawValue
+        guard presetWorkers[displayID] == nil else { return }
+
+        let workerID = UUID()
+        presetWorkerIDs[displayID] = workerID
+        presetWorkers[displayID] = Task { [weak self] in
+            await self?.runPresetWorker(displayID: displayID, workerID: workerID)
         }
     }
 
@@ -541,8 +570,47 @@ final class DisplayControlService: ObservableObject {
         scheduleRefreshWhenIdle()
     }
 
+    private func runPresetWorker(displayID: CGDirectDisplayID, workerID: UUID) async {
+        do {
+            while let target = pendingPresetTargets.removeValue(forKey: displayID) {
+                try Task.checkCancellation()
+                let result = try await provider.writeColorPreset(
+                    displayID: displayID,
+                    rawValue: target
+                )
+                try Task.checkCancellation()
+                guard presetWorkerIDs[displayID] == workerID else { return }
+                lastVerifiedPresetValues[displayID] = result.verifiedRawValue
+                if pendingPresetTargets[displayID] == nil {
+                    desiredPresetValues[displayID] = result.verifiedRawValue
+                }
+                colorPresetErrors[displayID] = nil
+            }
+            finishPresetWorker(displayID: displayID, workerID: workerID)
+        } catch is CancellationError {
+            finishPresetWorker(displayID: displayID, workerID: workerID)
+        } catch {
+            guard presetWorkerIDs[displayID] == workerID else { return }
+            logger.error("Color preset write failed: \(error.localizedDescription, privacy: .public)")
+            pendingPresetTargets[displayID] = nil
+            desiredPresetValues[displayID] = lastVerifiedPresetValues[displayID]
+            colorPresetErrors[displayID] = error.localizedDescription
+            finishPresetWorker(displayID: displayID, workerID: workerID)
+        }
+    }
+
+    private func finishPresetWorker(displayID: CGDirectDisplayID, workerID: UUID) {
+        guard presetWorkerIDs[displayID] == workerID else { return }
+        presetWorkers[displayID] = nil
+        presetWorkerIDs[displayID] = nil
+        scheduleRefreshWhenIdle()
+    }
+
     private func scheduleRefreshWhenIdle() {
-        guard brightnessWorkers.isEmpty, controlWorkers.isEmpty, volumeWorkers.isEmpty else {
+        guard brightnessWorkers.isEmpty,
+              controlWorkers.isEmpty,
+              volumeWorkers.isEmpty,
+              presetWorkers.isEmpty else {
             return
         }
         refreshAfterWritesTask?.cancel()
@@ -570,6 +638,16 @@ final class DisplayControlService: ObservableObject {
     }
 
     private func seedValues(from snapshot: DisplayControlSnapshot) {
+        let displayedIDs = Set(snapshot.displays.map(\.id))
+        let knownPresetIDs = Set(presetWorkers.keys)
+            .union(pendingPresetTargets.keys)
+            .union(desiredPresetValues.keys)
+            .union(lastVerifiedPresetValues.keys)
+            .union(colorPresetErrors.keys)
+        for displayID in knownPresetIDs.subtracting(displayedIDs) {
+            removePresetState(displayID: displayID)
+        }
+
         let activeKeys = Set(
             brightnessWorkers.keys.map { ControlWriteKey(displayID: $0, kind: .brightness) }
         ).union(controlWorkers.keys).union(
@@ -601,7 +679,27 @@ final class DisplayControlService: ObservableObject {
                     lastSuccessfulValues[key] = value.normalized
                 }
             }
+
+            guard presetWorkers[display.id] == nil else { continue }
+            guard display.colorPreset?.status == .available,
+                  let currentRawValue = display.colorPreset?.currentRawValue else {
+                desiredPresetValues[display.id] = nil
+                lastVerifiedPresetValues[display.id] = nil
+                colorPresetErrors[display.id] = nil
+                continue
+            }
+            desiredPresetValues[display.id] = currentRawValue
+            lastVerifiedPresetValues[display.id] = currentRawValue
         }
+    }
+
+    private func removePresetState(displayID: CGDirectDisplayID) {
+        presetWorkerIDs[displayID] = nil
+        presetWorkers.removeValue(forKey: displayID)?.cancel()
+        pendingPresetTargets[displayID] = nil
+        desiredPresetValues[displayID] = nil
+        lastVerifiedPresetValues[displayID] = nil
+        colorPresetErrors[displayID] = nil
     }
 
     private func snapshotValue(
@@ -814,6 +912,7 @@ final class DisplayControlService: ObservableObject {
         brightnessWorkers.values.forEach { $0.cancel() }
         controlWorkers.values.forEach { $0.cancel() }
         volumeWorkers.values.forEach { $0.cancel() }
+        presetWorkers.values.forEach { $0.cancel() }
         refreshAfterWritesTask?.cancel()
 
         brightnessWorkers.removeAll()
@@ -825,6 +924,12 @@ final class DisplayControlService: ObservableObject {
         volumeWorkers.removeAll()
         volumeWorkerIDs.removeAll()
         pendingVolumeTargets.removeAll()
+        presetWorkers.removeAll()
+        presetWorkerIDs.removeAll()
+        pendingPresetTargets.removeAll()
+        desiredPresetValues.removeAll()
+        lastVerifiedPresetValues.removeAll()
+        colorPresetErrors.removeAll()
         refreshAfterWritesTask = nil
         refreshAfterWritesID = nil
         desiredValues.removeAll()

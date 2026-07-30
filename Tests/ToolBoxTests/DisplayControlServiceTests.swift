@@ -82,6 +82,12 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     private var blockedSnapshotStartedWaiters: [CheckedContinuation<Void, Never>] = []
     private var failReleasedSnapshot = false
     private let configuredSnapshot: DisplayControlSnapshot
+    private(set) var presetWrites: [UInt8] = []
+    private var shouldBlockFirstPresetWrite = false
+    private var firstPresetWriteRelease: CheckedContinuation<Void, Never>?
+    private var firstPresetWriteStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var presetWriteCountWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var failingPresetValues = Set<UInt8>()
 
     init(
         snapshot: DisplayControlSnapshot = DisplayControlSnapshot(
@@ -96,6 +102,14 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         shouldBlockFirstWrite = true
     }
 
+    func blockFirstPresetWrite() {
+        shouldBlockFirstPresetWrite = true
+    }
+
+    func failPresetWrite(rawValue: UInt8) {
+        failingPresetValues.insert(rawValue)
+    }
+
     func waitUntilFirstWriteIsBlocked() async {
         if firstWriteRelease != nil {
             return
@@ -108,6 +122,33 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     func releaseFirstWrite() {
         firstWriteRelease?.resume()
         firstWriteRelease = nil
+    }
+
+    func waitUntilFirstPresetWriteIsBlocked() async {
+        if firstPresetWriteRelease != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            firstPresetWriteStartedWaiters.append(continuation)
+        }
+    }
+
+    func releaseFirstPresetWrite() {
+        firstPresetWriteRelease?.resume()
+        firstPresetWriteRelease = nil
+    }
+
+    func waitUntilPresetWriteCount(_ expectedCount: Int) async {
+        if presetWrites.count >= expectedCount {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            presetWriteCountWaiters.append((expectedCount, continuation))
+        }
+    }
+
+    func recordedPresetWrites() -> [UInt8] {
+        presetWrites
     }
 
     func waitUntilWrite(kind: DisplayControlKind, value: Double) async {
@@ -206,6 +247,33 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         )
     }
 
+    func writeColorPreset(
+        displayID: CGDirectDisplayID,
+        rawValue: UInt8
+    ) async throws -> DisplayColorPresetWriteResult {
+        presetWrites.append(rawValue)
+        resumePresetWriteCountWaiters()
+
+        if shouldBlockFirstPresetWrite && presetWrites.count == 1 {
+            await withCheckedContinuation { continuation in
+                firstPresetWriteRelease = continuation
+                let waiters = firstPresetWriteStartedWaiters
+                firstPresetWriteStartedWaiters.removeAll()
+                waiters.forEach { $0.resume() }
+            }
+        }
+
+        if failingPresetValues.remove(rawValue) != nil {
+            throw DisplayColorPresetError.readbackFailed
+        }
+        return DisplayColorPresetWriteResult(
+            displayID: displayID,
+            requestedRawValue: rawValue,
+            verifiedRawValue: rawValue,
+            verifiedAt: Date()
+        )
+    }
+
     private func resumeMatchingWriteWaiters(kind: DisplayControlKind, value: Double) {
         var remaining: [WriteWaiter] = []
         for waiter in writeWaiters {
@@ -216,6 +284,18 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
             }
         }
         writeWaiters = remaining
+    }
+
+    private func resumePresetWriteCountWaiters() {
+        var remaining: [(Int, CheckedContinuation<Void, Never>)] = []
+        for (expectedCount, continuation) in presetWriteCountWaiters {
+            if presetWrites.count >= expectedCount {
+                continuation.resume()
+            } else {
+                remaining.append((expectedCount, continuation))
+            }
+        }
+        presetWriteCountWaiters = remaining
     }
 }
 
@@ -517,6 +597,93 @@ final class DisplayControlServiceTests: XCTestCase {
         XCTAssertEqual(manualEvents[0].1, 0.42, accuracy: 0.0001)
     }
 
+    func testPresetBurstKeepsOnlyInFlightAndLatestValue() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        await provider.blockFirstPresetWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x0B)
+        await provider.waitUntilFirstPresetWriteIsBlocked()
+        service.setColorPreset(displayID: 42, rawValue: 0x41)
+        service.setColorPreset(displayID: 42, rawValue: 0x0C)
+        await provider.releaseFirstPresetWrite()
+        await provider.waitUntilPresetWriteCount(2)
+
+        let writes = await provider.recordedPresetWrites()
+        XCTAssertEqual(writes, [0x0B, 0x0C])
+        XCTAssertEqual(service.presentedColorPreset(displayID: 42), 0x0C)
+    }
+
+    func testPresetFailureRestoresLastVerifiedSelection() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        await provider.failPresetWrite(rawValue: 0x41)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x41)
+        await provider.waitUntilPresetWriteCount(1)
+        await yieldForPendingTasks()
+
+        XCTAssertEqual(service.presentedColorPreset(displayID: 42), 0x0B)
+        XCTAssertNotNil(service.colorPresetError(displayID: 42))
+    }
+
+    func testSleepCancelsPendingPresetWork() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        await provider.blockFirstPresetWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.start()
+        defer { service.stop() }
+        await waitForSnapshotCount(provider, atLeast: 1)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x41)
+        await provider.waitUntilFirstPresetWriteIsBlocked()
+        service.setColorPreset(displayID: 42, rawValue: 0x0C)
+        service.suspendForSleep()
+        await provider.releaseFirstPresetWrite()
+        await yieldForPendingTasks()
+
+        let writes = await provider.recordedPresetWrites()
+        XCTAssertEqual(writes, [0x41])
+        XCTAssertNil(service.presentedColorPreset(displayID: 42))
+    }
+
+    func testDisplayReconfigurationDropsPresetWorkForRemovedDisplay() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        await provider.blockFirstPresetWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x41)
+        await provider.waitUntilFirstPresetWriteIsBlocked()
+        service.setColorPreset(displayID: 42, rawValue: 0x0C)
+        service.setSnapshotForTesting(DisplayControlSnapshot(timestamp: Date(), displays: []))
+        await provider.releaseFirstPresetWrite()
+        await yieldForPendingTasks()
+
+        let writes = await provider.recordedPresetWrites()
+        XCTAssertEqual(writes, [0x41])
+        XCTAssertNil(service.presentedColorPreset(displayID: 42))
+        XCTAssertNil(service.colorPresetError(displayID: 42))
+    }
+
+    func testPresetSuccessSchedulesOneSnapshotRefresh() async {
+        let verifiedSnapshot = Self.makePresetSnapshot(currentRawValue: 0x41)
+        let provider = RecordingDisplayControlProvider(snapshot: verifiedSnapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x41)
+        await provider.waitUntilPresetWriteCount(1)
+        await waitForSnapshotCount(provider, atLeast: 1)
+        await yieldForPendingTasks()
+
+        let snapshotCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(snapshotCount, 1)
+        XCTAssertEqual(service.presentedColorPreset(displayID: 42), 0x41)
+    }
+
     private func waitForSnapshotCount(
         _ provider: RecordingDisplayControlProvider,
         atLeast expectedCount: Int,
@@ -536,5 +703,39 @@ final class DisplayControlServiceTests: XCTestCase {
         for _ in 0..<100 {
             await Task.yield()
         }
+    }
+
+    private static let presetSnapshot = makePresetSnapshot(currentRawValue: 0x0B)
+
+    private static func makePresetSnapshot(currentRawValue: UInt8) -> DisplayControlSnapshot {
+        DisplayControlSnapshot(
+            timestamp: Date(),
+            displays: [
+                DisplayControlDisplay(
+                    id: 42,
+                    name: "Preset Display",
+                    vendorNumber: 1,
+                    modelNumber: 2,
+                    serialNumber: 3,
+                    isBuiltIn: false,
+                    isVirtual: false,
+                    supportsHardwareDDC: true,
+                    backendName: "Test DDC",
+                    unavailableReason: nil,
+                    controls: [],
+                    colorPreset: DisplayColorPresetCapability(
+                        status: .available,
+                        currentRawValue: currentRawValue,
+                        options: [
+                            DisplayColorPresetOption(rawValue: 0x0B, name: "sRGB"),
+                            DisplayColorPresetOption(rawValue: 0x0C, name: "Display P3"),
+                            DisplayColorPresetOption(rawValue: 0x41, name: "HDR Preview"),
+                        ],
+                        advertisedRawValues: [0x0B, 0x0C, 0x41],
+                        unavailableReason: nil
+                    )
+                ),
+            ]
+        )
     }
 }
