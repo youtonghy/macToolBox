@@ -1,6 +1,6 @@
 # macToolBox
 
-一个 macOS 菜单栏常驻工具箱（Swift）。**不进 Dock，只在菜单栏有图标**，点击弹出小窗口，里面展示功耗、线缆信息和工具开关。
+一个 macOS 菜单栏常驻工具箱（Swift）。**不进 Dock，只在菜单栏有图标**，点击弹出小窗口，里面展示功耗、线缆、Wi-Fi 信息和工具开关。
 
 ## 功能
 
@@ -12,9 +12,10 @@
    - 退出：长按 `⌃ ⌥ ⌘ + Esc` ≥ 1.5 秒；或等倒计时到 0 自动收起。
 6. **后台干** — 防止系统睡眠（后台软件可继续运行），允许屏幕熄灭省电；接通电源时合盖也不睡。
    - 机制：`PreventUserIdleSystemSleep` 电源断言 + `caffeinate -s` 子进程（AC 电源下阻止合盖休眠）。
-7. **菜单交互** — 左键点击菜单栏图标时，窗口会贴着图标下方弹出，并完整限制在图标所在的屏幕内；点击其他区域自动收起。右键点击菜单栏图标可直接打开面板、切换常用功能、进入“设置”或退出应用。硬件、线缆、显示器和工具区域采用无需纵向滚动的紧凑单窗口布局，弹窗使用真正裁切的圆角玻璃表面。
+7. **菜单交互** — 左键点击菜单栏图标时，窗口会贴着图标下方弹出，并完整限制在图标所在的屏幕内；点击其他区域自动收起。右键点击菜单栏图标可直接打开面板、切换常用功能、进入“设置”或退出应用。弹窗采用紧凑的圆角玻璃表面，并在屏幕高度不足时允许纵向滚动。
 8. **分应用音频** — macOS 14.2+ 使用公开 Core Audio Process Tap，为正在播放音频的应用设置 0%–300% 音量并选择输出设备；100% 为原始增益。超过 100% 可能削波失真。
-9. **设置窗口** — “首页 / 线缆 / 显示器 / 音频 / 通用”；显示器页提供聚焦模式开关和 20%–85% 变暗强度，音频页提供精确百分比滑杆、恢复 100% 和输出设备选择。
+9. **设置窗口** — “首页 / 线缆 / Wi-Fi / 显示器 / 音频 / 通用”；显示器页提供聚焦模式开关和 20%–85% 变暗强度，音频页提供精确百分比滑杆、恢复 100% 和输出设备选择。
+10. **Wi-Fi 信号** — 使用公开 CoreWLAN 每 2 秒读取当前连接的 RSSI、噪声、SNR、链路速率、信道、频段、宽度、PHY 和安全模式；弹窗提供紧凑概览，设置 → Wi-Fi 提供最近 5 分钟的 RSSI / SNR 内存曲线和完整参数。
 
 ## 构建
 
@@ -61,6 +62,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
   - 调试构建路径/签名变化时，列表里可能出现多条 ToolBox，请只打开当前正在运行的那一项。
   - 请始终用 `./build.sh` 启动 Release 产物，避免误开旧的 Debug/其他路径副本。
 - **分应用音频**：首次启用非默认规则时需要允许 **系统音频录制**。拒绝权限或目标设备断开时，ToolBox 会停止路由并恢复应用原始输出路径。
+- **Wi-Fi 信号**：只读取当前连接，不扫描附近网络，因此不会申请定位权限。macOS 仍可能因隐私策略不提供 SSID / BSSID，此时信号与链路指标继续显示，网络身份标记为“系统未提供”。
 
 ## 目录结构
 
@@ -79,6 +81,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 | `Sources/ToolBox/DisplayControl/Schedule/*` | 定时亮度领域模型、持久化、运行时协调与设置编辑 UI |
 | `Sources/ToolBox/FocusMode/*` | 聚焦模式状态机、AX 焦点追踪、显示器目标解析和被动遮罩窗口 |
 | `Sources/ToolBox/AudioRouting/*` | 分应用规则、HAL 进程/设备注册表、Process Tap 路由引擎、实时 DSP 与两套 UI |
+| `Sources/ToolBox/WiFiSignal/*` | CoreWLAN 当前连接采样、五分钟内存历史、弹窗概览和设置详情 |
 | `Sources/ToolBox/Settings/*` | 设置窗口玻璃卡片等共享 UI 原语 |
 | `Sources/ToolBox/Permissions.swift` | 输入监控 / 辅助功能检测与引导 |
 | `Sources/ToolBox/HotKeyController.swift` | Carbon 全局热键（无需权限） |
@@ -97,6 +100,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 - **定时亮度**：应用未运行时不会改写显示器；无独立守护进程。计划写入为离散跳变（`smooth: false`），强制绕过 write-only 缓存去重。无序列号的显示器不做持久身份绑定。
 - **聚焦模式遮罩**：只在软件层覆盖其他显示器，不会修改 DDC / 硬件背光，也不会降低显示器功耗。单显示器时不会显示遮罩；不提供手动指定焦点屏幕。
 - **分应用音频**：仅控制输出，不改变 Zoom 等第三方应用的麦克风输入。每个应用使用独立的 Tap-only capture aggregate，耳机作为独立输出 sink，因此不会把全双工耳机的麦克风流混入播放。路由先启动物理输出，再启动带静音属性的 capture；正常停止时使用现有 10 ms source ramp 静音并等待 12 ms，再先停 capture，避免输出启动失败或退出时让原应用保持静音。路由只有在 capture 和 output 都实际处理 frame 后才显示为活动；无数据会显示“权限、受保护内容或当前无可捕获音频”。实时缓冲按设备 period/latency/safety offset 计算并限制在 `256...2048` frames；ring 满会记录丢帧，高水位时跳到近期音频，underrun 恢复使用淡入。300% 是线性 3.0 倍增益，写入硬件前会清理非有限值并限制到 `[-1, 1]`，仍可能产生可闻失真。
+- **Wi-Fi 网络身份**：当前版本不请求定位权限，也不主动扫描附近网络。RSSI、噪声、SNR、链路速率和信道来自公开 CoreWLAN 当前接口查询；SSID / BSSID 可能被系统隐藏。链路速率是当前 Wi-Fi 协商速率，不代表互联网下载速度。
 - **应用与设备是独立概念**：Zoom 只是示例，ToolBox 不创建 `ZoomDevice` 或其他应用专用设备。输出设备列表来自 Core Audio 系统枚举；只要应用的 HAL Process Object 存在，音量调整会立即写入其 route，即使应用当时静音，也会在下一帧音频到来时使用新 gain。
 - **输出设备兼容预检**：设置页会在创建 Tap 前读取输出 stream 的虚拟格式和 nominal sample rate。当前只接受 alive、单 stream、native-endian packed interleaved Float32 stereo，且源/目标采样率误差不超过 `1000 ppm` 的设备；不兼容项会禁用并显示原因，这表示明确降级，不代表设备损坏。蓝牙耳机收到 profile/流/格式变化通知时会立即暂停引用它的分应用路由；HAL 状态稳定 1 秒后重新读取完整配置，A2DP 恢复兼容时自动恢复路由。USB、HDMI、内建和有线设备不使用这条蓝牙保护路径。跨采样率转换、多声道与 non-interleaved layout 尚未启用。
 - 默认快捷键（`⌃⌥⌘+Esc`）若与系统或其它 App 冲突可在源码中修改。

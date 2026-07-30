@@ -53,7 +53,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             hardware: hardware,
             displayControl: displayControlMenu,
             audioRouting: audioRouting,
-            focusMode: focusMode
+            focusMode: focusMode,
+            wifiSignal: wifiSignal
         ),
         panelSize: currentPanelSize
     )
@@ -63,6 +64,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displayControl = DisplayControlService.shared
     private let displayControlMenu = DisplayControlMenuModel()
     private let audioRouting = AudioRoutingService()
+    private let wifiSignal = WiFiSignalModel()
     private lazy var displayControlKeys = DisplayControlMediaKeyController(
         service: displayControl,
         menuModel: displayControlMenu
@@ -125,6 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         displayControlMenu.start()
         displayControlKeys.start()
         audioRouting.start()
+        wifiSignal.start()
         focusMode.start()
         observePanelSizeChanges()
         refreshPanelSize()
@@ -179,6 +182,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         awake.stop()
         focusMode.stop()
         hardware.stop()
+        wifiSignal.stop()
         displayControlKeys.stop()
         displayControlMenu.stop()
         brightnessSchedule.stop()
@@ -300,7 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 mediaKeys: displayControlKeys,
                 brightnessSchedule: brightnessSchedule,
                 audioRouting: audioRouting,
-                focusMode: focusMode
+                focusMode: focusMode,
+                wifiSignal: wifiSignal
             ),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)

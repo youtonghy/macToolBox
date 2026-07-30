@@ -36,6 +36,8 @@ enum MenuPanelLayout {
     static let displaySectionHeight: CGFloat = 154
     static let audioSectionContentHeight: CGFloat = 112
     static let audioSectionHeight = audioSectionContentHeight + sectionChromeHeight
+    static let wifiSectionContentHeight: CGFloat = 82
+    static let wifiSectionHeight = wifiSectionContentHeight + sectionChromeHeight
 
     static let standardContentHeight = contentHeight(
         cableItemCount: 1,
@@ -57,6 +59,8 @@ enum MenuPanelLayout {
         var height = headerHeight
             + outerSpacing
             + hardwareSectionHeight
+            + contentSpacing
+            + wifiSectionHeight
             + outerSpacing
             + controlsHeight
 

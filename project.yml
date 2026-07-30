@@ -26,6 +26,7 @@ targets:
     dependencies:
       - sdk: CoreDisplay.framework
       - sdk: CoreAudio.framework
+      - sdk: CoreWLAN.framework
     info:
       path: Resources/Info.plist
       properties:

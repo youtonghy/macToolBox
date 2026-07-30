@@ -4,6 +4,7 @@ import SwiftUI
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case home
     case cables
+    case wifi
     case display
     case audio
     case general
@@ -16,6 +17,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "首页"
         case .cables:
             return "线缆"
+        case .wifi:
+            return "Wi-Fi"
         case .display:
             return "显示器"
         case .audio:
@@ -31,6 +34,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "square.grid.2x2"
         case .cables:
             return "cable.connector"
+        case .wifi:
+            return "wifi"
         case .display:
             return "display"
         case .audio:
@@ -46,6 +51,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemBlue)
         case .cables:
             return Color(nsColor: .systemPurple)
+        case .wifi:
+            return Color(nsColor: .systemGreen)
         case .display:
             return Color(nsColor: .systemTeal)
         case .audio:
@@ -63,6 +70,7 @@ struct SettingsView: View {
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
+    @ObservedObject var wifiSignal: WiFiSignalModel
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
@@ -113,6 +121,8 @@ struct SettingsView: View {
                     SettingsHomeView()
                 case .cables:
                     SettingsCablesView(hardware: hardware)
+                case .wifi:
+                    WiFiSettingsView(model: wifiSignal)
                 case .display:
                     SettingsDisplayView(
                         model: displayControl,
@@ -186,6 +196,11 @@ private struct SettingsHomeView: View {
                         symbolName: "cable.connector",
                         accent: Color(nsColor: .systemPurple),
                         title: "线缆状态"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "wifi",
+                        accent: Color(nsColor: .systemGreen),
+                        title: "Wi-Fi 信号"
                     )
                     SettingsFeatureRow(
                         symbolName: "display.2",

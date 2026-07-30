@@ -7,6 +7,7 @@ struct PopoverContent: View {
     @ObservedObject var displayControl: DisplayControlMenuModel
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
+    @ObservedObject var wifiSignal: WiFiSignalModel
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -28,6 +29,15 @@ struct PopoverContent: View {
                             CableListView(items: hardware.visibleCableItems)
                                 .frame(height: hardware.cableListHeight)
                         }
+                    }
+
+                    section(
+                        title: "Wi-Fi 信号",
+                        subtitle: wifiSignal.snapshot.state == .connected
+                            ? "\(wifiSignal.snapshot.identityText) · \(wifiSignal.snapshot.band.displayText)"
+                            : "当前连接"
+                    ) {
+                        WiFiSignalPopoverView(model: wifiSignal)
                     }
 
                     if displayControl.hasExternalDisplay {

@@ -73,6 +73,7 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertEqual(MenuPanelLayout.controlsHeight, MenuPanelLayout.controlButtonSize)
         XCTAssertEqual(MenuPanelLayout.cornerRadius, 22)
         XCTAssertEqual(MenuPanelLayout.sectionChromeHeight, 44)
+        XCTAssertEqual(MenuPanelLayout.wifiSectionHeight, 126)
     }
 
     func testStandardCompleteConfigurationFitsWithoutScrolling() {
