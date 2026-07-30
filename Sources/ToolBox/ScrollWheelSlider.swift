@@ -52,8 +52,7 @@ struct ScrollWheelValueAdjuster {
             preciseRemainder -= Double(stepCount) * preciseThreshold
         } else {
             preciseRemainder = 0
-            let wholeSteps = Int(delta.rounded(.towardZero))
-            stepCount = wholeSteps == 0 ? (delta > 0 ? 1 : -1) : wholeSteps
+            stepCount = delta > 0 ? 1 : -1
         }
 
         guard stepCount != 0 else { return currentValue }

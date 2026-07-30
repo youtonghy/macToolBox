@@ -30,7 +30,7 @@ final class ScrollWheelSliderTests: XCTestCase {
         )
     }
 
-    func testDiscreteWheelUsesDeltaMagnitudeAndSnapsFromRangeLowerBound() {
+    func testDiscreteWheelIgnoresDeltaMagnitudeAndSnapsFromRangeLowerBound() {
         var adjuster = ScrollWheelValueAdjuster(preciseThreshold: 10)
 
         XCTAssertEqual(
@@ -42,7 +42,7 @@ final class ScrollWheelSliderTests: XCTestCase {
                 step: 0.25,
                 isEnabled: true
             ),
-            10.75,
+            10.5,
             accuracy: 0.000_001
         )
     }
