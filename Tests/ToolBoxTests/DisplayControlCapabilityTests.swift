@@ -45,19 +45,51 @@ final class DisplayControlCapabilityTests: XCTestCase {
     }
 
     func testCapabilityParserExtractsPresetAndInputSubsets() throws {
-        let report = try XCTUnwrap(
-            DDCCapabilityParser.parse(
-                "prot(monitor)type(lcd)vcp(02 04 10 12 14(00 01 08 0b 0c) 16 18 1a 60(01 0f 11) 62)"
-            )
-        )
+        let report = try DDCCapabilityParser.parse(
+            "prot(monitor)type(lcd)vcp(02 04 10 12 14(00 01 08 0b 0c) 16 18 1a 60(01 0f 11) 62)"
+        ).get()
 
         XCTAssertEqual(report.supportedVCPs, [0x02, 0x04, 0x10, 0x12, 0x14, 0x16, 0x18, 0x1A, 0x60, 0x62])
-        XCTAssertEqual(report.presetValues, [0x00, 0x01, 0x08, 0x0B, 0x0C])
-        XCTAssertEqual(report.inputSources, [0x01, 0x0F, 0x11])
+        XCTAssertEqual(report.enumValues[0x14], [0x00, 0x01, 0x08, 0x0B, 0x0C])
+        XCTAssertEqual(report.enumValues[0x60], [0x01, 0x0F, 0x11])
+    }
+
+    func testCapabilityParserPreservesUnknownPresetValues() throws {
+        let report = try DDCCapabilityParser.parse(
+            "prot(monitor)vcp(10 14(0B 41 A7) 60(01 0F))"
+        ).get()
+
+        XCTAssertEqual(report.enumValues[0x14], [0x0B, 0x41, 0xA7])
+    }
+
+    func testCapabilityParserDistinguishesMissingAndEmptyPresetSubset() throws {
+        let noPreset = try DDCCapabilityParser.parse("vcp(10 12 60(01))").get()
+        XCTAssertEqual(noPreset.support(for: 0x14), .notAdvertised)
+
+        let emptyPreset = try DDCCapabilityParser.parse("vcp(10 12 14 60(01))").get()
+        XCTAssertEqual(emptyPreset.support(for: 0x14), .advertisedNoEnumSubset)
+    }
+
+    func testCapabilityParserRejectsTruncatedOrInvalidVCPBlocks() {
+        XCTAssertEqual(
+            DDCCapabilityParser.parse("prot(monitor)vcp(10 14(0B 41)"),
+            .failure(.unterminatedVCPBlock)
+        )
+        XCTAssertEqual(
+            DDCCapabilityParser.parse("vcp(10 14(0B ZZ))"),
+            .failure(.invalidHexToken("ZZ"))
+        )
+        XCTAssertEqual(
+            DDCCapabilityParser.parse("vcp(10 14(0B(41)))"),
+            .failure(.invalidNesting)
+        )
     }
 
     func testCapabilityParserFailsClosedWhenVCPBlockIsMissing() {
-        XCTAssertNil(DDCCapabilityParser.parse("prot(monitor)type(lcd)"))
+        XCTAssertEqual(
+            DDCCapabilityParser.parse("prot(monitor)type(lcd)"),
+            .failure(.missingVCPBlock)
+        )
     }
 
     func testWriteOnlyControlsRemainWritable() {
