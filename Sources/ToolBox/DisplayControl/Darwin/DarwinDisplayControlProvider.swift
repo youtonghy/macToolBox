@@ -7,19 +7,48 @@ import OSLog
 final class DarwinDisplayControlProvider: DisplayControlProviding {
     private let queue = DispatchQueue(label: "ToolBox DisplayControl DDC queue")
     private let logger = Logger(subsystem: "ToolBox", category: "DisplayControlProvider")
+    private let onlineDisplayIDsProvider: () -> [CGDirectDisplayID]
+    private let hardwareIdentityProvider: (CGDirectDisplayID) -> DisplayHardwareIdentity
+    private let injectedTransportFactory: ((CGDirectDisplayID) -> DDCTransport?)?
+    private let presetCatalog: DisplayColorPresetCatalog
+    private let colorPresetPOCEnabled: () -> Bool
     private var transports: [CGDirectDisplayID: DDCTransport] = [:]
     private var unavailableReasons: [CGDirectDisplayID: String] = [:]
     private var valueStore = DisplayControlValueStore()
+    private var capabilityStore = DisplayCapabilityStore()
+
+    init() {
+        let experimentalFeatures = DisplayControlExperimentalFeatures()
+        onlineDisplayIDsProvider = Self.onlineDisplayIDs
+        hardwareIdentityProvider = Self.hardwareIdentity
+        injectedTransportFactory = nil
+        presetCatalog = .production
+        colorPresetPOCEnabled = { experimentalFeatures.colorPresetPOCEnabled }
+    }
+
+    init(
+        onlineDisplayIDs: @escaping () -> [CGDirectDisplayID],
+        identity: @escaping (CGDirectDisplayID) -> DisplayHardwareIdentity,
+        transportFactory: @escaping (CGDirectDisplayID) -> DDCTransport?,
+        presetCatalog: DisplayColorPresetCatalog,
+        colorPresetPOCEnabled: @escaping () -> Bool
+    ) {
+        onlineDisplayIDsProvider = onlineDisplayIDs
+        hardwareIdentityProvider = identity
+        injectedTransportFactory = transportFactory
+        self.presetCatalog = presetCatalog
+        self.colorPresetPOCEnabled = colorPresetPOCEnabled
+    }
 
     func refresh() async throws {
         try await queue.asyncCancellable {
-            try self.refreshConnectionsLocked(displayIDs: Self.onlineDisplayIDs())
+            try self.refreshConnectionsLocked(displayIDs: self.onlineDisplayIDsProvider())
         }
     }
 
     func snapshot() async throws -> DisplayControlSnapshot {
         try await queue.asyncCancellable {
-            let displayIDs = Self.onlineDisplayIDs()
+            let displayIDs = self.onlineDisplayIDsProvider()
             try self.refreshConnectionsLocked(displayIDs: displayIDs)
             return DisplayControlSnapshot(
                 timestamp: Date(),
@@ -41,7 +70,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             self.valueStore.recordObserved(
                 value,
                 for: DisplayControlValueKey(displayID: displayID, kind: kind),
-                identity: Self.brightnessMemoryIdentity(displayID: displayID)
+                identity: self.brightnessMemoryIdentityLocked(displayID: displayID)
             )
             return value
         }
@@ -72,7 +101,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                     rawValue,
                     normalized: normalizedValue,
                     for: key,
-                    identity: Self.brightnessMemoryIdentity(displayID: displayID)
+                    identity: self.brightnessMemoryIdentityLocked(displayID: displayID)
                 )
             }
             return self.valueStore.value(for: key)
@@ -83,7 +112,15 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         var nextTransports: [CGDirectDisplayID: DDCTransport] = [:]
         var nextReasons: [CGDirectDisplayID: String] = [:]
 
-        if Arm64DDCBackend.isArm64 {
+        if let injectedTransportFactory {
+            for displayID in displayIDs {
+                if let transport = injectedTransportFactory(displayID) {
+                    nextTransports[displayID] = transport
+                } else {
+                    nextReasons[displayID] = "No injected DDC transport is available."
+                }
+            }
+        } else if Arm64DDCBackend.isArm64 {
             let matches = Arm64DDCBackend.serviceMatches(displayIDs: displayIDs)
             for match in matches {
                 if match.dummy {
@@ -124,11 +161,25 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         transports = nextTransports
         unavailableReasons = nextReasons
         valueStore.retainDisplays(Set(nextTransports.keys))
+        capabilityStore.retainConnections(
+            Set(nextTransports.compactMap { displayID, transport in
+                guard let connectionToken = transport.connectionToken else {
+                    return nil
+                }
+                return DisplayCapabilityCacheKey(
+                    displayID: displayID,
+                    hardwareIdentity: hardwareIdentityProvider(displayID),
+                    backendName: transport.backendName,
+                    connectionToken: connectionToken
+                )
+            })
+        )
     }
 
     private func makeDisplayLocked(displayID: CGDirectDisplayID) -> DisplayControlDisplay {
         let transport = transports[displayID]
         let reason = unavailableReasonLocked(displayID: displayID)
+        let identity = hardwareIdentityProvider(displayID)
         let controls = DisplayControlKind.allCases.map { kind in
             makeCapabilityLocked(displayID: displayID, kind: kind, transport: transport, displayReason: reason)
         }
@@ -136,15 +187,20 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         return DisplayControlDisplay(
             id: displayID,
             name: Self.displayName(displayID: displayID),
-            vendorNumber: Self.vendorNumber(displayID: displayID),
-            modelNumber: Self.modelNumber(displayID: displayID),
-            serialNumber: Self.serialNumber(displayID: displayID),
+            vendorNumber: identity.vendorNumber,
+            modelNumber: identity.modelNumber,
+            serialNumber: identity.serialNumber,
             isBuiltIn: CGDisplayIsBuiltin(displayID) != 0,
             isVirtual: Self.isVirtual(displayID: displayID),
             supportsHardwareDDC: transport != nil,
             backendName: transport?.backendName,
             unavailableReason: transport == nil ? reason : nil,
-            controls: controls
+            controls: controls,
+            colorPreset: makeColorPresetLocked(
+                displayID: displayID,
+                identity: identity,
+                transport: transport
+            )
         )
     }
 
@@ -154,7 +210,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         transport: DDCTransport?,
         displayReason: String
     ) -> DisplayControlCapability {
-        guard Self.isExternalHardwareDisplay(displayID) else {
+        guard isExternalHardwareDisplayLocked(displayID) else {
             return DisplayControlCapability(
                 kind: kind,
                 status: .unsupported,
@@ -179,13 +235,13 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         )
         return valueStore.capability(
             for: key,
-            identity: Self.brightnessMemoryIdentity(displayID: displayID),
+            identity: brightnessMemoryIdentityLocked(displayID: displayID),
             observedValue: observedValue
         )
     }
 
     private func ensureDisplayOnline(_ displayID: CGDirectDisplayID) throws {
-        let online = Self.onlineDisplayIDs()
+        let online = onlineDisplayIDsProvider()
         guard online.contains(displayID) else {
             throw DisplayControlError.displayNotFound(displayID)
         }
@@ -208,6 +264,114 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
 
     private func unavailableReasonLocked(displayID: CGDirectDisplayID) -> String {
         unavailableReasons[displayID] ?? Self.staticUnavailableReason(displayID: displayID)
+    }
+
+    private func makeColorPresetLocked(
+        displayID: CGDirectDisplayID,
+        identity: DisplayHardwareIdentity,
+        transport: DDCTransport?
+    ) -> DisplayColorPresetCapability? {
+        guard colorPresetPOCEnabled() else {
+            return nil
+        }
+        guard let transport, let connectionToken = transport.connectionToken else {
+            return unavailableColorPreset(reason: "Capability discovery requires a registry-backed display connection.")
+        }
+
+        let cacheKey = DisplayCapabilityCacheKey(
+            displayID: displayID,
+            hardwareIdentity: identity,
+            backendName: transport.backendName,
+            connectionToken: connectionToken
+        )
+        let report: DDCCapabilityReport
+        if let cached = capabilityStore.report(for: cacheKey) {
+            report = cached
+        } else {
+            guard case let .success(rawString) = transport.readCapabilityString(options: .probe),
+                  case let .success(parsed) = DDCCapabilityParser.parse(rawString) else {
+                return unavailableColorPreset(reason: "The display capability report could not be read and validated.")
+            }
+            capabilityStore.record(parsed, for: cacheKey)
+            report = parsed
+        }
+
+        switch report.support(for: 0x14) {
+        case .capabilityStringUnavailable:
+            return unavailableColorPreset(
+                reason: "The display capability report is unavailable."
+            )
+        case .notAdvertised:
+            return DisplayColorPresetCapability(
+                status: .unsupported,
+                currentRawValue: nil,
+                options: [],
+                advertisedRawValues: [],
+                unavailableReason: "The display did not advertise VCP 0x14."
+            )
+        case .advertisedNoEnumSubset:
+            return unavailableColorPreset(
+                reason: "The display advertised VCP 0x14 without an allowed value subset."
+            )
+        case .advertisedWithSubset(let advertisedValues):
+            let sortedValues = advertisedValues.sorted()
+            let options = presetCatalog.options(
+                identity: identity,
+                advertisedValues: advertisedValues
+            )
+            let currentRawValue: UInt8?
+            if case let .success(read) = transport.readOutcome(command: 0x14, options: .probe) {
+                currentRawValue = UInt8(exactly: read.current)
+            } else {
+                currentRawValue = nil
+            }
+            guard !options.isEmpty else {
+                return DisplayColorPresetCapability(
+                    status: .unavailable,
+                    currentRawValue: currentRawValue,
+                    options: [],
+                    advertisedRawValues: sortedValues,
+                    unavailableReason: "This display identity has no verified color preset mapping."
+                )
+            }
+            return DisplayColorPresetCapability(
+                status: .available,
+                currentRawValue: currentRawValue,
+                options: options,
+                advertisedRawValues: sortedValues,
+                unavailableReason: nil
+            )
+        }
+    }
+
+    private func unavailableColorPreset(reason: String) -> DisplayColorPresetCapability {
+        DisplayColorPresetCapability(
+            status: .unavailable,
+            currentRawValue: nil,
+            options: [],
+            advertisedRawValues: [],
+            unavailableReason: reason
+        )
+    }
+
+    private func isExternalHardwareDisplayLocked(_ displayID: CGDirectDisplayID) -> Bool {
+        injectedTransportFactory != nil || Self.isExternalHardwareDisplay(displayID)
+    }
+
+    private func brightnessMemoryIdentityLocked(
+        displayID: CGDirectDisplayID
+    ) -> DisplayBrightnessMemoryIdentity? {
+        let identity = hardwareIdentityProvider(displayID)
+        guard let vendorNumber = identity.vendorNumber,
+              let modelNumber = identity.modelNumber,
+              let serialNumber = identity.serialNumber else {
+            return nil
+        }
+        return DisplayBrightnessMemoryIdentity(
+            vendorNumber: vendorNumber,
+            modelNumber: modelNumber,
+            serialNumber: serialNumber
+        )
     }
 
     static func decodeValue(kind: DisplayControlKind, read: DDCReadResult) throws -> DisplayControlValue {
@@ -295,18 +459,13 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         return value == 0 ? nil : value
     }
 
-    private static func brightnessMemoryIdentity(
+    private static func hardwareIdentity(
         displayID: CGDirectDisplayID
-    ) -> DisplayBrightnessMemoryIdentity? {
-        guard let vendorNumber = vendorNumber(displayID: displayID),
-              let modelNumber = modelNumber(displayID: displayID),
-              let serialNumber = serialNumber(displayID: displayID) else {
-            return nil
-        }
-        return DisplayBrightnessMemoryIdentity(
-            vendorNumber: vendorNumber,
-            modelNumber: modelNumber,
-            serialNumber: serialNumber
+    ) -> DisplayHardwareIdentity {
+        DisplayHardwareIdentity(
+            vendorNumber: vendorNumber(displayID: displayID),
+            modelNumber: modelNumber(displayID: displayID),
+            serialNumber: serialNumber(displayID: displayID)
         )
     }
 
