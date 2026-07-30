@@ -191,3 +191,24 @@ Stage A 只授权受控写入/读回测试，不声明 `sRGB`、`Display P3`、`
 - sleep、stop、断连后旧 worker 仍发布结果；
 - 预设切换导致亮度/对比度不可恢复且没有明确产品策略；
 - 任何 Q1-Q10/Q20 未执行却被文档或 UI 表述为已验证。
+
+## 9. 自动化验证结果
+
+验证日期：2026-07-30。
+
+| Check | Command | Actual result |
+|---|---|---|
+| 全量单元测试 | `xcodebuild test -project ToolBox.xcodeproj -scheme ToolBox -configuration Debug -derivedDataPath /tmp/macToolBox-display-poc-final -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO` | PASS - 357 tests, 0 failures, `TEST SUCCEEDED` |
+| Debug 构建 | `CONFIG=Debug OPEN=0 ./build.sh` | PASS - `BUILD SUCCEEDED` |
+| Release 构建 | `OPEN=0 ./build.sh` | PASS - `BUILD SUCCEEDED` |
+| 基线差异格式 | `git diff --check 8a35f5092adf30dd6b23a44e3db41778cbd30f65..HEAD` | PASS - 无输出 |
+| 延后范围扫描 | `rg -n "ColorSync\|maximumPotentialExtendedDynamicRange\|maximumExtendedDynamicRange\|0x16\|0x18\|0x1A\|DellMonitorSdk\|plawebsvc" Sources/ToolBox/DisplayControl` | PASS - 无匹配；未实现 ICC、HDR、RGB Gain 写入、Dell USB SDK 或远程下载 |
+
+自动化只验证代码分支、边界和构建完整性，不能替代外接显示器报文或
+ColorSync 行为。第 5 节的 Q1-Q10、Q20 状态仍为 `NOT RUN`。
+
+当前发布结论：
+
+```text
+POC CODE READY / PRODUCTION CATALOG EMPTY / FEATURE DEFAULT-OFF
+```
