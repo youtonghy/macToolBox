@@ -50,7 +50,6 @@ final class DisplayControlMediaKeyController: ObservableObject {
     private var runLoopSource: CFRunLoopSource?
     private var wantsRunning = false
     private var hasRegisteredForPermission = false
-    private var activationObserver: NSObjectProtocol?
     private var lastLoggedFailureSignature: String?
 
     @Published private(set) var isTapActive = false
@@ -105,13 +104,12 @@ final class DisplayControlMediaKeyController: ObservableObject {
             }
             .store(in: &cancellables)
 
-        activationObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didBecomeActiveNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.handleApplicationDidBecomeActive()
-        }
+        NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)
+            .receive(on: RunLoop.main)
+            .sink { [weak self] _ in
+                self?.handleApplicationDidBecomeActive()
+            }
+            .store(in: &cancellables)
 
         updateTarget(selectedDisplayID: menuModel.selectedDisplayID, displayItems: menuModel.displayItems)
     }
@@ -120,10 +118,6 @@ final class DisplayControlMediaKeyController: ObservableObject {
     func stop() {
         wantsRunning = false
         cancellables.removeAll()
-        if let activationObserver {
-            NotificationCenter.default.removeObserver(activationObserver)
-            self.activationObserver = nil
-        }
         stopTap()
         publishStatus(isActive: false, needsPermission: false, text: "已停止")
     }
@@ -155,8 +149,8 @@ final class DisplayControlMediaKeyController: ObservableObject {
 
     @MainActor
     private func handleApplicationDidBecomeActive() {
-        refreshPermissionStatus(probeTaps: false)
         guard wantsRunning else { return }
+        refreshPermissionStatus(probeTaps: false)
         restartTapIfNeeded(force: eventTap == nil)
     }
 

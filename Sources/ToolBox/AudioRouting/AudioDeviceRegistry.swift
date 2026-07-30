@@ -8,6 +8,7 @@ struct HALAudioDeviceRecord: Equatable, Sendable {
     let isAlive: Bool
     let compatibilityIssue: AudioOutputCompatibilityIssue?
     let sampleRate: Double?
+    let transportType: UInt32
 
     init(
         uid: String,
@@ -15,7 +16,8 @@ struct HALAudioDeviceRecord: Equatable, Sendable {
         hasOutput: Bool,
         isAlive: Bool = true,
         compatibilityIssue: AudioOutputCompatibilityIssue? = nil,
-        sampleRate: Double? = nil
+        sampleRate: Double? = nil,
+        transportType: UInt32 = kAudioDeviceTransportTypeUnknown
     ) {
         self.uid = uid
         self.name = name
@@ -23,7 +25,65 @@ struct HALAudioDeviceRecord: Equatable, Sendable {
         self.isAlive = isAlive
         self.compatibilityIssue = compatibilityIssue
         self.sampleRate = sampleRate
+        self.transportType = transportType
     }
+
+    var isBluetooth: Bool {
+        transportType == kAudioDeviceTransportTypeBluetooth
+            || transportType == kAudioDeviceTransportTypeBluetoothLE
+    }
+}
+
+struct HALAudioDeviceRouteSignature: Equatable, Sendable {
+    let objectID: AudioObjectID
+    let uid: String
+    let isAlive: Bool
+    let streamIDs: [AudioObjectID]
+    let streamFormats: [HALAudioStreamFormatRecord]
+}
+
+struct AudioDeviceRouteConfiguration: Equatable, Sendable {
+    let defaultOutputUID: String?
+    let devices: [HALAudioDeviceRouteSignature]
+
+    init(defaultOutputUID: String?, devices: [HALAudioDeviceRouteSignature]) {
+        self.defaultOutputUID = defaultOutputUID
+        self.devices = devices.sorted {
+            if $0.uid != $1.uid { return $0.uid < $1.uid }
+            return $0.objectID < $1.objectID
+        }
+    }
+}
+
+struct AudioDeviceRouteConfigurationTracker {
+    private var previous: AudioDeviceRouteConfiguration?
+
+    mutating func observe(_ configuration: AudioDeviceRouteConfiguration) -> Bool {
+        defer { previous = configuration }
+        guard let previous else { return false }
+        return previous != configuration
+    }
+
+    mutating func reset() {
+        previous = nil
+    }
+}
+
+private struct HALAudioDeviceQueryObject: Sendable {
+    let objectID: AudioObjectID
+    let record: HALAudioDeviceRecord
+    let routeSignature: HALAudioDeviceRouteSignature
+}
+
+private struct HALAudioDeviceQueryResult: Sendable {
+    let objects: [HALAudioDeviceQueryObject]
+    let defaultOutputUID: String?
+    let failureCount: Int
+}
+
+private enum HALAudioDeviceQueryOutcome: Sendable {
+    case success(HALAudioDeviceQueryResult)
+    case failure(String)
 }
 
 private struct HALAudioListenerRegistration {
@@ -56,6 +116,8 @@ struct AudioRegistrySession {
 
 @MainActor
 final class AudioDeviceRegistry: ObservableObject {
+    nonisolated static let routeSettleDelay: Duration = .seconds(1)
+
     @Published private(set) var snapshot: [AudioOutputDevice] = []
     @Published private(set) var defaultOutputUID: String?
     @Published private(set) var lastError: String?
@@ -64,7 +126,7 @@ final class AudioDeviceRegistry: ObservableObject {
 
     var rememberedUIDs: Set<String> = [] {
         didSet {
-            if rememberedUIDs != oldValue { reload() }
+            if rememberedUIDs != oldValue { beginReload() }
         }
     }
 
@@ -73,12 +135,15 @@ final class AudioDeviceRegistry: ObservableObject {
     private var defaultAddress = CoreAudioPropertyReader.address(kAudioHardwarePropertyDefaultOutputDevice)
     private var serviceRestartedAddress = CoreAudioPropertyReader.address(kAudioHardwarePropertyServiceRestarted)
     private var routeListeners: [HALAudioListenerRegistration] = []
-    private let reloadCoalescer = AudioRegistryEventCoalescer()
+    private let reloadCoalescer = AudioRegistryEventCoalescer(delay: routeSettleDelay)
+    private let queryExecutor = CoreAudioRegistryQueryExecutor.shared
     private var session = AudioRegistrySession()
     private var pendingServiceRestart = false
     private var pendingRouteChange = false
     private var partialReloadRetryCount = 0
-    private var physicalDeviceIdentity: [String: AudioObjectID]?
+    private var reloadRequestID: UInt64 = 0
+    private var routeConfigurationTracker = AudioDeviceRouteConfigurationTracker()
+    private var routeListenerTopology: [AudioObjectID: [AudioObjectID]] = [:]
 
     private static let privateCaptureDeviceUIDPrefix = "com.youtonghy.toolbox.capture."
 
@@ -120,6 +185,19 @@ final class AudioDeviceRegistry: ObservableObject {
     ) -> Set<String> {
         let availableUIDs = Set(records.filter(\.hasOutput).map(\.uid))
         return rememberedUIDs.union(defaultOutputUID.map { [$0] } ?? []).intersection(availableUIDs)
+    }
+
+    nonisolated static func suspendingBluetoothRoute(
+        in devices: [AudioOutputDevice],
+        uid: String
+    ) -> [AudioOutputDevice]? {
+        guard let index = devices.firstIndex(where: { $0.uid == uid && $0.isRoutable }) else {
+            return nil
+        }
+        var updated = devices
+        updated[index].compatibilityIssue = .bluetoothProfileChanging
+        updated[index].sampleRate = nil
+        return updated
     }
 
     nonisolated static func eventEffects(
@@ -166,7 +244,7 @@ final class AudioDeviceRegistry: ObservableObject {
             return
         }
         listener = callback
-        reload()
+        beginReload(sessionID: registrationSessionID)
     }
 
     func stop() {
@@ -182,127 +260,220 @@ final class AudioDeviceRegistry: ObservableObject {
         pendingServiceRestart = false
         pendingRouteChange = false
         partialReloadRetryCount = 0
-        physicalDeviceIdentity = nil
+        reloadRequestID &+= 1
+        routeConfigurationTracker.reset()
+        routeListenerTopology = [:]
         removeRouteListeners()
         snapshot = []
         defaultOutputUID = nil
     }
 
-    @discardableResult
-    func reload(detectRouteChange: Bool = true) -> Bool {
-        guard session.isActive else { return false }
-        do {
-            let system = AudioObjectID(kAudioObjectSystemObject)
-            let ids = try CoreAudioPropertyReader.objectIDs(objectID: system, selector: kAudioHardwarePropertyDevices)
-            let result = CoreAudioPropertyReader.readAvailableObjects(ids) { id in
-                let isAliveValue: UInt32 = try CoreAudioPropertyReader.value(
-                    objectID: id,
-                    selector: kAudioDevicePropertyDeviceIsAlive,
-                    initial: 0
-                )
-                let isAlive = isAliveValue != 0
-                let hasOutput = try CoreAudioPropertyReader.hasStreams(
-                    objectID: id,
-                    scope: kAudioObjectPropertyScopeOutput
-                )
-                let compatibilityIssue: AudioOutputCompatibilityIssue?
-                let sampleRate: Double?
-                if hasOutput && isAlive {
-                    do {
-                        let formats = try CoreAudioPropertyReader.streamFormats(
-                            objectID: id,
-                            scope: kAudioObjectPropertyScopeOutput
-                        )
-                        compatibilityIssue = AudioOutputCompatibility.evaluate(
-                            streamFormats: formats
-                        )
-                        sampleRate = formats.count == 1 ? formats[0].sampleRate : nil
-                    } catch {
-                        compatibilityIssue = .formatQueryFailed
-                        sampleRate = nil
-                    }
-                } else {
-                    compatibilityIssue = nil
-                    sampleRate = nil
+    private func beginReload(
+        sessionID: UInt64? = nil,
+        serviceRestarted: Bool = false,
+        routeChanged: Bool = false
+    ) {
+        let sessionID = sessionID ?? session.currentID
+        guard session.accepts(sessionID) else { return }
+        reloadRequestID &+= 1
+        let requestID = reloadRequestID
+        let rememberedUIDs = rememberedUIDs
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome: HALAudioDeviceQueryOutcome = await queryExecutor.run {
+                do {
+                    return .success(try Self.querySnapshot())
+                } catch {
+                    return .failure(error.localizedDescription)
                 }
-                return HALAudioDeviceRecord(
-                    uid: try CoreAudioPropertyReader.string(objectID: id, selector: kAudioDevicePropertyDeviceUID),
-                    name: try CoreAudioPropertyReader.string(objectID: id, selector: kAudioObjectPropertyName),
-                    hasOutput: hasOutput,
-                    isAlive: isAlive,
-                    compatibilityIssue: compatibilityIssue,
-                    sampleRate: sampleRate
-                )
             }
-            let records = result.objects.map(\.value)
-            let defaultID: AudioObjectID = try CoreAudioPropertyReader.value(
-                objectID: system, selector: kAudioHardwarePropertyDefaultOutputDevice,
-                initial: AudioObjectID(kAudioObjectUnknown)
-            )
-            let resolvedDefaultUID = defaultID == kAudioObjectUnknown ? nil : try CoreAudioPropertyReader.string(
-                objectID: defaultID, selector: kAudioDevicePropertyDeviceUID
-            )
-            let captureSampleRate = records.first(where: { $0.uid == resolvedDefaultUID })?.sampleRate
-            snapshot = Self.project(
-                records: records,
+            guard session.accepts(sessionID), reloadRequestID == requestID else { return }
+            apply(
+                outcome,
                 rememberedUIDs: rememberedUIDs,
-                captureSampleRate: captureSampleRate
+                serviceRestarted: serviceRestarted,
+                routeChanged: routeChanged
             )
-            defaultOutputUID = resolvedDefaultUID
-            let monitoredUIDs = Self.monitoredUIDs(
-                records: records,
-                defaultOutputUID: resolvedDefaultUID,
-                rememberedUIDs: rememberedUIDs
-            )
-            let monitoredDeviceIDs = result.objects.compactMap { object in
-                monitoredUIDs.contains(object.value.uid) ? object.id : nil
-            }
-            replaceRouteListeners(deviceIDs: monitoredDeviceIDs)
-            if result.failureCount == 0 {
-                let refreshedIdentity: [String: AudioObjectID] = Dictionary(
-                    uniqueKeysWithValues: result.objects.compactMap { object -> (String, AudioObjectID)? in
-                        guard object.value.hasOutput,
-                              !object.value.uid.hasPrefix(Self.privateCaptureDeviceUIDPrefix) else {
-                            return nil
-                        }
-                        return (object.value.uid, object.id)
-                    }
-                )
-                if detectRouteChange,
-                   let physicalDeviceIdentity,
-                   physicalDeviceIdentity != refreshedIdentity {
-                    routeGeneration += 1
-                }
-                physicalDeviceIdentity = refreshedIdentity
-                partialReloadRetryCount = 0
-                lastError = nil
-                return true
-            } else {
-                lastError = "\(result.failureCount) 个输出设备在刷新时已失效，已跳过。"
-                schedulePartialReloadRetry()
-                return false
-            }
-        } catch {
-            lastError = error.localizedDescription
-            schedulePartialReloadRetry()
-            return false
         }
     }
 
-    private func replaceRouteListeners(deviceIDs: [AudioObjectID]) {
-        removeRouteListeners()
-        let registrationSessionID = session.currentID
-        let callback: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            Task { @MainActor [weak self] in
-                self?.scheduleReload(
-                    sessionID: registrationSessionID,
-                    serviceRestarted: false,
-                    routeChanged: true,
-                    resetRetryBudget: true
-                )
+    private nonisolated static func querySnapshot() throws -> HALAudioDeviceQueryResult {
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        let ids = try CoreAudioPropertyReader.objectIDs(
+            objectID: system,
+            selector: kAudioHardwarePropertyDevices
+        )
+        let result = CoreAudioPropertyReader.readAvailableObjects(ids) { id in
+            let isAliveValue: UInt32 = try CoreAudioPropertyReader.value(
+                objectID: id,
+                selector: kAudioDevicePropertyDeviceIsAlive,
+                initial: 0
+            )
+            let isAlive = isAliveValue != 0
+            let streamIDs = try CoreAudioPropertyReader.objectIDs(
+                objectID: id,
+                selector: kAudioDevicePropertyStreams,
+                scope: kAudioObjectPropertyScopeOutput
+            )
+            let transportType: UInt32 = (try? CoreAudioPropertyReader.value(
+                objectID: id,
+                selector: kAudioDevicePropertyTransportType,
+                initial: UInt32(kAudioDeviceTransportTypeUnknown)
+            )) ?? UInt32(kAudioDeviceTransportTypeUnknown)
+            let isBluetooth = transportType == kAudioDeviceTransportTypeBluetooth
+                || transportType == kAudioDeviceTransportTypeBluetoothLE
+            let hasOutput = !streamIDs.isEmpty
+            var streamFormats: [HALAudioStreamFormatRecord] = []
+            var compatibilityIssue: AudioOutputCompatibilityIssue?
+            var sampleRate: Double?
+            if hasOutput && isAlive {
+                do {
+                    streamFormats = try streamIDs.map { streamID in
+                        let format: AudioStreamBasicDescription = try CoreAudioPropertyReader.value(
+                            objectID: streamID,
+                            selector: kAudioStreamPropertyVirtualFormat,
+                            initial: AudioStreamBasicDescription()
+                        )
+                        return HALAudioStreamFormatRecord(format)
+                    }
+                    compatibilityIssue = AudioOutputCompatibility.evaluate(streamFormats: streamFormats)
+                    sampleRate = streamFormats.count == 1 ? streamFormats[0].sampleRate : nil
+                } catch {
+                    compatibilityIssue = .formatQueryFailed
+                    sampleRate = nil
+                }
+            } else {
+                compatibilityIssue = nil
+                sampleRate = nil
             }
+            if isBluetooth, compatibilityIssue != nil {
+                compatibilityIssue = .bluetoothProfileChanging
+                sampleRate = nil
+            }
+            let uid = try CoreAudioPropertyReader.string(
+                objectID: id,
+                selector: kAudioDevicePropertyDeviceUID
+            )
+            let record = HALAudioDeviceRecord(
+                uid: uid,
+                name: try CoreAudioPropertyReader.string(objectID: id, selector: kAudioObjectPropertyName),
+                hasOutput: hasOutput,
+                isAlive: isAlive,
+                compatibilityIssue: compatibilityIssue,
+                sampleRate: sampleRate,
+                transportType: transportType
+            )
+            return HALAudioDeviceQueryObject(
+                objectID: id,
+                record: record,
+                routeSignature: HALAudioDeviceRouteSignature(
+                    objectID: id,
+                    uid: uid,
+                    isAlive: isAlive,
+                    streamIDs: streamIDs,
+                    streamFormats: streamFormats
+                )
+            )
         }
-        for deviceID in deviceIDs {
+        let defaultID: AudioObjectID = try CoreAudioPropertyReader.value(
+            objectID: system,
+            selector: kAudioHardwarePropertyDefaultOutputDevice,
+            initial: AudioObjectID(kAudioObjectUnknown)
+        )
+        let defaultOutputUID = defaultID == kAudioObjectUnknown ? nil : try CoreAudioPropertyReader.string(
+            objectID: defaultID,
+            selector: kAudioDevicePropertyDeviceUID
+        )
+        return HALAudioDeviceQueryResult(
+            objects: result.objects.map(\.value),
+            defaultOutputUID: defaultOutputUID,
+            failureCount: result.failureCount
+        )
+    }
+
+    private func apply(
+        _ outcome: HALAudioDeviceQueryOutcome,
+        rememberedUIDs: Set<String>,
+        serviceRestarted: Bool,
+        routeChanged: Bool
+    ) {
+        guard case let .success(result) = outcome else {
+            if case let .failure(message) = outcome { lastError = message }
+            pendingServiceRestart = pendingServiceRestart || serviceRestarted
+            pendingRouteChange = pendingRouteChange || routeChanged
+            schedulePartialReloadRetry()
+            return
+        }
+        guard result.failureCount == 0 else {
+            lastError = "\(result.failureCount) 个输出设备在刷新时已失效，保留上次稳定状态。"
+            pendingServiceRestart = pendingServiceRestart || serviceRestarted
+            pendingRouteChange = pendingRouteChange || routeChanged
+            schedulePartialReloadRetry()
+            return
+        }
+
+        let records = result.objects.map(\.record)
+        let captureSampleRate = records.first(where: { $0.uid == result.defaultOutputUID })?.sampleRate
+        let updatedSnapshot = Self.project(
+            records: records,
+            rememberedUIDs: rememberedUIDs,
+            captureSampleRate: captureSampleRate
+        )
+        let monitoredUIDs = Self.monitoredUIDs(
+            records: records,
+            defaultOutputUID: result.defaultOutputUID,
+            rememberedUIDs: rememberedUIDs
+        )
+        let monitoredObjects = result.objects.filter { monitoredUIDs.contains($0.record.uid) }
+        let routeConfiguration = AudioDeviceRouteConfiguration(
+            defaultOutputUID: result.defaultOutputUID,
+            devices: monitoredObjects
+                .filter { !$0.record.uid.hasPrefix(Self.privateCaptureDeviceUIDPrefix) }
+                .map(\.routeSignature)
+        )
+        let routeConfigurationChanged = routeConfigurationTracker.observe(routeConfiguration)
+        let publishedModelChanged = snapshot != updatedSnapshot || defaultOutputUID != result.defaultOutputUID
+
+        if snapshot != updatedSnapshot { snapshot = updatedSnapshot }
+        if defaultOutputUID != result.defaultOutputUID { defaultOutputUID = result.defaultOutputUID }
+        replaceRouteListeners(objects: monitoredObjects)
+
+        if serviceRestarted {
+            serviceGeneration += 1
+        } else if routeChanged,
+                  routeConfigurationChanged,
+                  !publishedModelChanged,
+                  !updatedSnapshot.contains(where: {
+                      $0.compatibilityIssue == .bluetoothProfileChanging
+                  }) {
+            routeGeneration += 1
+        }
+        partialReloadRetryCount = 0
+        lastError = nil
+    }
+
+    private func replaceRouteListeners(objects: [HALAudioDeviceQueryObject]) {
+        let topology = Dictionary(uniqueKeysWithValues: objects.map {
+            ($0.objectID, $0.routeSignature.streamIDs)
+        })
+        guard topology != routeListenerTopology else { return }
+        removeRouteListeners()
+        routeListenerTopology = topology
+        let registrationSessionID = session.currentID
+        for object in objects {
+            let deviceID = object.objectID
+            let bluetoothUID = object.record.isBluetooth ? object.record.uid : nil
+            let callback: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+                Task { @MainActor [weak self] in
+                    self?.scheduleReload(
+                        sessionID: registrationSessionID,
+                        serviceRestarted: false,
+                        routeChanged: true,
+                        resetRetryBudget: true,
+                        suspendingBluetoothUID: bluetoothUID
+                    )
+                }
+            }
             addRouteListener(
                 objectID: deviceID,
                 address: CoreAudioPropertyReader.address(kAudioDevicePropertyDeviceIsAlive),
@@ -320,12 +491,7 @@ final class AudioDeviceRegistry: ObservableObject {
                 address: CoreAudioPropertyReader.address(kAudioDevicePropertyNominalSampleRate),
                 listener: callback
             )
-            let streamIDs = (try? CoreAudioPropertyReader.objectIDs(
-                objectID: deviceID,
-                selector: kAudioDevicePropertyStreams,
-                scope: kAudioObjectPropertyScopeOutput
-            )) ?? []
-            for streamID in streamIDs {
+            for streamID in object.routeSignature.streamIDs {
                 addRouteListener(
                     objectID: streamID,
                     address: CoreAudioPropertyReader.address(kAudioStreamPropertyVirtualFormat),
@@ -361,9 +527,17 @@ final class AudioDeviceRegistry: ObservableObject {
         sessionID: UInt64,
         serviceRestarted: Bool,
         routeChanged: Bool,
-        resetRetryBudget: Bool = false
+        resetRetryBudget: Bool = false,
+        suspendingBluetoothUID: String? = nil
     ) {
         guard session.accepts(sessionID) else { return }
+        if let suspendingBluetoothUID,
+           let suspended = Self.suspendingBluetoothRoute(
+               in: snapshot,
+               uid: suspendingBluetoothUID
+           ) {
+            snapshot = suspended
+        }
         if resetRetryBudget { partialReloadRetryCount = 0 }
         pendingServiceRestart = pendingServiceRestart || serviceRestarted
         pendingRouteChange = pendingRouteChange || routeChanged
@@ -373,21 +547,11 @@ final class AudioDeviceRegistry: ObservableObject {
             let shouldAdvanceRouteGeneration = self.pendingRouteChange
             self.pendingServiceRestart = false
             self.pendingRouteChange = false
-            let routeGenerationBeforeReload = self.routeGeneration
-            let reloadSucceeded = self.reload(
-                detectRouteChange: !shouldAdvanceServiceGeneration
+            self.beginReload(
+                sessionID: sessionID,
+                serviceRestarted: shouldAdvanceServiceGeneration,
+                routeChanged: shouldAdvanceRouteGeneration
             )
-            if reloadSucceeded {
-                if shouldAdvanceServiceGeneration { self.serviceGeneration += 1 }
-                if shouldAdvanceRouteGeneration,
-                   !shouldAdvanceServiceGeneration,
-                   self.routeGeneration == routeGenerationBeforeReload {
-                    self.routeGeneration += 1
-                }
-            } else {
-                self.pendingServiceRestart = self.pendingServiceRestart || shouldAdvanceServiceGeneration
-                self.pendingRouteChange = self.pendingRouteChange || shouldAdvanceRouteGeneration
-            }
         }
     }
 

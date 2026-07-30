@@ -1,0 +1,89 @@
+{
+  "nextId": 20,
+  "tasks": [
+    {
+      "id": "13",
+      "subject": "Dual-read HAL running flags",
+      "description": "Track both IsRunning (pir?) and IsRunningOutput (piro) in process registry and projection.",
+      "status": "completed",
+      "activeForm": "Adding dual running flags",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784773773344,
+      "updatedAt": 1784773880670
+    },
+    {
+      "id": "14",
+      "subject": "Add recentlyActive hysteresis",
+      "description": "Keep apps visible for a short window after last activity so Spotify-like apps do not disappear.",
+      "status": "completed",
+      "activeForm": "Adding activity hysteresis",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784773773345,
+      "updatedAt": 1784773880671
+    },
+    {
+      "id": "15",
+      "subject": "Wire UI + regression tests",
+      "description": "Update playingRows visibility and add tests for dual flags + recentlyActive; run focused suite.",
+      "status": "completed",
+      "activeForm": "Wiring UI and tests",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784773773345,
+      "updatedAt": 1784773988996
+    },
+    {
+      "id": "16",
+      "subject": "Build deterministic audio update regressions",
+      "description": "Create fast, deterministic tests reproducing row-order jumps, duplicate/no-op process publications, and recognition latency/coalescing behavior at the registry/service seams.",
+      "status": "completed",
+      "activeForm": "Building audio update regressions",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784774542831,
+      "updatedAt": 1784775000020
+    },
+    {
+      "id": "17",
+      "subject": "Stabilize process detection and row ordering",
+      "description": "Remove unstable tie-breaking and unnecessary reload/listener churn while preserving fast recognition of real HAL changes.",
+      "status": "completed",
+      "activeForm": "Stabilizing process updates",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784774542832,
+      "updatedAt": 1784775029709
+    },
+    {
+      "id": "18",
+      "subject": "Reduce routing UI update work",
+      "description": "Prevent no-op publications and redundant service recomputations/reconciles that can cause visible stalls or SwiftUI churn.",
+      "status": "completed",
+      "activeForm": "Reducing routing UI work",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784774542833,
+      "updatedAt": 1784775421963
+    },
+    {
+      "id": "19",
+      "subject": "Verify audio responsiveness fixes",
+      "description": "Run targeted and broad audio tests, build the app, inspect diffs, and document remaining real-device risks.",
+      "status": "completed",
+      "activeForm": "Verifying audio responsiveness fixes",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784774542833,
+      "updatedAt": 1784776175609
+    }
+  ]
+}

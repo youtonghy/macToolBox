@@ -63,11 +63,16 @@ extern "C" AudioObjectID TBAudioSelectTapDevice(
 
 extern "C" AudioObjectID TBAudioSelectTapDeviceAfterMigrationWait(
     AudioObjectID targetDeviceID,
-    AudioObjectID defaultOutputDeviceID,
+    AudioObjectID /*defaultOutputDeviceID*/,
     const AudioObjectID* processDeviceIDs,
     uint32_t processDeviceCount
 ) {
-    if (targetDeviceID == defaultOutputDeviceID) return targetDeviceID;
+    // Never force-pin to the route target when the process is not actually on it.
+    // Empty/ambiguous process device lists must fall through to stereo mixdown:
+    // device-pinned taps + mutedWhenTapped otherwise mute the app with zero capture
+    // (common for iOS-on-Mac shells like 小红书 and helpers mid-device-migration).
+    // SoundSource uses mixdown for the same class of sources; we only pin when the
+    // process is confirmed on the target, or has exactly one unambiguous device.
     return TBAudioSelectTapDevice(
         targetDeviceID, processDeviceIDs, processDeviceCount
     );
@@ -328,16 +333,17 @@ OSStatus CaptureIOProc(AudioObjectID,
     if (!source->active.load(std::memory_order_acquire)) return noErr;
     source->captureCallbackCount.fetch_add(1, std::memory_order_relaxed);
     source->lastCaptureHostTime.store(HostTime(inputTime), std::memory_order_relaxed);
+    // Capture format mismatches must not poison the whole multi-source route.
+    // One bad source (mono/iOS shell/extra streams) should stay silent while siblings
+    // keep mixing; only the output IOProc marks the route fatal.
     if (input == nullptr || input->mNumberBuffers != 1) {
         source->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
-        source->fatalCallbackMismatch.store(true, std::memory_order_release);
         return noErr;
     }
     const AudioBuffer& buffer = input->mBuffers[0];
     if (buffer.mData == nullptr || buffer.mNumberChannels != 2
         || buffer.mDataByteSize % (2 * sizeof(float)) != 0) {
         source->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
-        source->fatalCallbackMismatch.store(true, std::memory_order_release);
         return noErr;
     }
     const uint32_t frameCount = buffer.mDataByteSize / (2 * sizeof(float));
@@ -893,6 +899,8 @@ bool StopRoute(RouteContext* route) {
         snapshot.clippedSampleCount = route->clippedSamples.load(std::memory_order_relaxed);
         snapshot.formatMismatchCount = route->formatMismatchCount.load(std::memory_order_relaxed);
         snapshot.callbacksInFlight = route->callbackLease == nullptr ? 0 : route->callbackLease->InFlight();
+        // Output-side fatal only. Per-source capture mismatches are counted below but
+        // must not tear down sibling apps sharing this route.
         snapshot.fatalCallbackMismatch = route->fatalCallbackMismatch.load(std::memory_order_acquire);
 
         for (const auto& source : route->sources) {
@@ -913,8 +921,6 @@ bool StopRoute(RouteContext* route) {
             snapshot.nonFiniteSampleCount += source->ring.NonFiniteSamples();
             snapshot.formatMismatchCount += source->formatMismatchCount.load(std::memory_order_relaxed);
             snapshot.callbacksInFlight += source->callbackLease == nullptr ? 0 : source->callbackLease->InFlight();
-            snapshot.fatalCallbackMismatch = snapshot.fatalCallbackMismatch
-                || source->fatalCallbackMismatch.load(std::memory_order_acquire);
         }
         [snapshots addObject:snapshot];
     }

@@ -52,6 +52,69 @@ final class CableDisplayItemTests: XCTestCase {
         )
     }
 
+    func testCableRegistryJoinRejectsDifferentControllersOnTheSamePort() {
+        let lhs = CableRegistryJoin(
+            hpmUUID: "00000000-0000-0000-0000-000000000001",
+            portType: 2,
+            portNumber: 1
+        )
+        let rhs = CableRegistryJoin(
+            hpmUUID: "00000000-0000-0000-0000-000000000002",
+            portType: 2,
+            portNumber: 1
+        )
+
+        XCTAssertFalse(lhs.matches(rhs))
+    }
+
+    func testCableRegistryJoinRejectsDifferentPortsOnTheSameController() {
+        let lhs = CableRegistryJoin(
+            hpmUUID: "00000000-0000-0000-0000-000000000001",
+            portType: 2,
+            portNumber: 1
+        )
+        let rhs = CableRegistryJoin(
+            hpmUUID: "00000000-0000-0000-0000-000000000001",
+            portType: 2,
+            portNumber: 2
+        )
+
+        XCTAssertFalse(lhs.matches(rhs))
+    }
+
+    func testCableRegistryJoinRejectsMissingPortNumbers() {
+        let lhs = CableRegistryJoin(hpmUUID: nil, portType: 2, portNumber: nil)
+        let rhs = CableRegistryJoin(hpmUUID: nil, portType: 2, portNumber: nil)
+
+        XCTAssertFalse(lhs.matches(rhs))
+    }
+
+    func testCableRegistryJoinAllowsOneMissingControllerUUIDForTheSamePort() {
+        let lhs = CableRegistryJoin(
+            hpmUUID: "00000000-0000-0000-0000-000000000001",
+            portType: 2,
+            portNumber: 1
+        )
+        let rhs = CableRegistryJoin(hpmUUID: nil, portType: 2, portNumber: 1)
+
+        XCTAssertTrue(lhs.matches(rhs))
+    }
+
+    func testCableRegistryJoinAllowsUnknownPortTypeOnTheSameControllerAndPort() {
+        let lhs = CableRegistryJoin(
+            hpmUUID: "00000000-0000-0000-0000-000000000001",
+            portType: 2,
+            portNumber: 1
+        )
+        let rhs = CableRegistryJoin(
+            hpmUUID: "00000000000000000000000000000001",
+            portType: 0,
+            portNumber: 1
+        )
+
+        XCTAssertTrue(lhs.matches(rhs))
+    }
+
     private func port(
         id: UInt64 = 1,
         name: String,
@@ -120,4 +183,5 @@ final class CableDisplayItemTests: XCTestCase {
             rawProperties: [:]
         )
     }
+
 }

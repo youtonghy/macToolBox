@@ -3,25 +3,39 @@ import XCTest
 
 final class MediaKeyPermissionGapTests: XCTestCase {
     func testDefaultTapSuccessMeansNoGap() {
-        let gap = Permissions.mediaKeyPermissionGap(
-            canCreateListenOnlyTap: true,
-            canCreateDefaultTap: true
+        XCTAssertEqual(
+            gap(listenOnly: false, defaultTap: true, inputMonitoring: false, accessibility: false),
+            .none
         )
-        XCTAssertEqual(gap, .none)
     }
 
-    func testListenOnlyWorksButDefaultFailsPointsToAccessibilityWhenAXMissing() {
-        // Cannot assert against live TCC state; only validate the pure branch when
-        // probe results already encode the split.
-        // When listen-only works, gap classification prefers Accessibility.
-        // If the host process already has AX, the function may return restartRequired.
-        let gap = Permissions.mediaKeyPermissionGap(
-            canCreateListenOnlyTap: true,
-            canCreateDefaultTap: false
+    func testListenOnlySuccessOverridesStaleInputMonitoringPreflight() {
+        XCTAssertEqual(
+            gap(listenOnly: true, defaultTap: false, inputMonitoring: false, accessibility: false),
+            .accessibility
         )
-        XCTAssertTrue(
-            gap == .accessibility || gap == .restartRequired || gap == .none,
-            "Unexpected gap for listen-only success: \(gap)"
+        XCTAssertEqual(
+            gap(listenOnly: true, defaultTap: false, inputMonitoring: false, accessibility: true),
+            .restartRequired
+        )
+    }
+
+    func testFailedTapTruthTable() {
+        XCTAssertEqual(
+            gap(listenOnly: false, defaultTap: false, inputMonitoring: false, accessibility: false),
+            .both
+        )
+        XCTAssertEqual(
+            gap(listenOnly: false, defaultTap: false, inputMonitoring: false, accessibility: true),
+            .inputMonitoring
+        )
+        XCTAssertEqual(
+            gap(listenOnly: false, defaultTap: false, inputMonitoring: true, accessibility: false),
+            .accessibility
+        )
+        XCTAssertEqual(
+            gap(listenOnly: false, defaultTap: false, inputMonitoring: true, accessibility: true),
+            .restartRequired
         )
     }
 
@@ -31,5 +45,19 @@ final class MediaKeyPermissionGapTests: XCTestCase {
         XCTAssertTrue(Permissions.MediaKeyPermissionGap.inputMonitoring.needsUserAction)
         XCTAssertTrue(Permissions.MediaKeyPermissionGap.both.needsUserAction)
         XCTAssertTrue(Permissions.MediaKeyPermissionGap.restartRequired.needsUserAction)
+    }
+
+    private func gap(
+        listenOnly: Bool?,
+        defaultTap: Bool?,
+        inputMonitoring: Bool,
+        accessibility: Bool
+    ) -> Permissions.MediaKeyPermissionGap {
+        Permissions.mediaKeyPermissionGap(
+            canCreateListenOnlyTap: listenOnly,
+            canCreateDefaultTap: defaultTap,
+            inputMonitoringTrusted: inputMonitoring,
+            accessibilityTrusted: accessibility
+        )
     }
 }

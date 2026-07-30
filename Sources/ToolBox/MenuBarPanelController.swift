@@ -66,12 +66,29 @@ final class MenuBarPanelController<Content: View>: NSObject {
     func show(relativeTo button: NSStatusBarButton) {
         anchorButton = button
         isClosing = false
-        applyPanelFrame(targetPanelFrame(relativeTo: button))
+        button.layoutSubtreeIfNeeded()
+
+        guard showPositionedPanel(relativeTo: button) else {
+            DispatchQueue.main.async { [weak self, weak button] in
+                guard let self, let button, self.anchorButton === button, !self.panel.isVisible else {
+                    return
+                }
+                button.layoutSubtreeIfNeeded()
+                _ = self.showPositionedPanel(relativeTo: button)
+            }
+            return
+        }
+    }
+
+    private func showPositionedPanel(relativeTo button: NSStatusBarButton) -> Bool {
+        guard let frame = targetPanelFrame(relativeTo: button) else { return false }
+        applyPanelFrame(frame)
         panel.alphaValue = 1
         panel.makeKeyAndOrderFront(nil)
         panel.orderFrontRegardless()
         panel.invalidateShadow()
         startMonitoring()
+        return true
     }
 
     func close() {
@@ -87,7 +104,8 @@ final class MenuBarPanelController<Content: View>: NSObject {
         guard newSize != preferredPanelSize else { return }
         preferredPanelSize = newSize
         guard isShown, let anchorButton else { return }
-        applyPanelFrame(targetPanelFrame(relativeTo: anchorButton))
+        guard let frame = targetPanelFrame(relativeTo: anchorButton) else { return }
+        applyPanelFrame(frame)
     }
 
     private func applyPanelFrame(_ frame: NSRect) {
@@ -146,16 +164,15 @@ final class MenuBarPanelController<Content: View>: NSObject {
         close()
     }
 
-    private func targetPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect {
-        guard let buttonFrame = screenRect(for: button) else {
-            return NSRect(origin: panel.frame.origin, size: preferredPanelSize)
+    private func targetPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect? {
+        guard let buttonFrame = screenRect(for: button) else { return nil }
+        let screens = NSScreen.screens.map {
+            MenuPanelScreenGeometry(frame: $0.frame, visibleFrame: $0.visibleFrame)
         }
-
-        let visibleFrame = button.window?.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? .zero
         return MenuPanelLayout.panelFrame(
             preferredSize: preferredPanelSize,
             anchorFrame: buttonFrame,
-            visibleFrame: visibleFrame
+            screens: screens
         )
     }
 

@@ -182,9 +182,42 @@ private struct AudioProcessActivityListenerKey: Hashable {
     let selector: AudioObjectPropertySelector
 }
 
+private struct HALAudioProcessQueryRecord: Sendable {
+    let objectID: AudioObjectID
+    let pid: pid_t
+    let halBundleID: String
+    let isRunning: Bool
+    let isRunningOutput: Bool
+}
+
+private struct HALAudioProcessQueryResult: Sendable {
+    let records: [HALAudioProcessQueryRecord]
+    let failureCount: Int
+}
+
+private enum HALAudioProcessQueryOutcome: Sendable {
+    case success(HALAudioProcessQueryResult)
+    case failure(String)
+}
+
+private struct HALAudioProcessActivity: Sendable {
+    let isRunning: Bool?
+    let isRunningOutput: Bool?
+}
+
+private struct WorkspaceAudioApplication {
+    let name: String
+    let bundleID: String
+    let bundleURL: URL?
+}
+
 @MainActor
 final class AudioProcessRegistry: ObservableObject {
     nonisolated static let processListSettleDelay: Duration = .seconds(5)
+    /// Hard ceiling on how long a busy process list may defer the reload. Saved rules
+    /// cannot be applied before the new HAL process object is known, so an unbounded
+    /// debounce would keep new playback at 100% indefinitely.
+    nonisolated static let processListMaximumSettleDelay: Duration = .seconds(6)
 
     @Published private(set) var snapshot: [AudioProcessSnapshot] = []
     @Published private(set) var lastError: String?
@@ -195,10 +228,13 @@ final class AudioProcessRegistry: ObservableObject {
     // HAL publishes process-list changes before new clients always finish registering.
     // Avoid synchronous enumeration while WebKit GPU/audio clients are still initializing.
     private let reloadCoalescer = AudioRegistryEventCoalescer(
-        delay: AudioProcessRegistry.processListSettleDelay
+        delay: AudioProcessRegistry.processListSettleDelay,
+        maximumDelay: AudioProcessRegistry.processListMaximumSettleDelay
     )
+    private let queryExecutor = CoreAudioRegistryQueryExecutor.shared
     private let displayNameCache = AudioProcessDisplayNameCache()
     private var partialReloadRetryCount = 0
+    private var reloadRequestID: UInt64 = 0
     private var started = false
 
     nonisolated static func project(records: [HALAudioProcessRecord]) -> [AudioProcessSnapshot] {
@@ -266,7 +302,7 @@ final class AudioProcessRegistry: ObservableObject {
         }
         listListener = listener
         started = true
-        reload()
+        beginReload()
     }
 
     func stop() {
@@ -277,6 +313,7 @@ final class AudioProcessRegistry: ObservableObject {
             )
         }
         reloadCoalescer.cancel()
+        reloadRequestID &+= 1
         listListener = nil
         removeActivityListeners()
         partialReloadRetryCount = 0
@@ -284,85 +321,118 @@ final class AudioProcessRegistry: ObservableObject {
         if !snapshot.isEmpty { snapshot = [] }
     }
 
-    func reload() {
+    private func beginReload() {
         guard started else { return }
-        do {
-            let ids = try CoreAudioPropertyReader.objectIDs(
-                objectID: AudioObjectID(kAudioObjectSystemObject),
-                selector: kAudioHardwarePropertyProcessObjectList
-            )
-            struct WorkspaceApp {
-                let name: String
-                let bundleID: String
-                let bundleURL: URL?
+        reloadRequestID &+= 1
+        let requestID = reloadRequestID
+        Task { [weak self] in
+            guard let self else { return }
+            let outcome: HALAudioProcessQueryOutcome = await queryExecutor.run {
+                do {
+                    return .success(try Self.queryProcesses())
+                } catch {
+                    return .failure(error.localizedDescription)
+                }
             }
-            let applications = Dictionary(
-                NSWorkspace.shared.runningApplications.map { app -> (pid_t, WorkspaceApp) in
-                    (
-                        app.processIdentifier,
-                        WorkspaceApp(
-                            name: app.localizedName ?? "",
-                            bundleID: app.bundleIdentifier ?? "",
-                            bundleURL: app.bundleURL
-                        )
-                    )
-                },
-                uniquingKeysWith: { current, _ in current }
-            )
-            let result = CoreAudioPropertyReader.readAvailableObjects(ids) { id in
-                let pid: pid_t = try CoreAudioPropertyReader.value(
-                    objectID: id, selector: kAudioProcessPropertyPID, initial: 0
-                )
-                // SoundSource primarily uses `pir?` (IsRunning); also read `piro` (IsRunningOutput).
-                let running: UInt32 = (try? CoreAudioPropertyReader.value(
-                    objectID: id, selector: kAudioProcessPropertyIsRunning, initial: UInt32(0)
-                )) ?? 0
-                let runningOutput: UInt32 = (try? CoreAudioPropertyReader.value(
-                    objectID: id, selector: kAudioProcessPropertyIsRunningOutput, initial: UInt32(0)
-                )) ?? 0
-                let halBundleID = (try? CoreAudioPropertyReader.string(
-                    objectID: id, selector: kAudioProcessPropertyBundleID
-                )) ?? ""
-                let workspace = applications[pid]
-                let bundleID = AudioProcessIdentity.resolveBundleID(
-                    halBundleID: halBundleID,
-                    pid: pid,
-                    workspaceBundleID: workspace?.bundleID
-                )
-                let name = displayNameCache.preferredDisplayName(
-                    pid: pid,
-                    bundleURL: workspace?.bundleURL,
-                    bundleID: bundleID,
-                    workspaceName: workspace?.name
-                )
-                return HALAudioProcessRecord(
-                    objectID: id,
-                    pid: pid,
-                    bundleID: bundleID,
-                    name: name,
-                    isRunningOutput: runningOutput != 0,
-                    isRunning: running != 0
-                )
-            }
-            let records = result.objects.map(\.value)
-            let updatedSnapshot = Self.project(records: records)
-            if snapshot != updatedSnapshot {
-                snapshot = updatedSnapshot
-            }
-            // Ignored/unresolved HAL objects are intentionally not monitored; their
-            // always-on activity must not trigger full process-list reloads.
-            synchronizeActivityListeners(ids: updatedSnapshot.map(\.objectID))
-            if result.failureCount == 0 {
-                partialReloadRetryCount = 0
-                lastError = nil
-            } else {
-                lastError = "\(result.failureCount) 个音频进程在刷新时已失效，已跳过。"
-                schedulePartialReloadRetry()
-            }
-        } catch {
-            lastError = error.localizedDescription
-            schedulePartialReloadRetry()
+            guard started, reloadRequestID == requestID else { return }
+            apply(outcome)
         }
+    }
+
+    private nonisolated static func queryProcesses() throws -> HALAudioProcessQueryResult {
+        let ids = try CoreAudioPropertyReader.objectIDs(
+            objectID: AudioObjectID(kAudioObjectSystemObject),
+            selector: kAudioHardwarePropertyProcessObjectList
+        )
+        let result = CoreAudioPropertyReader.readAvailableObjects(ids) { id in
+            let pid: pid_t = try CoreAudioPropertyReader.value(
+                objectID: id,
+                selector: kAudioProcessPropertyPID,
+                initial: 0
+            )
+            // `pir?` is the primary activity bit; `piro` covers output-only clients.
+            let running: UInt32 = (try? CoreAudioPropertyReader.value(
+                objectID: id,
+                selector: kAudioProcessPropertyIsRunning,
+                initial: UInt32(0)
+            )) ?? 0
+            let runningOutput: UInt32 = (try? CoreAudioPropertyReader.value(
+                objectID: id,
+                selector: kAudioProcessPropertyIsRunningOutput,
+                initial: UInt32(0)
+            )) ?? 0
+            let halBundleID = (try? CoreAudioPropertyReader.string(
+                objectID: id,
+                selector: kAudioProcessPropertyBundleID
+            )) ?? ""
+            return HALAudioProcessQueryRecord(
+                objectID: id,
+                pid: pid,
+                halBundleID: halBundleID,
+                isRunning: running != 0,
+                isRunningOutput: runningOutput != 0
+            )
+        }
+        return HALAudioProcessQueryResult(
+            records: result.objects.map(\.value),
+            failureCount: result.failureCount
+        )
+    }
+
+    private func apply(_ outcome: HALAudioProcessQueryOutcome) {
+        guard case let .success(result) = outcome else {
+            if case let .failure(message) = outcome { lastError = message }
+            schedulePartialReloadRetry()
+            return
+        }
+        guard result.failureCount == 0 else {
+            lastError = "\(result.failureCount) 个音频进程在刷新时已失效，保留上次稳定状态。"
+            schedulePartialReloadRetry()
+            return
+        }
+
+        let applications = Dictionary(
+            NSWorkspace.shared.runningApplications.map { app -> (pid_t, WorkspaceAudioApplication) in
+                (
+                    app.processIdentifier,
+                    WorkspaceAudioApplication(
+                        name: app.localizedName ?? "",
+                        bundleID: app.bundleIdentifier ?? "",
+                        bundleURL: app.bundleURL
+                    )
+                )
+            },
+            uniquingKeysWith: { current, _ in current }
+        )
+        let records = result.records.map { record in
+            let workspace = applications[record.pid]
+            let bundleID = AudioProcessIdentity.resolveBundleID(
+                halBundleID: record.halBundleID,
+                pid: record.pid,
+                workspaceBundleID: workspace?.bundleID
+            )
+            let name = displayNameCache.preferredDisplayName(
+                pid: record.pid,
+                bundleURL: workspace?.bundleURL,
+                bundleID: bundleID,
+                workspaceName: workspace?.name
+            )
+            return HALAudioProcessRecord(
+                objectID: record.objectID,
+                pid: record.pid,
+                bundleID: bundleID,
+                name: name,
+                isRunningOutput: record.isRunningOutput,
+                isRunning: record.isRunning
+            )
+        }
+        let updatedSnapshot = Self.project(records: records)
+        if snapshot != updatedSnapshot { snapshot = updatedSnapshot }
+        // Ignored/unresolved HAL objects are intentionally not monitored; their
+        // always-on activity must not trigger full process-list reloads.
+        synchronizeActivityListeners(ids: updatedSnapshot.map(\.objectID))
+        partialReloadRetryCount = 0
+        lastError = nil
     }
 
     private func synchronizeActivityListeners(ids: [AudioObjectID]) {
@@ -401,32 +471,40 @@ final class AudioProcessRegistry: ObservableObject {
     }
 
     private func refreshActivity(objectID: AudioObjectID) {
-        guard started,
-              let current = snapshot.first(where: { $0.objectID == objectID }) else {
-            return
-        }
-        let runningValue: UInt32? = try? CoreAudioPropertyReader.value(
-            objectID: objectID,
-            selector: kAudioProcessPropertyIsRunning,
-            initial: UInt32(0)
-        )
-        let runningOutputValue: UInt32? = try? CoreAudioPropertyReader.value(
-            objectID: objectID,
-            selector: kAudioProcessPropertyIsRunningOutput,
-            initial: UInt32(0)
-        )
-        guard runningValue != nil || runningOutputValue != nil else {
-            scheduleReload(resetRetryBudget: true)
-            return
-        }
-        let updated = Self.updatingActivity(
-            in: snapshot,
-            objectID: objectID,
-            isRunning: runningValue.map { $0 != 0 } ?? current.isRunning,
-            isRunningOutput: runningOutputValue.map { $0 != 0 } ?? current.isRunningOutput
-        )
-        if let updated, updated != snapshot {
-            snapshot = updated
+        guard started, snapshot.contains(where: { $0.objectID == objectID }) else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let activity: HALAudioProcessActivity = await queryExecutor.run {
+                let runningValue: UInt32? = try? CoreAudioPropertyReader.value(
+                    objectID: objectID,
+                    selector: kAudioProcessPropertyIsRunning,
+                    initial: UInt32(0)
+                )
+                let runningOutputValue: UInt32? = try? CoreAudioPropertyReader.value(
+                    objectID: objectID,
+                    selector: kAudioProcessPropertyIsRunningOutput,
+                    initial: UInt32(0)
+                )
+                return HALAudioProcessActivity(
+                    isRunning: runningValue.map { $0 != 0 },
+                    isRunningOutput: runningOutputValue.map { $0 != 0 }
+                )
+            }
+            guard started,
+                  let current = snapshot.first(where: { $0.objectID == objectID }) else {
+                return
+            }
+            guard activity.isRunning != nil || activity.isRunningOutput != nil else {
+                scheduleReload(resetRetryBudget: true)
+                return
+            }
+            let updated = Self.updatingActivity(
+                in: snapshot,
+                objectID: objectID,
+                isRunning: activity.isRunning ?? current.isRunning,
+                isRunningOutput: activity.isRunningOutput ?? current.isRunningOutput
+            )
+            if let updated, updated != snapshot { snapshot = updated }
         }
     }
 
@@ -434,7 +512,7 @@ final class AudioProcessRegistry: ObservableObject {
         guard started else { return }
         if resetRetryBudget { partialReloadRetryCount = 0 }
         reloadCoalescer.schedule { [weak self] in
-            self?.reload()
+            self?.beginReload()
         }
     }
 

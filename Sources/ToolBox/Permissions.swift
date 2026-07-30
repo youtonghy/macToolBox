@@ -118,23 +118,31 @@ enum Permissions {
         canCreateListenOnlyTap: Bool?,
         canCreateDefaultTap: Bool?
     ) -> MediaKeyPermissionGap {
+        mediaKeyPermissionGap(
+            canCreateListenOnlyTap: canCreateListenOnlyTap,
+            canCreateDefaultTap: canCreateDefaultTap,
+            inputMonitoringTrusted: isInputMonitoringTrusted,
+            accessibilityTrusted: isAccessibilityTrusted
+        )
+    }
+
+    static func mediaKeyPermissionGap(
+        canCreateListenOnlyTap: Bool?,
+        canCreateDefaultTap: Bool?,
+        inputMonitoringTrusted: Bool,
+        accessibilityTrusted: Bool
+    ) -> MediaKeyPermissionGap {
         if canCreateDefaultTap == true {
             return .none
         }
 
-        let im = isInputMonitoringTrusted
-        let ax = isAccessibilityTrusted
-
         // Empirical split: listen-only often works with Input Monitoring alone;
         // default (modify/swallow) commonly also needs Accessibility.
-        if canCreateListenOnlyTap == true, !ax {
-            return .accessibility
-        }
-        if canCreateListenOnlyTap == false, !im {
-            return im && ax ? .restartRequired : (!im && !ax ? .both : .inputMonitoring)
+        if canCreateListenOnlyTap == true {
+            return accessibilityTrusted ? .restartRequired : .accessibility
         }
 
-        switch (im, ax) {
+        switch (inputMonitoringTrusted, accessibilityTrusted) {
         case (true, true):
             return .restartRequired
         case (false, true):
@@ -233,7 +241,11 @@ enum Permissions {
     }
 
     static func openAccessibilitySettings(completion: (() -> Void)? = nil) {
-        openMediaKeyPermissionSettings(gap: .accessibility, completion: completion)
+        _ = registerAccessibility(prompt: !isAccessibilityTrusted)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            openPrivacyPane(anchors: ["Privacy_Accessibility"])
+            completion?()
+        }
     }
 
     // MARK: - Private

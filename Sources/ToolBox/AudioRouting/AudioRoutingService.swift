@@ -159,9 +159,15 @@ final class AudioRoutingService: ObservableObject {
             .receive(on: RunLoop.main)
             .sink { [weak self] processes in
                 guard let self, self.isCurrentSession(session) else { return }
+                let previousProcesses = self.latestProcesses
                 self.latestProcesses = processes
                 self.watchdogProcesses = processes
                 self.rebuildRows(processes: processes, devices: self.deviceRegistry.snapshot)
+                self.recoverTerminalRouteIfNeeded(
+                    previousProcesses: previousProcesses,
+                    currentProcesses: processes,
+                    session: session
+                )
             }
             .store(in: &cancellables)
 
@@ -638,6 +644,58 @@ final class AudioRoutingService: ObservableObject {
             == Set(updated.map { AudioRoutingProcessIdentity(objectID: $0.objectID, bundleID: $0.bundleID) })
     }
 
+    private func recoverTerminalRouteIfNeeded(
+        previousProcesses: [AudioProcessSnapshot],
+        currentProcesses: [AudioProcessSnapshot],
+        session: UInt64
+    ) {
+        guard !terminalRouteFailures.isEmpty,
+              Self.haveSameRoutingProcesses(previousProcesses, currentProcesses) else {
+            return
+        }
+        let previousByIdentity = Dictionary(
+            uniqueKeysWithValues: previousProcesses.map {
+                (AudioRoutingProcessIdentity(objectID: $0.objectID, bundleID: $0.bundleID), $0)
+            }
+        )
+        let newlyActiveBundleIDs = Set(currentProcesses.compactMap { process -> String? in
+            let identity = AudioRoutingProcessIdentity(
+                objectID: process.objectID,
+                bundleID: process.bundleID
+            )
+            guard process.isHALActive,
+                  let previous = previousByIdentity[identity],
+                  previous.isRunning != process.isRunning
+                    || previous.isRunningOutput != process.isRunningOutput else {
+                return nil
+            }
+            return process.bundleID
+        })
+        guard !newlyActiveBundleIDs.isEmpty else { return }
+
+        let recoveryCompilation = RoutePlanCompiler.compile(
+            rules: rules.filter { newlyActiveBundleIDs.contains($0.bundleID) },
+            processes: currentProcesses,
+            devices: deviceRegistry.snapshot,
+            defaultOutputUID: deviceRegistry.defaultOutputUID,
+            deviceConfigurationGeneration: deviceConfigurationGeneration
+        )
+        let shouldRecover = recoveryCompilation.plans.contains {
+            terminalRouteFailures[$0.id] != nil
+        }
+        guard shouldRecover else { return }
+
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.reconcile(
+                processes: self.processRegistry.snapshot,
+                devices: self.deviceRegistry.snapshot,
+                defaultOutputUID: self.deviceRegistry.defaultOutputUID,
+                session: session
+            )
+        }
+    }
+
     private static func preferProcessForPresentation(
         _ lhs: AudioProcessSnapshot,
         _ rhs: AudioProcessSnapshot
@@ -858,14 +916,25 @@ final class AudioRoutingService: ObservableObject {
             uniquingKeysWith: { _, latest in latest }
         )
 
+        let producingOutputBundleIDs = Set(
+            latestProcesses.filter(\.isRunningOutput).map(\.bundleID)
+        )
+
         var healthByRouteID: [String: AudioRouteDiagnosticsHealth] = [:]
         for plan in compilation.plans {
             let snapshot = snapshotsByRouteID[plan.id]
             let previous = previousDiagnostics[plan.id]
+            let isProducingOutput = plan.sources.contains {
+                producingOutputBundleIDs.contains($0.bundleID)
+            }
+            // Only count polls that could indicate a broken route. A paused app stops
+            // capture frames indefinitely; counting those would saturate the budget and
+            // trip a false stall on the first poll after playback resumes.
             let didStall = snapshot.map { current in
-                previous.map {
-                    current.captureFrameCount == $0.captureFrameCount
-                        || current.outputFrameCount == $0.outputFrameCount
+                previous.map { previous in
+                    if current.outputFrameCount == previous.outputFrameCount { return true }
+                    return isProducingOutput
+                        && current.captureFrameCount == previous.captureFrameCount
                 } ?? false
             } ?? false
             stalledPollCounts[plan.id] = didStall ? (stalledPollCounts[plan.id, default: 0] + 1) : 0
@@ -873,7 +942,8 @@ final class AudioRoutingService: ObservableObject {
                 snapshot: snapshot,
                 previous: previous,
                 startupPollCount: watchdogPollCount,
-                consecutiveStalledPollCount: stalledPollCounts[plan.id, default: 0]
+                consecutiveStalledPollCount: stalledPollCounts[plan.id, default: 0],
+                sourceIsProducingOutput: isProducingOutput
             )
         }
 

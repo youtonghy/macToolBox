@@ -112,7 +112,7 @@ final class BrightnessScheduleTests: XCTestCase {
     }
 
     func testInsertUpdateDeleteMutations() throws {
-        var schedule = BrightnessSchedule.default
+        let schedule = BrightnessSchedule.default
         let inserted = try schedule.insertingSegment(
             startMinute: MinuteOfDay(hour: 12, minute: 0)!,
             brightnessPercent: 50

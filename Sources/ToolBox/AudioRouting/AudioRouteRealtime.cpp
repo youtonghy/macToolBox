@@ -36,6 +36,7 @@ TBAudioStereoRingBuffer::TBAudioStereoRingBuffer(
     capacityMask_(capacityFrames - 1),
     gainRampFrames_(std::max<uint32_t>(1, gainRampFrames)) {
     if (!IsPowerOfTwo(capacityFrames)) throw std::invalid_argument("capacityFrames must be a power of two");
+    std::fill_n(samples_.get(), capacityFrames * 2, 0.0f);
 }
 
 void TBAudioStereoRingBuffer::Write(const float* source, uint32_t frameCount) noexcept {

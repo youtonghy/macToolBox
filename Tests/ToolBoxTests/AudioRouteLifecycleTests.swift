@@ -113,7 +113,7 @@ final class AudioRouteLifecycleTests: XCTestCase {
         XCTAssertFalse(shouldWait(42, 42, &targetDevice, 1, 0))
     }
 
-    func testDefaultOutputMigrationTimeoutBindsTheNewTargetDevice() throws {
+    func testMigrationTimeoutPinsWhereTheProcessActuallyPlaysOrFallsBack() throws {
         typealias Selector = @convention(c) (
             AudioObjectID,
             AudioObjectID,
@@ -125,9 +125,25 @@ final class AudioRouteLifecycleTests: XCTestCase {
             as: Selector.self
         )
 
+        // Process still on a single non-target device → pin there (capture works),
+        // never force-pin the empty target (that mutes with zero frames).
         var oldDevice: AudioObjectID = 41
-        XCTAssertEqual(selectDevice(42, 42, &oldDevice, 1), 42)
+        XCTAssertEqual(selectDevice(42, 42, &oldDevice, 1), 41)
         XCTAssertEqual(selectDevice(42, 99, &oldDevice, 1), 41)
+
+        // Empty process device list → unknown → stereo mixdown path.
+        XCTAssertEqual(selectDevice(42, 42, nil, 0), AudioObjectID(kAudioObjectUnknown))
+
+        // Process already on the route target → pin to target.
+        var targetDevice: AudioObjectID = 42
+        XCTAssertEqual(selectDevice(42, 42, &targetDevice, 1), 42)
+
+        // Ambiguous multi-device list that excludes the target → mixdown.
+        var ambiguous: [AudioObjectID] = [41, 43]
+        XCTAssertEqual(
+            selectDevice(42, 42, &ambiguous, UInt32(ambiguous.count)),
+            AudioObjectID(kAudioObjectUnknown)
+        )
     }
 
     @available(macOS 14.2, *)

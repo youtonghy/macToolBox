@@ -2,6 +2,67 @@ import CoreGraphics
 import XCTest
 @testable import ToolBox
 
+private enum SnapshotTestError: Error {
+    case forced
+}
+
+actor ControlledDisplayControlLifecycleSleeper: DisplayControlLifecycleSleeper {
+    private var pendingSleep: CheckedContinuation<Void, Error>?
+    private var sleepStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var sleepCancelledWaiters: [CheckedContinuation<Void, Never>] = []
+    private var didCancelSleep = false
+    private var cancellationRequested = false
+
+    func sleep(nanoseconds: UInt64) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if cancellationRequested {
+                    cancellationRequested = false
+                    continuation.resume(throwing: CancellationError())
+                    return
+                }
+                pendingSleep = continuation
+                let waiters = sleepStartedWaiters
+                sleepStartedWaiters.removeAll()
+                waiters.forEach { $0.resume() }
+            }
+        } onCancel: {
+            Task { await self.cancelPendingSleep() }
+        }
+    }
+
+    func waitUntilSleepStarts() async {
+        if pendingSleep != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            sleepStartedWaiters.append(continuation)
+        }
+    }
+
+    func waitUntilSleepIsCancelled() async {
+        if didCancelSleep {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            sleepCancelledWaiters.append(continuation)
+        }
+    }
+
+    private func cancelPendingSleep() {
+        guard let pendingSleep else {
+            cancellationRequested = true
+            return
+        }
+        self.pendingSleep = nil
+        didCancelSleep = true
+        pendingSleep.resume(throwing: CancellationError())
+        let waiters = sleepCancelledWaiters
+        sleepCancelledWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+}
+
 actor RecordingDisplayControlProvider: DisplayControlProviding {
     private struct WriteWaiter {
         var kind: DisplayControlKind
@@ -16,6 +77,10 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     private var firstWriteStartedWaiters: [CheckedContinuation<Void, Never>] = []
     private var writeWaiters: [WriteWaiter] = []
     private var snapshotCount = 0
+    private var shouldBlockNextSnapshot = false
+    private var blockedSnapshotRelease: CheckedContinuation<Void, Never>?
+    private var blockedSnapshotStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var failReleasedSnapshot = false
     private let configuredSnapshot: DisplayControlSnapshot
 
     init(
@@ -66,8 +131,40 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         snapshotCount
     }
 
+    func blockNextSnapshot() {
+        shouldBlockNextSnapshot = true
+    }
+
+    func waitUntilSnapshotIsBlocked() async {
+        if blockedSnapshotRelease != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            blockedSnapshotStartedWaiters.append(continuation)
+        }
+    }
+
+    func releaseBlockedSnapshotWithFailure() {
+        failReleasedSnapshot = true
+        blockedSnapshotRelease?.resume()
+        blockedSnapshotRelease = nil
+    }
+
     func snapshot() async throws -> DisplayControlSnapshot {
         snapshotCount += 1
+        if shouldBlockNextSnapshot {
+            shouldBlockNextSnapshot = false
+            await withCheckedContinuation { continuation in
+                blockedSnapshotRelease = continuation
+                let waiters = blockedSnapshotStartedWaiters
+                blockedSnapshotStartedWaiters.removeAll()
+                waiters.forEach { $0.resume() }
+            }
+        }
+        if failReleasedSnapshot {
+            failReleasedSnapshot = false
+            throw SnapshotTestError.forced
+        }
         return configuredSnapshot
     }
 
@@ -124,6 +221,186 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
 
 @MainActor
 final class DisplayControlServiceTests: XCTestCase {
+    func testReconfigurationBurstCoalescesLifecycleRefresh() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(
+            provider: provider,
+            timing: .immediateForTests,
+            observesSystemEvents: false
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.handleDisplayReconfiguration()
+        service.handleDisplayReconfiguration()
+        service.handleDisplayReconfiguration()
+        await waitForSnapshotCount(provider, atLeast: initialCount + 1)
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount + 1)
+    }
+
+    func testSleepCancelsQueuedReconfigurationRefresh() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(
+            provider: provider,
+            timing: .immediateForTests,
+            observesSystemEvents: false
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.handleDisplayReconfiguration()
+        service.suspendForSleep()
+        await yieldForPendingTasks()
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount)
+    }
+
+    func testWakeSettlingIgnoresReconfigurationUntilWakeRefresh() async {
+        let provider = RecordingDisplayControlProvider()
+        let timing = DisplayControlTiming(
+            brightnessFrameDelayNanos: 0,
+            refreshDebounceNanos: 0,
+            reconfigurationRefreshDelayNanos: 0,
+            wakeRefreshDelayNanos: 60_000_000_000
+        )
+        let service = DisplayControlService(
+            provider: provider,
+            timing: timing,
+            observesSystemEvents: false
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.suspendForSleep()
+        service.resumeAfterWake()
+        service.handleDisplayReconfiguration()
+        await yieldForPendingTasks()
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount)
+    }
+
+    func testImmediateWakeRefreshPublishesOnce() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(
+            provider: provider,
+            timing: .immediateForTests,
+            observesSystemEvents: false
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.suspendForSleep()
+        service.resumeAfterWake()
+        await waitForSnapshotCount(provider, atLeast: initialCount + 1)
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount + 1)
+    }
+
+    func testSecondSleepCancelsQueuedWakeRefresh() async {
+        let provider = RecordingDisplayControlProvider()
+        let sleeper = ControlledDisplayControlLifecycleSleeper()
+        let timing = DisplayControlTiming(
+            brightnessFrameDelayNanos: 0,
+            refreshDebounceNanos: 0,
+            reconfigurationRefreshDelayNanos: 0,
+            wakeRefreshDelayNanos: 1
+        )
+        let service = DisplayControlService(
+            provider: provider,
+            timing: timing,
+            observesSystemEvents: false,
+            lifecycleSleeper: sleeper
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.suspendForSleep()
+        service.resumeAfterWake()
+        await sleeper.waitUntilSleepStarts()
+        service.suspendForSleep()
+        await sleeper.waitUntilSleepIsCancelled()
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount)
+    }
+
+    func testStopThenStartRestoresRefreshAfterSleep() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(
+            provider: provider,
+            timing: .immediateForTests,
+            observesSystemEvents: false
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.suspendForSleep()
+        service.stop()
+        service.start()
+        await waitForSnapshotCount(provider, atLeast: initialCount + 1)
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount + 1)
+    }
+
+    func testReconfigurationFromPreviousSessionIsIgnoredAfterRestart() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(
+            provider: provider,
+            timing: .immediateForTests,
+            observesSystemEvents: false
+        )
+        service.start()
+        defer { service.stop() }
+
+        await waitForSnapshotCount(provider, atLeast: 1)
+        let firstSessionID: UInt64 = 1
+        service.stop()
+        service.start()
+        await waitForSnapshotCount(provider, atLeast: 2)
+        let initialCount = await provider.recordedSnapshotCount()
+        service.handleDisplayReconfiguration(sessionID: firstSessionID)
+        await yieldForPendingTasks()
+
+        let finalCount = await provider.recordedSnapshotCount()
+        XCTAssertEqual(finalCount, initialCount)
+    }
+
+    func testCancelledRefreshFailureDoesNotClearExistingSnapshot() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockNextSnapshot()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        let expectedTimestamp = Date(timeIntervalSinceReferenceDate: 42)
+        service.setSnapshotForTesting(
+            DisplayControlSnapshot(timestamp: expectedTimestamp, displays: [])
+        )
+
+        service.refresh()
+        await provider.waitUntilSnapshotIsBlocked()
+        service.stop()
+        await provider.releaseBlockedSnapshotWithFailure()
+        await yieldForPendingTasks()
+
+        XCTAssertEqual(service.snapshot.timestamp, expectedTimestamp)
+    }
+
     func testContrastBurstKeepsOnlyInFlightAndLatestTarget() async {
         let provider = RecordingDisplayControlProvider()
         await provider.blockFirstWrite()
@@ -238,5 +515,26 @@ final class DisplayControlServiceTests: XCTestCase {
         XCTAssertEqual(manualEvents.count, 1)
         XCTAssertEqual(manualEvents[0].0, 7)
         XCTAssertEqual(manualEvents[0].1, 0.42, accuracy: 0.0001)
+    }
+
+    private func waitForSnapshotCount(
+        _ provider: RecordingDisplayControlProvider,
+        atLeast expectedCount: Int,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async {
+        for _ in 0..<1_000 {
+            if await provider.recordedSnapshotCount() >= expectedCount {
+                return
+            }
+            await Task.yield()
+        }
+        XCTFail("Timed out waiting for \(expectedCount) snapshots", file: file, line: line)
+    }
+
+    private func yieldForPendingTasks() async {
+        for _ in 0..<100 {
+            await Task.yield()
+        }
     }
 }

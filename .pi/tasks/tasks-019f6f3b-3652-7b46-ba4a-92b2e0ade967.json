@@ -1,0 +1,41 @@
+{
+  "nextId": 4,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "Map current architecture and constraints",
+      "description": "Read the design skill and inspect display control, app lifecycle, settings UI, persistence, sleep/wake handling, and test doubles. Confirm exact file paths and symbols relevant to scheduled brightness.",
+      "status": "completed",
+      "activeForm": "Mapping current architecture",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784277590616,
+      "updatedAt": 1784278126438
+    },
+    {
+      "id": "2",
+      "subject": "Design scheduled brightness feature",
+      "description": "Resolve the listed product decisions and define the domain model, validation algorithm, persistence boundary, runtime coordinator lifecycle, conflict policy, and UI behavior using deep-module principles.",
+      "status": "completed",
+      "activeForm": "Designing scheduled brightness feature",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784277595469,
+      "updatedAt": 1784278213770
+    },
+    {
+      "id": "3",
+      "subject": "Write and verify PLAN.md",
+      "description": "Create a detailed implementation-only plan at repository root covering all 12 requested sections, exact file-level changes, ordered TDD-friendly phases, risks, and acceptance criteria. Verify content against repository symbols and ensure no application code is changed.",
+      "status": "completed",
+      "activeForm": "Writing and verifying PLAN.md",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784277601739,
+      "updatedAt": 1784279093761
+    }
+  ]
+}

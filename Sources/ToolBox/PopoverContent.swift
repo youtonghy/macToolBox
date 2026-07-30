@@ -6,6 +6,7 @@ struct PopoverContent: View {
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
     @ObservedObject var audioRouting: AudioRoutingService
+    @ObservedObject var focusMode: FocusModeCoordinator
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
@@ -99,6 +100,17 @@ struct PopoverContent: View {
                 subtitle: "阻止系统睡眠",
                 isOn: $state.awakeOn,
                 accent: Color(nsColor: .systemOrange)
+            )
+
+            circularControlButton(
+                systemName: "scope",
+                title: "聚焦模式",
+                subtitle: "突出当前使用的显示器",
+                isOn: Binding(
+                    get: { focusMode.isEnabled },
+                    set: { focusMode.setEnabled($0) }
+                ),
+                accent: Color(nsColor: .systemTeal)
             )
         }
         .frame(maxWidth: .infinity, minHeight: MenuPanelLayout.controlsHeight, maxHeight: MenuPanelLayout.controlsHeight)

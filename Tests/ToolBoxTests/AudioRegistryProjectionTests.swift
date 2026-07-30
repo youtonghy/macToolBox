@@ -3,8 +3,100 @@ import XCTest
 @testable import ToolBox
 
 final class AudioRegistryProjectionTests: XCTestCase {
+    @MainActor
+    func testCoreAudioRegistryQueriesRunOutsideMainActor() async {
+        let executor = CoreAudioRegistryQueryExecutor()
+
+        let ranOnMainThread = await executor.run { Thread.isMainThread }
+
+        XCTAssertFalse(ranOnMainThread)
+    }
+
     func testProcessRegistryWaitsForNewHALProcessesToSettle() {
         XCTAssertEqual(AudioProcessRegistry.processListSettleDelay, .seconds(5))
+    }
+
+    func testDeviceRegistryWaitsForRouteConfigurationToSettle() {
+        XCTAssertEqual(AudioDeviceRegistry.routeSettleDelay, .seconds(1))
+    }
+
+    func testRouteConfigurationTrackerIgnoresDuplicateHALNotifications() {
+        var tracker = AudioDeviceRouteConfigurationTracker()
+        let initial = AudioDeviceRouteConfiguration(
+            defaultOutputUID: "headset",
+            devices: [
+                HALAudioDeviceRouteSignature(
+                    objectID: 42,
+                    uid: "headset",
+                    isAlive: true,
+                    streamIDs: [7],
+                    streamFormats: []
+                )
+            ]
+        )
+
+        XCTAssertFalse(tracker.observe(initial))
+        XCTAssertFalse(tracker.observe(initial))
+
+        let changed = AudioDeviceRouteConfiguration(
+            defaultOutputUID: "headset",
+            devices: [
+                HALAudioDeviceRouteSignature(
+                    objectID: 42,
+                    uid: "headset",
+                    isAlive: true,
+                    streamIDs: [8],
+                    streamFormats: []
+                )
+            ]
+        )
+        XCTAssertTrue(tracker.observe(changed))
+        XCTAssertFalse(tracker.observe(changed))
+    }
+
+    func testOnlyBluetoothTransportUsesImmediateRouteSuspension() {
+        XCTAssertTrue(
+            HALAudioDeviceRecord(
+                uid: "headset",
+                name: "Headset",
+                hasOutput: true,
+                transportType: kAudioDeviceTransportTypeBluetooth
+            ).isBluetooth
+        )
+        XCTAssertTrue(
+            HALAudioDeviceRecord(
+                uid: "headset-le",
+                name: "Headset LE",
+                hasOutput: true,
+                transportType: kAudioDeviceTransportTypeBluetoothLE
+            ).isBluetooth
+        )
+        XCTAssertFalse(
+            HALAudioDeviceRecord(
+                uid: "usb-dac",
+                name: "USB DAC",
+                hasOutput: true,
+                transportType: kAudioDeviceTransportTypeUSB
+            ).isBluetooth
+        )
+    }
+
+    func testBluetoothRouteSuspensionIsIdempotentUntilStableRecovery() throws {
+        let devices = [
+            AudioOutputDevice(
+                uid: "headset",
+                name: "Headset",
+                isAvailable: true,
+                sampleRate: 44_100
+            )
+        ]
+
+        let suspended = try XCTUnwrap(
+            AudioDeviceRegistry.suspendingBluetoothRoute(in: devices, uid: "headset")
+        )
+        XCTAssertEqual(suspended[0].compatibilityIssue, .bluetoothProfileChanging)
+        XCTAssertNil(suspended[0].sampleRate)
+        XCTAssertNil(AudioDeviceRegistry.suspendingBluetoothRoute(in: suspended, uid: "headset"))
     }
 
     @MainActor
@@ -84,6 +176,38 @@ final class AudioRegistryProjectionTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(50))
 
         XCTAssertEqual(values, [3])
+    }
+
+    @MainActor
+    func testRegistryEventCoalescerRunsWithinMaximumDelayDuringSustainedChurn() async throws {
+        let coalescer = AudioRegistryEventCoalescer(
+            delay: .milliseconds(100),
+            maximumDelay: .milliseconds(120)
+        )
+        var runCount = 0
+
+        // A pure debounce would keep deferring for as long as events keep arriving.
+        for _ in 0..<10 {
+            coalescer.schedule { runCount += 1 }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+
+        XCTAssertGreaterThanOrEqual(runCount, 1)
+    }
+
+    @MainActor
+    func testRegistryEventCoalescerWithoutMaximumDelayWaitsForChurnToSettle() async throws {
+        let coalescer = AudioRegistryEventCoalescer(delay: .milliseconds(60))
+        var runCount = 0
+
+        for _ in 0..<10 {
+            coalescer.schedule { runCount += 1 }
+            try await Task.sleep(for: .milliseconds(30))
+        }
+
+        XCTAssertEqual(runCount, 0)
+        try await Task.sleep(for: .milliseconds(90))
+        XCTAssertEqual(runCount, 1)
     }
 
     @MainActor

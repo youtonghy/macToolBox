@@ -12,13 +12,13 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     private var valueStore = DisplayControlValueStore()
 
     func refresh() async throws {
-        try await queue.asyncThrowing {
+        try await queue.asyncCancellable {
             try self.refreshConnectionsLocked(displayIDs: Self.onlineDisplayIDs())
         }
     }
 
     func snapshot() async throws -> DisplayControlSnapshot {
-        try await queue.asyncThrowing {
+        try await queue.asyncCancellable {
             let displayIDs = Self.onlineDisplayIDs()
             try self.refreshConnectionsLocked(displayIDs: displayIDs)
             return DisplayControlSnapshot(
@@ -29,7 +29,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     }
 
     func readValue(displayID: CGDirectDisplayID, kind: DisplayControlKind) async throws -> DisplayControlValue {
-        try await queue.asyncThrowing {
+        try await queue.asyncCancellable {
             try self.ensureDisplayOnline(displayID)
             guard let transport = self.transports[displayID] else {
                 throw DisplayControlError.backendUnavailable(displayID, self.unavailableReasonLocked(displayID: displayID))
@@ -37,7 +37,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             guard let read = transport.read(command: kind.ddcCommand.rawValue, options: .interactive) else {
                 throw DisplayControlError.readFailed(displayID, kind)
             }
-            let value = try Self.makeValue(kind: kind, read: read)
+            let value = try Self.decodeValue(kind: kind, read: read)
             self.valueStore.recordObserved(
                 value,
                 for: DisplayControlValueKey(displayID: displayID, kind: kind),
@@ -53,7 +53,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         normalizedValue: Double,
         options: DisplayControlWriteOptions
     ) async throws -> DisplayControlValue {
-        try await queue.asyncThrowing {
+        try await queue.asyncCancellable {
             try self.ensureDisplayOnline(displayID)
             guard normalizedValue.isFinite, (0...1).contains(normalizedValue) else {
                 throw DisplayControlError.invalidValue(normalizedValue)
@@ -200,14 +200,14 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         guard let read = transport.read(command: kind.ddcCommand.rawValue, options: options) else {
             throw DisplayControlError.readFailed(displayID, kind)
         }
-        return try Self.makeValue(kind: kind, read: read)
+        return try Self.decodeValue(kind: kind, read: read)
     }
 
     private func unavailableReasonLocked(displayID: CGDirectDisplayID) -> String {
         unavailableReasons[displayID] ?? Self.staticUnavailableReason(displayID: displayID)
     }
 
-    private static func makeValue(kind: DisplayControlKind, read: DDCReadResult) throws -> DisplayControlValue {
+    static func decodeValue(kind: DisplayControlKind, read: DDCReadResult) throws -> DisplayControlValue {
         if kind == .mute {
             let muted = read.current == 1
             return DisplayControlValue(
@@ -221,8 +221,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         }
 
         let minimum: UInt16 = 0
-        let maximum = min(max(read.maximum, 1), 100)
-        guard maximum > minimum else {
+        let maximum = read.maximum
+        guard maximum > minimum, maximum != .max else {
             throw DisplayControlError.invalidRange(minimum: minimum, maximum: maximum)
         }
 
@@ -317,16 +317,92 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     }
 }
 
-private extension DispatchQueue {
-    func asyncThrowing<T>(_ work: @escaping () throws -> T) async throws -> T {
-        try await withCheckedThrowingContinuation { continuation in
-            async {
-                do {
-                    continuation.resume(returning: try work())
-                } catch {
-                    continuation.resume(throwing: error)
+private final class DispatchQueueCancellableWork<T>: @unchecked Sendable {
+    private enum State {
+        case pending
+        case running
+        case cancelled
+        case completed
+    }
+
+    private let lock = NSLock()
+    private var state = State.pending
+    private var continuation: CheckedContinuation<T, Error>?
+    private var work: (() throws -> T)?
+
+    init(work: @escaping () throws -> T) {
+        self.work = work
+    }
+
+    func register(_ continuation: CheckedContinuation<T, Error>) -> Bool {
+        lock.lock()
+        guard case .pending = state else {
+            lock.unlock()
+            continuation.resume(throwing: CancellationError())
+            return false
+        }
+        self.continuation = continuation
+        lock.unlock()
+        return true
+    }
+
+    func takeWorkForExecution() -> (() throws -> T)? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard case .pending = state, let work else { return nil }
+        state = .running
+        self.work = nil
+        return work
+    }
+
+    func cancel() {
+        let continuation: CheckedContinuation<T, Error>?
+        lock.lock()
+        if case .pending = state {
+            state = .cancelled
+            continuation = self.continuation
+            self.continuation = nil
+            work = nil
+        } else {
+            continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume(throwing: CancellationError())
+    }
+
+    func complete(_ result: Result<T, Error>) {
+        let continuation: CheckedContinuation<T, Error>?
+        lock.lock()
+        if case .running = state {
+            state = .completed
+            continuation = self.continuation
+            self.continuation = nil
+        } else {
+            continuation = nil
+        }
+        lock.unlock()
+        continuation?.resume(with: result)
+    }
+}
+
+extension DispatchQueue {
+    func asyncCancellable<T>(
+        onEnqueued: (() -> Void)? = nil,
+        _ work: @escaping () throws -> T
+    ) async throws -> T {
+        try Task.checkCancellation()
+        let cancellableWork = DispatchQueueCancellableWork(work: work)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                guard cancellableWork.register(continuation) else { return }
+                async {
+                    guard let operation = cancellableWork.takeWorkForExecution() else { return }
+                    cancellableWork.complete(Result { try operation() })
                 }
+                onEnqueued?()
             }
+        } onCancel: {
+            cancellableWork.cancel()
         }
     }
 }

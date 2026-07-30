@@ -1,0 +1,41 @@
+{
+  "nextId": 4,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "定位应用音频行的数据与视图",
+      "description": "检查 AudioRouting 相关模型、进程注册表和面板视图，确定真实应用图标的数据来源与现有音量控制路径。",
+      "status": "in_progress",
+      "activeForm": "正在定位应用音频实现",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784776488739,
+      "updatedAt": 1784776493550
+    },
+    {
+      "id": "2",
+      "subject": "重做应用音频行样式与滑杆",
+      "description": "使用软件真实图标，整理行布局，并用连续滑杆替换减号/加号音量调节，同时保留静音控制和百分比反馈。",
+      "status": "pending",
+      "activeForm": "正在重做应用音频控件",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784776488740,
+      "updatedAt": 1784776488740
+    },
+    {
+      "id": "3",
+      "subject": "构建并验证应用音频界面",
+      "description": "运行相关测试和 macOS 构建，检查新视图的数据绑定、编译和现有行为没有回归。",
+      "status": "pending",
+      "activeForm": "正在验证应用音频界面",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1784776488740,
+      "updatedAt": 1784776488740
+    }
+  ]
+}

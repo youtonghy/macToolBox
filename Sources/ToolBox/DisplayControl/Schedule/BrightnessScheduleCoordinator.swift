@@ -333,6 +333,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
     private func registerNotifications() {
         let center = NotificationCenter.default
         let workspace = NSWorkspace.shared.notificationCenter
+        // Explicit .main delivery makes the synchronous MainActor hops below valid.
 
         let sleepNames: [Notification.Name] = [
             NSWorkspace.screensDidSleepNotification,
@@ -341,7 +342,9 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         for name in sleepNames {
             notificationObservers.append(
                 workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    self?.handleSleep()
+                    MainActor.assumeIsolated {
+                        self?.handleSleep()
+                    }
                 }
             )
         }
@@ -353,7 +356,9 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         for name in wakeNames {
             notificationObservers.append(
                 workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    self?.handleWake()
+                    MainActor.assumeIsolated {
+                        self?.handleWake()
+                    }
                 }
             )
         }
@@ -366,7 +371,9 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         for name in clockNames {
             notificationObservers.append(
                 center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                    self?.reconcile(reason: .clockChange)
+                    MainActor.assumeIsolated {
+                        self?.reconcile(reason: .clockChange)
+                    }
                 }
             )
         }

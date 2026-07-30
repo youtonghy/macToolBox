@@ -51,6 +51,22 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
         )
     }
 
+    func testSourceOnlyFormatMismatchDoesNotFailSharedRoute() {
+        // Multi-app routes share one diagnostics snapshot. A single unreadable
+        // source (e.g. 小红书 iOS shell) must not tear down Zoom on the same device.
+        XCTAssertEqual(
+            evaluate(
+                snapshot: snapshot(
+                    captureFrames: 512,
+                    outputFrames: 512,
+                    formatMismatchCount: 3,
+                    fatalCallbackMismatch: false
+                )
+            ),
+            .active
+        )
+    }
+
     func testPreviouslyActiveRouteBecomesStalledAfterThreshold() {
         let value = snapshot(captureFrames: 512, outputFrames: 512)
 
@@ -65,7 +81,7 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
         )
     }
 
-    func testEitherCaptureOrOutputStoppingBecomesStalled() {
+    func testEitherCaptureOrOutputStoppingBecomesStalledWhileSourceProducesOutput() {
         let previous = snapshot(captureFrames: 512, outputFrames: 512)
 
         for current in [
@@ -77,11 +93,40 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                     snapshot: current,
                     previous: previous,
                     startupPollCount: 20,
-                    consecutiveStalledPollCount: 8
+                    consecutiveStalledPollCount: 8,
+                    sourceIsProducingOutput: true
                 ),
                 .stalled
             )
         }
+    }
+
+    func testPausedSourceKeepsRouteInsteadOfStalling() {
+        // Output IOProc keeps running while a paused app stops feeding the tap.
+        // Releasing the route here would drop the saved per-app gain.
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 512, outputFrames: 1024),
+                previous: snapshot(captureFrames: 512, outputFrames: 512),
+                startupPollCount: 20,
+                consecutiveStalledPollCount: 8,
+                sourceIsProducingOutput: false
+            ),
+            .awaitingAudio
+        )
+    }
+
+    func testDeadOutputIOProcStallsEvenWhileSourceIsIdle() {
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 1024, outputFrames: 512),
+                previous: snapshot(captureFrames: 512, outputFrames: 512),
+                startupPollCount: 20,
+                consecutiveStalledPollCount: 8,
+                sourceIsProducingOutput: false
+            ),
+            .stalled
+        )
     }
 
     func testWrappingCountersStillCountAsProgress() {

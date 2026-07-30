@@ -1,5 +1,10 @@
 import AppKit
 
+struct MenuPanelScreenGeometry {
+    let frame: NSRect
+    let visibleFrame: NSRect
+}
+
 enum MenuPanelLayout {
     static let size = NSSize(
         width: 560,
@@ -97,6 +102,23 @@ enum MenuPanelLayout {
                 showsDisplayControl: showsDisplayControl,
                 showsAudioSection: showsAudioSection
             )
+        )
+    }
+
+    static func panelFrame(
+        preferredSize: NSSize,
+        anchorFrame: NSRect,
+        screens: [MenuPanelScreenGeometry]
+    ) -> NSRect? {
+        let anchorPoint = NSPoint(x: anchorFrame.midX, y: anchorFrame.midY)
+        guard let screen = screens.first(where: { $0.frame.contains(anchorPoint) }) else {
+            return nil
+        }
+
+        return panelFrame(
+            preferredSize: preferredSize,
+            anchorFrame: anchorFrame,
+            visibleFrame: screen.visibleFrame
         )
     }
 

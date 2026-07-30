@@ -62,6 +62,7 @@ struct SettingsView: View {
     @ObservedObject var mediaKeys: DisplayControlMediaKeyController
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
     @ObservedObject var audioRouting: AudioRoutingService
+    @ObservedObject var focusMode: FocusModeCoordinator
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
@@ -116,7 +117,8 @@ struct SettingsView: View {
                     SettingsDisplayView(
                         model: displayControl,
                         brightnessSchedule: brightnessSchedule,
-                        launchAtLogin: launchAtLogin
+                        launchAtLogin: launchAtLogin,
+                        focusMode: focusMode
                     )
                 case .audio:
                     AudioRoutingSettingsView(service: audioRouting)
@@ -189,6 +191,11 @@ private struct SettingsHomeView: View {
                         symbolName: "display.2",
                         accent: Color(nsColor: .systemTeal),
                         title: "显示器控制"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "scope",
+                        accent: Color(nsColor: .systemTeal),
+                        title: "聚焦模式"
                     )
                     SettingsFeatureRow(
                         symbolName: "speaker.wave.2",
@@ -368,10 +375,13 @@ private struct SettingsDisplayView: View {
     @ObservedObject var model: DisplayControlMenuModel
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+    @ObservedObject var focusMode: FocusModeCoordinator
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
+                focusModeSection
+
                 SettingsSection(
                     title: "外接显示器",
                     subtitle: model.hasExternalDisplay
@@ -452,6 +462,104 @@ private struct SettingsDisplayView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 4)
+        }
+    }
+
+    private var focusModeSection: some View {
+        let accent = Color(nsColor: .systemTeal)
+        let permissionGranted = focusMode.permissionState == .granted
+
+        return SettingsSection(title: "聚焦模式", subtitle: "自动突出当前显示器") {
+            VStack(spacing: 8) {
+                SettingsInnerCard {
+                    HStack(spacing: 12) {
+                        SettingsIconBadge(
+                            systemName: "scope",
+                            accent: accent,
+                            emphasized: focusMode.isEnabled
+                        )
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("自动聚焦")
+                                .font(.system(size: 13, weight: .semibold))
+                            Text("当前使用的显示器保持清晰，其他显示器自动变暗")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                        }
+
+                        Spacer(minLength: 12)
+
+                        Toggle("", isOn: Binding(
+                            get: { focusMode.isEnabled },
+                            set: { focusMode.setEnabled($0) }
+                        ))
+                        .toggleStyle(.switch)
+                        .labelsHidden()
+                    }
+                }
+
+                SettingsInnerCard {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack(spacing: 10) {
+                            Text("聚焦变暗强度")
+                                .font(.system(size: 13, weight: .semibold))
+
+                            Spacer(minLength: 8)
+
+                            Text("\(Int((focusMode.overlayOpacity * 100).rounded()))%")
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .monospacedDigit()
+                        }
+
+                        ScrollWheelSlider(
+                            value: Binding(
+                                get: { focusMode.overlayOpacity },
+                                set: { focusMode.setOverlayOpacity($0) }
+                            ),
+                            in: FocusModeStore.opacityRange,
+                            step: 0.01
+                        )
+                    }
+                }
+
+                SettingsInnerCard {
+                    HStack(spacing: 12) {
+                        SettingsIconBadge(
+                            systemName: permissionGranted
+                                ? "checkmark.shield.fill"
+                                : "exclamationmark.shield.fill",
+                            accent: permissionGranted
+                                ? Color(nsColor: .systemGreen)
+                                : Color(nsColor: .systemOrange),
+                            emphasized: permissionGranted
+                        )
+
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("辅助功能权限")
+                                .font(.system(size: 13, weight: .semibold))
+                            if !permissionGranted {
+                                Text("未授权时将继续使用鼠标所在显示器")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+
+                        Spacer(minLength: 12)
+
+                        Text(permissionGranted ? "已授权" : "未授权")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(permissionGranted ? Color.green : Color.orange)
+
+                        if !permissionGranted {
+                            Button("打开系统设置") {
+                                focusMode.openAccessibilitySettings()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
+                }
+            }
         }
     }
 

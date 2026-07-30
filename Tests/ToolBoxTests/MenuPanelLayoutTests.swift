@@ -32,6 +32,30 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertEqual(frame.maxY, 992)
     }
 
+    func testPanelFrameUsesScreenContainingMenuBarAnchor() throws {
+        let screens = [
+            MenuPanelScreenGeometry(
+                frame: NSRect(x: 0, y: 0, width: 1_440, height: 900),
+                visibleFrame: NSRect(x: 0, y: 0, width: 1_440, height: 875)
+            ),
+            MenuPanelScreenGeometry(
+                frame: NSRect(x: 1_440, y: -100, width: 1_560, height: 1_000),
+                visibleFrame: NSRect(x: 1_440, y: -100, width: 1_560, height: 975)
+            )
+        ]
+
+        let frame = try XCTUnwrap(MenuPanelLayout.panelFrame(
+            preferredSize: NSSize(width: 560, height: 600),
+            anchorFrame: NSRect(x: 2_920, y: 875, width: 28, height: 25),
+            screens: screens
+        ))
+
+        XCTAssertEqual(frame, NSRect(x: 2_430, y: 265, width: 560, height: 600))
+        XCTAssertLessThan(frame.maxY, 875)
+        XCTAssertGreaterThanOrEqual(frame.minX, 1_450)
+        XCTAssertLessThanOrEqual(frame.maxX, 2_990)
+    }
+
     func testCompactPanelMetricsFitTheApprovedDesign() {
         XCTAssertEqual(MenuPanelLayout.size.width, 560)
         XCTAssertEqual(
