@@ -18,6 +18,10 @@ protocol DisplayControlProviding: AnyObject {
         normalizedValue: Double,
         options: DisplayControlWriteOptions
     ) async throws -> DisplayControlValue
+    func writeColorPreset(
+        displayID: CGDirectDisplayID,
+        rawValue: UInt8
+    ) async throws -> DisplayColorPresetWriteResult
 }
 
 extension DisplayControlProviding {
@@ -32,6 +36,13 @@ extension DisplayControlProviding {
             normalizedValue: normalizedValue,
             options: .none
         )
+    }
+
+    func writeColorPreset(
+        displayID: CGDirectDisplayID,
+        rawValue: UInt8
+    ) async throws -> DisplayColorPresetWriteResult {
+        throw DisplayColorPresetError.providerUnsupported
     }
 }
 
@@ -52,6 +63,7 @@ struct DisplayControlDisplay: Codable, Equatable, Identifiable, Sendable {
     var backendName: String?
     var unavailableReason: String?
     var controls: [DisplayControlCapability]
+    var colorPreset: DisplayColorPresetCapability? = nil
 }
 
 enum DisplayControlKind: String, CaseIterable, Codable, Equatable, Sendable {
