@@ -7,12 +7,19 @@ import IOKit.i2c
 import OSLog
 
 final class IntelDDCBackend: DDCTransport {
+    static let capabilitySendAddress: UInt32 = 0x6E
+    static let capabilityReplyAddress: UInt32 = 0x6F
+    static let capabilityReplySubAddress: UInt8 = 0x51
+
     let displayID: CGDirectDisplayID
     let framebuffer: io_service_t
     let replyTransactionType: IOOptionBits
-    let backendName = "DDC/CI over IOKit I2C"
+    let backendName: String
+    let connectionToken: UInt64?
 
     private static let logger = Logger(subsystem: "ToolBox", category: "IntelDDC")
+    private let performCapabilityTransaction: ([UInt8], Int) -> [UInt8]?
+    private let sleepMicros: (UInt32) -> Void
 
     deinit {
         if framebuffer != IO_OBJECT_NULL {
@@ -21,20 +28,54 @@ final class IntelDDCBackend: DDCTransport {
     }
 
     init?(displayID: CGDirectDisplayID, replyTransactionType: IOOptionBits? = nil) {
-        self.displayID = displayID
         guard let framebuffer = Self.ioFramebufferPort(displayID: displayID) else {
             return nil
         }
-        self.framebuffer = framebuffer
 
+        let selectedReplyTransactionType: IOOptionBits
         if let replyTransactionType {
-            self.replyTransactionType = replyTransactionType
+            selectedReplyTransactionType = replyTransactionType
         } else if let replyTransactionType = Self.supportedTransactionType() {
-            self.replyTransactionType = replyTransactionType
+            selectedReplyTransactionType = replyTransactionType
         } else {
             Self.logger.error("No supported DDC reply transaction type for display \(displayID, privacy: .public).")
+            IOObjectRelease(framebuffer)
             return nil
         }
+
+        self.displayID = displayID
+        self.framebuffer = framebuffer
+        self.replyTransactionType = selectedReplyTransactionType
+        backendName = "DDC/CI over IOKit I2C"
+
+        var registryID: UInt64 = 0
+        connectionToken = IORegistryEntryGetRegistryEntryID(framebuffer, &registryID) == KERN_SUCCESS
+            ? registryID
+            : nil
+        performCapabilityTransaction = { request, replyLength in
+            Self.performCapabilityTransaction(
+                requestData: request,
+                replyLength: replyLength,
+                framebuffer: framebuffer,
+                replyTransactionType: selectedReplyTransactionType
+            )
+        }
+        sleepMicros = { _ = usleep($0) }
+    }
+
+    init(
+        backendName: String,
+        connectionToken: UInt64?,
+        performTransaction: @escaping (_ request: [UInt8], _ replyLength: Int) -> [UInt8]?,
+        sleepMicros: @escaping (UInt32) -> Void
+    ) {
+        displayID = 0
+        framebuffer = IO_OBJECT_NULL
+        replyTransactionType = 0
+        self.backendName = backendName
+        self.connectionToken = connectionToken
+        performCapabilityTransaction = performTransaction
+        self.sleepMicros = sleepMicros
     }
 
     func write(command: UInt8, value: UInt16, options: DDCRequestOptions) -> Bool {
@@ -133,6 +174,67 @@ final class IntelDDCBackend: DDCTransport {
         }
 
         return .failure(.transportFailure)
+    }
+
+    func readCapabilityString(options: DDCRequestOptions) -> Result<String, DDCCapabilityReadFailure> {
+        guard connectionToken != nil else {
+            return .failure(.transportFailure)
+        }
+
+        return DDCCapabilityStringAssembler.assemble { expectedOffset in
+            let offsetHigh = UInt8(expectedOffset >> 8)
+            let offsetLow = UInt8(expectedOffset & 0xFF)
+            let request: [UInt8] = [
+                0x51,
+                0x83,
+                0xF3,
+                offsetHigh,
+                offsetLow,
+                offsetHigh ^ offsetLow ^ 0x4F,
+            ]
+            self.sleepMicros(options.writeSleepMicros)
+            return self.performCapabilityTransaction(
+                request,
+                DDCCapabilityBlockParser.readBufferLength
+            )
+        }
+    }
+
+    private static func performCapabilityTransaction(
+        requestData: [UInt8],
+        replyLength: Int,
+        framebuffer: io_service_t,
+        replyTransactionType: IOOptionBits
+    ) -> [UInt8]? {
+        var requestData = requestData
+        var replyData = [UInt8](repeating: 0, count: replyLength)
+        let succeeded = requestData.withUnsafeMutableBufferPointer { sendBuffer in
+            replyData.withUnsafeMutableBufferPointer { replyBuffer -> Bool in
+                guard let sendAddress = sendBuffer.baseAddress,
+                      let replyAddress = replyBuffer.baseAddress else {
+                    return false
+                }
+
+                var request = IOI2CRequest()
+                request.commFlags = 0
+                request.sendAddress = capabilitySendAddress
+                request.sendTransactionType = IOOptionBits(kIOI2CSimpleTransactionType)
+                request.sendBuffer = vm_address_t(bitPattern: sendAddress)
+                request.sendBytes = UInt32(sendBuffer.count)
+                request.minReplyDelay = 60_000
+                request.replyAddress = capabilityReplyAddress
+                request.replySubAddress = capabilityReplySubAddress
+                request.replyTransactionType = replyTransactionType
+                request.replyBytes = UInt32(replyBuffer.count)
+                request.replyBuffer = vm_address_t(bitPattern: replyAddress)
+                return send(
+                    request: &request,
+                    to: framebuffer,
+                    errorRecoveryWaitMicros: nil
+                )
+            }
+        }
+        return succeeded ? replyData : nil
     }
 
     private static func supportedTransactionType() -> IOOptionBits? {

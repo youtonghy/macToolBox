@@ -259,6 +259,79 @@ final class DisplayControlCapabilityTests: XCTestCase {
         XCTAssertFalse(attemptedI2C)
     }
 
+    func testIntelCapabilitySequenceUsesExpectedLayoutAndOffsets() throws {
+        var requests: [[UInt8]] = []
+        var replyLengths: [Int] = []
+        var replies = [
+            capabilityBlock(offset: 0, payload: Array("vcp(".utf8)),
+            capabilityBlock(offset: 4, payload: Array("10)".utf8)),
+            capabilityBlock(offset: 7, payload: []),
+        ]
+        let backend = IntelDDCBackend(
+            backendName: "test",
+            connectionToken: 88,
+            performTransaction: { request, replyLength in
+                requests.append(request)
+                replyLengths.append(replyLength)
+                return replies.removeFirst()
+            },
+            sleepMicros: { _ in }
+        )
+
+        XCTAssertEqual(try backend.readCapabilityString(options: .probe).get(), "vcp(10)")
+        XCTAssertEqual(
+            requests,
+            [
+                [0x51, 0x83, 0xF3, 0x00, 0x00, 0x4F],
+                [0x51, 0x83, 0xF3, 0x00, 0x04, 0x4B],
+                [0x51, 0x83, 0xF3, 0x00, 0x07, 0x48],
+            ]
+        )
+        XCTAssertEqual(replyLengths, [50, 50, 50])
+        XCTAssertEqual(IntelDDCBackend.capabilitySendAddress, 0x6E)
+        XCTAssertEqual(IntelDDCBackend.capabilityReplyAddress, 0x6F)
+        XCTAssertEqual(IntelDDCBackend.capabilityReplySubAddress, 0x51)
+    }
+
+    func testIntelCapabilitySequenceRetriesSameOffsetAndStopsAfterElevenFailures() {
+        var requests: [[UInt8]] = []
+        let backend = IntelDDCBackend(
+            backendName: "test",
+            connectionToken: 99,
+            performTransaction: { request, _ in
+                requests.append(request)
+                return nil
+            },
+            sleepMicros: { _ in }
+        )
+
+        XCTAssertEqual(
+            backend.readCapabilityString(options: .probe),
+            .failure(.tooManyConsecutiveFailures)
+        )
+        XCTAssertEqual(requests.count, 11)
+        XCTAssertTrue(requests.allSatisfy { Array($0[3...4]) == [0x00, 0x00] })
+    }
+
+    func testIntelMissingConnectionTokenSkipsCapabilityTransaction() {
+        var attemptedTransaction = false
+        let backend = IntelDDCBackend(
+            backendName: "test",
+            connectionToken: nil,
+            performTransaction: { _, _ in
+                attemptedTransaction = true
+                return nil
+            },
+            sleepMicros: { _ in }
+        )
+
+        XCTAssertEqual(
+            backend.readCapabilityString(options: .probe),
+            .failure(.transportFailure)
+        )
+        XCTAssertFalse(attemptedTransaction)
+    }
+
     func testWriteOnlyControlsRemainWritable() {
         XCTAssertTrue(DisplayControlStatus.available.isWritable)
         XCTAssertTrue(DisplayControlStatus.writeOnly.isWritable)
