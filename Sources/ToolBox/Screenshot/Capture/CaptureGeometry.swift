@@ -65,9 +65,9 @@ enum CaptureGeometry {
         let xScale = display.pixelSize.width / display.globalFramePoints.width
         let yScale = display.pixelSize.height / display.globalFramePoints.height
         let minimumX = (intersection.minX - display.globalFramePoints.minX) * xScale
-        let minimumY = (intersection.minY - display.globalFramePoints.minY) * yScale
+        let minimumY = (display.globalFramePoints.maxY - intersection.maxY) * yScale
         let maximumX = (intersection.maxX - display.globalFramePoints.minX) * xScale
-        let maximumY = (intersection.maxY - display.globalFramePoints.minY) * yScale
+        let maximumY = (display.globalFramePoints.maxY - intersection.minY) * yScale
 
         let x = clamp(minimumX.rounded(.down), maximum: display.pixelSize.width)
         let y = clamp(minimumY.rounded(.down), maximum: display.pixelSize.height)

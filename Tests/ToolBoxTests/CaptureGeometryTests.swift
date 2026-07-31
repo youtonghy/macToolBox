@@ -51,8 +51,8 @@ final class CaptureGeometryTests: XCTestCase {
         )
 
         XCTAssertEqual(fragments.map(\.displayID), [1, 2])
-        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 1_800, y: 200, width: 200, height: 400))
-        XCTAssertEqual(fragments[1].sourcePixels, CGRect(x: 0, y: 100, width: 200, height: 200))
+        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 1_800, y: 1_000, width: 200, height: 400))
+        XCTAssertEqual(fragments[1].sourcePixels, CGRect(x: 0, y: 300, width: 200, height: 200))
     }
 
     func testSelectionOnNegativeXDisplayUsesLocalPixelCoordinates() throws {
@@ -69,7 +69,7 @@ final class CaptureGeometryTests: XCTestCase {
 
         XCTAssertEqual(fragments.count, 1)
         XCTAssertEqual(fragments[0].displayID, 4)
-        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 400, y: 200, width: 600, height: 400))
+        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 400, y: 1_000, width: 600, height: 400))
     }
 
     func testSelectionOnDisplayAbovePrimaryUsesGlobalYCoordinates() throws {
@@ -84,7 +84,7 @@ final class CaptureGeometryTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 100, y: 100, width: 200, height: 200))
+        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 100, y: 900, width: 200, height: 200))
     }
 
     func testEmptySelectionIsInvalid() {
@@ -150,7 +150,7 @@ final class CaptureGeometryTests: XCTestCase {
             ]
         )
 
-        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 0, y: 0, width: 2, height: 2))
+        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 0, y: 198, width: 2, height: 2))
     }
 
     func testDisplayEdgeClampsFloatingPointPixelBounds() throws {
