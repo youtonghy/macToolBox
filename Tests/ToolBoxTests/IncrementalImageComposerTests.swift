@@ -63,6 +63,63 @@ final class IncrementalImageComposerTests: XCTestCase {
         XCTAssertEqual(source.lastReadByteCount, 40)
     }
 
+    func testReopensSessionUsingPersistedCustomBudget() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ScrollCaptureStripStore(
+            initialImage: makeSolidImage(width: 1, height: 60_001),
+            rootDirectory: root,
+            budget: ScrollCaptureResourceBudget(maximumHeight: 70_000, maximumRGBABytes: 300_000)
+        )
+
+        let source = try ScrollCaptureImageSource(sessionDirectory: store.sessionDirectory)
+
+        XCTAssertEqual(source.pixelSize.height, 60_001)
+    }
+
+    func testRejectsPathTraversalSymlinkAndForgedStripSize() throws {
+        for mutation in MetadataMutation.allCases {
+            let root = temporaryRoot()
+            defer { try? FileManager.default.removeItem(at: root) }
+            let store = try ScrollCaptureStripStore(
+                initialImage: makeSolidImage(width: 2, height: 2),
+                rootDirectory: root
+            )
+            let metadataURL = store.sessionDirectory.appendingPathComponent("metadata.json")
+            var metadata = try JSONDecoder().decode(
+                ScrollCaptureStripMetadata.self,
+                from: Data(contentsOf: metadataURL)
+            )
+            let original = metadata.strips[0]
+            switch mutation {
+            case .pathTraversal:
+                metadata.strips[0] = ScrollCaptureStripRecord(
+                    fileName: "../outside.rgba",
+                    startRow: original.startRow,
+                    height: original.height,
+                    byteCount: original.byteCount
+                )
+            case .forgedSize:
+                metadata.strips[0] = ScrollCaptureStripRecord(
+                    fileName: original.fileName,
+                    startRow: original.startRow,
+                    height: original.height,
+                    byteCount: original.byteCount + 4
+                )
+            case .symlink:
+                let stripURL = store.sessionDirectory.appendingPathComponent(original.fileName)
+                let target = store.sessionDirectory.appendingPathComponent("target.rgba")
+                try FileManager.default.moveItem(at: stripURL, to: target)
+                try FileManager.default.createSymbolicLink(at: stripURL, withDestinationURL: target)
+            }
+            try JSONEncoder().encode(metadata).write(to: metadataURL, options: .atomic)
+
+            XCTAssertThrowsError(try ScrollCaptureImageSource(sessionDirectory: store.sessionDirectory)) {
+                XCTAssertEqual($0 as? ScrollCaptureError, .corruptMetadata, "mutation: \(mutation)")
+            }
+        }
+    }
+
     private func makeRows(width: Int, colors: [(UInt8, UInt8, UInt8)]) -> CGImage {
         let context = CGContext(
             data: nil,
@@ -124,4 +181,10 @@ final class IncrementalImageComposerTests: XCTestCase {
     }
 
     private enum TestError: Error { case image }
+
+    private enum MetadataMutation: CaseIterable {
+        case pathTraversal
+        case forgedSize
+        case symlink
+    }
 }

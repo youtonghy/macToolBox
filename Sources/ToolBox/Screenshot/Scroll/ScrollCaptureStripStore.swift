@@ -24,10 +24,12 @@ final class ScrollCaptureStripStore {
         sessionDirectory = rootDirectory
             .appendingPathComponent("session-\(sessionID.uuidString)", isDirectory: true)
         metadata = ScrollCaptureStripMetadata(
-            version: 1,
+            version: 2,
             sessionID: sessionID,
             width: initialImage.width,
             height: 0,
+            maximumHeight: budget.maximumHeight,
+            maximumRGBABytes: budget.maximumRGBABytes,
             strips: []
         )
 
@@ -143,16 +145,26 @@ final class ScrollCaptureStripStore {
             try handle.write(contentsOf: data)
             try handle.synchronize()
             try handle.close()
+            guard chmod(temporary.path, S_IRUSR | S_IWUSR) == 0 else {
+                throw ScrollCaptureError.storageFailure
+            }
             if FileManager.default.fileExists(atPath: destination.path) {
                 _ = try FileManager.default.replaceItemAt(destination, withItemAt: temporary)
             } else {
                 try FileManager.default.moveItem(at: temporary, to: destination)
             }
-            chmod(destination.path, S_IRUSR | S_IWUSR)
+            synchronizeDirectory(destination.deletingLastPathComponent())
         } catch {
             try? FileManager.default.removeItem(at: temporary)
             throw ScrollCaptureError.storageFailure
         }
+    }
+
+    private static func synchronizeDirectory(_ directory: URL) {
+        let descriptor = open(directory.path, O_RDONLY)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        _ = fsync(descriptor)
     }
 }
 
@@ -161,6 +173,8 @@ struct ScrollCaptureStripMetadata: Codable, Equatable {
     let sessionID: UUID
     let width: Int
     var height: Int
+    let maximumHeight: Int
+    let maximumRGBABytes: Int
     var strips: [ScrollCaptureStripRecord]
 }
 

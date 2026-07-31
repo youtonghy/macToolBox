@@ -106,15 +106,20 @@ final class ScrollCaptureImageSource: ScreenshotImageSource {
         _ metadata: ScrollCaptureStripMetadata,
         in directory: URL
     ) throws {
-        guard metadata.version == 1,
+        guard metadata.version == 2,
               metadata.width > 0,
               metadata.height > 0,
+              metadata.maximumHeight > 0,
+              metadata.maximumRGBABytes >= 4,
               !metadata.strips.isEmpty
         else {
             throw ScrollCaptureError.corruptMetadata
         }
         do {
-            _ = try ScrollCaptureResourceBudget().validateAppend(
+            _ = try ScrollCaptureResourceBudget(
+                maximumHeight: metadata.maximumHeight,
+                maximumRGBABytes: metadata.maximumRGBABytes
+            ).validateAppend(
                 width: metadata.width,
                 currentHeight: 0,
                 additionalRows: metadata.height
