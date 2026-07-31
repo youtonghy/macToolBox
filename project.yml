@@ -23,6 +23,8 @@ targets:
     sources:
       - Sources/ToolBox
       - Resources/Assets.xcassets
+      - path: Resources/OCRModels
+        buildPhase: resources
     dependencies:
       - sdk: CoreDisplay.framework
       - sdk: CoreAudio.framework

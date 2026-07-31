@@ -1,0 +1,9 @@
+PP-OCRv6 model files are provided by PaddlePaddle/PaddleOCR.
+
+Copyright (c) 2020 PaddlePaddle Authors.
+Licensed under the Apache License, Version 2.0.
+Project: https://github.com/PaddlePaddle/PaddleOCR
+License: https://www.apache.org/licenses/LICENSE-2.0
+
+Models are downloaded only after explicit user consent from immutable revisions
+of the official PaddlePaddle repositories on Hugging Face.
