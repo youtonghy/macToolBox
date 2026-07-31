@@ -12,6 +12,25 @@ import IOKit.hid
 /// - **Accessibility** (modify / suppress the event stream)
 enum Permissions {
 
+    // MARK: - Screen Capture
+
+    static var isScreenCaptureTrusted: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    /// Prompts only when invoked from a user-initiated capture action.
+    @discardableResult
+    static func requestScreenCapture() -> Bool {
+        if CGPreflightScreenCaptureAccess() {
+            return true
+        }
+        return CGRequestScreenCaptureAccess() || CGPreflightScreenCaptureAccess()
+    }
+
+    static func openScreenCaptureSettings() {
+        openPrivacyPane(anchors: ["Privacy_ScreenCapture", "Privacy_ScreenRecording"])
+    }
+
     enum InputMonitoringStatus: Equatable {
         case granted
         case denied
