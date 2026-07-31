@@ -2,6 +2,7 @@ import CoreGraphics
 import XCTest
 @testable import ToolBox
 
+@MainActor
 final class CaptureGeometryTests: XCTestCase {
     func testScreenCapturePermissionMapsInjectedPreflightToState() {
         let granted = ScreenCapturePermission(preflight: { true })

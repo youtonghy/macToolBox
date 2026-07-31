@@ -207,7 +207,7 @@ final class AnnotationRendererTests: XCTestCase {
     private enum TestError: Error { case image }
 }
 
-private final class RecordingImageSource: ScreenshotImageSource {
+private final class RecordingImageSource: ScreenshotImageSource, @unchecked Sendable {
     let id = UUID()
     let pixelSize: CGSize
     private(set) var maximumRequestedBytes = 0

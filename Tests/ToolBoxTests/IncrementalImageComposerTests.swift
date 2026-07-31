@@ -17,6 +17,7 @@ final class IncrementalImageComposerTests: XCTestCase {
         let tile = try source.copyPixels(in: CGRect(x: 1, y: 1, width: 2, height: 2))
         XCTAssertEqual(try pixel(in: tile, x: 0, y: 0), RGB(0, 255, 0))
         XCTAssertEqual(try pixel(in: tile, x: 0, y: 1), RGB(0, 0, 255))
+        XCTAssertEqual(source.lastReadOperationCount, 2)
     }
 
     func testFailedAppendDoesNotPublishLogicalHeight() throws {
@@ -61,6 +62,7 @@ final class IncrementalImageComposerTests: XCTestCase {
         XCTAssertEqual(tile.width, 1)
         XCTAssertEqual(tile.height, 10)
         XCTAssertEqual(source.lastReadByteCount, 40)
+        XCTAssertEqual(source.lastReadOperationCount, 1)
     }
 
     func testReopensSessionUsingPersistedCustomBudget() throws {

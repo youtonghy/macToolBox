@@ -99,7 +99,7 @@ final class PaddleOCRPipelineTests: XCTestCase {
         XCTAssertEqual(tiles, [
             CGRect(x: 0, y: 0, width: 900, height: 1_280),
             CGRect(x: 0, y: 1_184, width: 900, height: 1_280),
-            CGRect(x: 0, y: 2_368, width: 900, height: 632),
+            CGRect(x: 0, y: 1_720, width: 900, height: 1_280),
         ])
         XCTAssertTrue(tiles.allSatisfy { $0.width <= 1_280 && $0.height <= 1_280 })
     }

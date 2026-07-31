@@ -172,7 +172,7 @@ final class ScreenshotCoordinator {
               let bounds = selection.captureBounds
         else { return }
         do {
-            let containingWindow = try await windowCandidateResolver?(bounds.center, sessionGeneration)
+            let containingWindow = await windowCandidateResolver?(bounds.center, sessionGeneration)
             guard generation == sessionGeneration, state == .selecting else { return }
             let target = try ScrollCaptureTargetSnapshot.make(
                 selection: selection,
@@ -191,10 +191,16 @@ final class ScreenshotCoordinator {
             let defaults = UserDefaults.standard
             let automatic = defaults.object(forKey: "screenshot.scrollCapture.automatic") as? Bool ?? true
             let configuredStep = defaults.object(forKey: "screenshot.scrollCapture.stepPixels") as? Double ?? 160
-            let step = Int32(max(40, min(400, configuredStep)))
+            let safeConfiguredStep = configuredStep.isFinite ? configuredStep : 160
+            let step = Int32(max(40, min(400, safeConfiguredStep)))
+            let matchingConfiguration = ScrollMatchingConfiguration.automaticScroll(
+                stepPixels: step,
+                roiWidth: target.roiGlobal.width
+            )
             let child = ScrollCaptureCoordinator(
                 frameProvider: DefaultScrollCaptureFrameProvider(captureProvider: captureProvider),
                 automaticDriver: AutomaticScrollDriver(stepPixels: step),
+                matchingConfiguration: matchingConfiguration,
                 validate: { snapshot in
                     try guarder.validate(snapshot, against: try observer.observe(snapshot))
                 }

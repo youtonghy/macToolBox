@@ -45,11 +45,10 @@ struct PaddleDBPostprocessor: Sendable {
                 maximumY = max(maximumY, y)
                 score += probabilities[index]
                 count += 1
-                for neighbor in Self.neighbors(x: x, y: y, width: width, height: height) {
-                    guard !visited[neighbor], probabilities[neighbor] > threshold else { continue }
-                    visited[neighbor] = true
-                    queue.append(neighbor)
-                }
+                if x > 0 { append(x: x - 1, y: y, width: width, probabilities: probabilities, visited: &visited, queue: &queue) }
+                if x + 1 < width { append(x: x + 1, y: y, width: width, probabilities: probabilities, visited: &visited, queue: &queue) }
+                if y > 0 { append(x: x, y: y - 1, width: width, probabilities: probabilities, visited: &visited, queue: &queue) }
+                if y + 1 < height { append(x: x, y: y + 1, width: width, probabilities: probabilities, visited: &visited, queue: &queue) }
             }
             let average = score / Float(max(1, count))
             let componentWidth = maximumX - minimumX + 1
@@ -86,13 +85,17 @@ struct PaddleDBPostprocessor: Sendable {
         }
     }
 
-    private static func neighbors(x: Int, y: Int, width: Int, height: Int) -> [Int] {
-        var result: [Int] = []
-        result.reserveCapacity(4)
-        if x > 0 { result.append(y * width + x - 1) }
-        if x + 1 < width { result.append(y * width + x + 1) }
-        if y > 0 { result.append((y - 1) * width + x) }
-        if y + 1 < height { result.append((y + 1) * width + x) }
-        return result
+    private func append(
+        x: Int,
+        y: Int,
+        width: Int,
+        probabilities: [Float],
+        visited: inout [Bool],
+        queue: inout [Int]
+    ) {
+        let index = y * width + x
+        guard !visited[index], probabilities[index] > threshold else { return }
+        visited[index] = true
+        queue.append(index)
     }
 }

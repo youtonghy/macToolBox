@@ -4,14 +4,12 @@ import OSLog
 struct OCRSettings: Codable, Equatable, Sendable {
     var pipeline: OCRPipelineID
     var profile: PPOCRv6Profile
-    var language: OCRRecognitionLanguage
     var executionProvider: OCRExecutionProvider
     var localOnly: Bool
 
     static let `defaults` = OCRSettings(
         pipeline: .ppOCRv6,
         profile: .tiny,
-        language: .automatic,
         executionProvider: .cpu,
         localOnly: true
     )
@@ -28,7 +26,6 @@ enum OCRSettingsStoreIssue: Equatable, Sendable {
 }
 
 enum OCRSettingsError: Error, Equatable {
-    case japaneseUnsupportedByTiny
     case cloudFallbackForbidden
     case unavailablePipeline
 }
@@ -93,11 +90,6 @@ struct OCRSettingsStore {
 
     private func validate(_ settings: OCRSettings) throws {
         guard settings.localOnly else { throw OCRSettingsError.cloudFallbackForbidden }
-        if settings.pipeline == .ppOCRv6,
-           settings.profile == .tiny,
-           settings.language == .japanese {
-            throw OCRSettingsError.japaneseUnsupportedByTiny
-        }
         let available = availability.availablePipelines(
             architecture: architecture,
             deviceClass: deviceClass

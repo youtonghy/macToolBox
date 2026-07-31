@@ -24,22 +24,17 @@ final class OCRSettingsStoreTests: XCTestCase {
 
         XCTAssertEqual(result.settings.pipeline, .ppOCRv6)
         XCTAssertEqual(result.settings.profile, .tiny)
-        XCTAssertEqual(result.settings.language, .automatic)
         XCTAssertEqual(result.settings.executionProvider, .cpu)
         XCTAssertTrue(result.settings.localOnly)
         XCTAssertNil(result.issue)
     }
 
-    func testJapaneseRequiresSmallOrMedium() throws {
+    func testPersistsSelectableProfileAndExecutionProvider() throws {
         let store = makeStore()
         var settings = OCRSettings.defaults
-        settings.language = .japanese
-
-        XCTAssertThrowsError(try store.save(settings)) {
-            XCTAssertEqual($0 as? OCRSettingsError, .japaneseUnsupportedByTiny)
-        }
-
         settings.profile = .small
+        settings.executionProvider = .coreML
+
         XCTAssertNoThrow(try store.save(settings))
         XCTAssertEqual(store.load().settings, settings)
     }

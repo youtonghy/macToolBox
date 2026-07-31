@@ -1,29 +1,18 @@
 import Foundation
 
-enum OCRPipelineID: String, Codable, CaseIterable, Equatable, Sendable {
+enum OCRPipelineID: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     case ppOCRv6
     case ppStructureV3
     case paddleOCRVL
 }
 
-enum PPOCRv6Profile: String, Codable, CaseIterable, Equatable, Sendable {
+enum PPOCRv6Profile: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     case tiny
     case small
     case medium
-
-    var supportsJapanese: Bool { self != .tiny }
 }
 
-enum OCRRecognitionLanguage: String, Codable, CaseIterable, Equatable, Sendable {
-    case automatic
-    case simplifiedChinese
-    case traditionalChinese
-    case english
-    case japanese
-    case latin
-}
-
-enum OCRExecutionProvider: String, Codable, CaseIterable, Equatable, Sendable {
+enum OCRExecutionProvider: String, Codable, CaseIterable, Equatable, Hashable, Sendable {
     case cpu
     case coreML
 }

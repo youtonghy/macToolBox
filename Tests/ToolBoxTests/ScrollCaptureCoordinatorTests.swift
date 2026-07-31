@@ -82,8 +82,8 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
             validate: { _ in }
         )
         let task = Task { try await coordinator.capture(target: target()) }
-        for _ in 0..<20 where coordinator.state != .paused(.lowConfidence) {
-            await Task.yield()
+        for _ in 0..<100 where coordinator.state != .paused(.lowConfidence) {
+            try await Task.sleep(for: .milliseconds(1))
         }
         XCTAssertEqual(coordinator.state, .paused(.lowConfidence))
 

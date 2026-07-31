@@ -5,6 +5,7 @@ final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable
     let id: UUID
     let pixelSize: CGSize
     private(set) var lastReadByteCount = 0
+    private(set) var lastReadOperationCount = 0
 
     private let sessionDirectory: URL
     private let metadata: ScrollCaptureStripMetadata
@@ -47,7 +48,9 @@ final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable
         let width = Int(rect.width)
         let height = Int(rect.height)
         let bytesPerRow = width * 4
+        let sourceBytesPerRow = metadata.width * 4
         var output = Data(count: bytesPerRow * height)
+        var readOperationCount = 0
 
         try output.withUnsafeMutableBytes { outputBytes in
             guard let destination = outputBytes.baseAddress else {
@@ -63,24 +66,28 @@ final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable
                     forReadingFrom: sessionDirectory.appendingPathComponent(strip.fileName)
                 )
                 defer { try? handle.close() }
-                for globalRow in lower..<upper {
-                    let stripRow = globalRow - strip.startRow
-                    let sourceOffset = UInt64((stripRow * metadata.width + x) * 4)
-                    try handle.seek(toOffset: sourceOffset)
-                    guard let rowData = try handle.read(upToCount: bytesPerRow),
-                          rowData.count == bytesPerRow
-                    else {
-                        throw ScrollCaptureError.corruptMetadata
+                let firstStripRow = lower - strip.startRow
+                let intersectingRows = upper - lower
+                let sourceOffset = UInt64(firstStripRow * sourceBytesPerRow + x * 4)
+                let blockByteCount = (intersectingRows - 1) * sourceBytesPerRow + bytesPerRow
+                try handle.seek(toOffset: sourceOffset)
+                guard let block = try handle.read(upToCount: blockByteCount),
+                      block.count == blockByteCount
+                else { throw ScrollCaptureError.corruptMetadata }
+                readOperationCount += 1
+                block.withUnsafeBytes { sourceBytes in
+                    guard let source = sourceBytes.baseAddress else { return }
+                    for row in 0..<intersectingRows {
+                        destination.advanced(by: (lower - y + row) * bytesPerRow).copyMemory(
+                            from: source.advanced(by: row * sourceBytesPerRow),
+                            byteCount: bytesPerRow
+                        )
                     }
-                    rowData.copyBytes(
-                        to: destination.advanced(by: (globalRow - y) * bytesPerRow)
-                            .assumingMemoryBound(to: UInt8.self),
-                        count: bytesPerRow
-                    )
                 }
             }
         }
         lastReadByteCount = output.count
+        lastReadOperationCount = readOperationCount
 
         guard let provider = CGDataProvider(data: output as CFData),
               let image = CGImage(

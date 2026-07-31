@@ -35,8 +35,12 @@ actor OCRModelDownloadManager {
     func install(manifest: OCRModelManifest, userConsented: Bool) async throws -> URL {
         guard userConsented else { throw OCRModelDownloadError.consentRequired }
         try manifest.validate()
-        if try store.state(for: manifest) == .ready {
+        let state = try store.state(for: manifest)
+        if state == .ready {
             return try store.installedModelDirectory(for: manifest)
+        }
+        if state == .corrupt {
+            try store.delete(manifest: manifest)
         }
         let staging = try store.makeStagingDirectory(for: manifest)
         do {

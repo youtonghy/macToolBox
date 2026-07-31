@@ -1,7 +1,10 @@
 #include "OCRRuntimeBridge.h"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdocumentation"
 #include <coreml_provider_factory.h>
 #include <onnxruntime_cxx_api.h>
+#pragma clang diagnostic pop
 
 #include <cstdlib>
 #include <cstring>

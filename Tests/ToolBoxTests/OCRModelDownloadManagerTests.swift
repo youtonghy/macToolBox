@@ -46,6 +46,31 @@ final class OCRModelDownloadManagerTests: XCTestCase {
         XCTAssertTrue((try FileManager.default.contentsOfDirectory(atPath: root.path)).isEmpty)
     }
 
+    func testReinstallReplacesCorruptModel() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let expected = Data("verified".utf8)
+        let manifest = try makeOCRManifest(files: [file("det/inference.onnx", data: expected)])
+        let downloader = FakeOCRFileDownloader(payloads: [manifest.files[0].url: expected])
+        let store = OCRModelStore(rootDirectory: root)
+        let manager = OCRModelDownloadManager(store: store, downloader: downloader)
+        let directory = try await manager.install(manifest: manifest, userConsented: true)
+        try Data("tampered".utf8).write(
+            to: directory.appendingPathComponent("det/inference.onnx")
+        )
+        XCTAssertEqual(try store.state(for: manifest), .corrupt)
+
+        let repaired = try await manager.install(manifest: manifest, userConsented: true)
+
+        XCTAssertEqual(try store.state(for: manifest), .ready)
+        XCTAssertEqual(
+            try Data(contentsOf: repaired.appendingPathComponent("det/inference.onnx")),
+            expected
+        )
+        let calls = await downloader.callCount
+        XCTAssertEqual(calls, 2)
+    }
+
     private func file(_ path: String, data: Data) -> OCRModelFileManifest {
         OCRModelFileManifest(
             relativePath: path,

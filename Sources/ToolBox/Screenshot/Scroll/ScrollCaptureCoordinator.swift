@@ -44,7 +44,7 @@ final class ScrollCaptureCoordinator {
     private let automaticDriver: ScrollDriving
     private let manualDriver: ScrollDriving
     private let rootDirectory: URL
-    private let match: (LumaFrame, LumaFrame) throws -> OverlapMatch
+    private let match: @Sendable (LumaFrame, LumaFrame) throws -> OverlapMatch
     private let validate: (ScrollCaptureTargetSnapshot) throws -> Void
     private var pauseContinuation: CheckedContinuation<PauseAction, Never>?
 
@@ -61,16 +61,20 @@ final class ScrollCaptureCoordinator {
         automaticDriver: ScrollDriving = AutomaticScrollDriver(),
         manualDriver: ScrollDriving = ManualScrollDriver(),
         rootDirectory: URL = ScrollCaptureStripStore.defaultRootDirectory(),
-        match: @escaping (LumaFrame, LumaFrame) throws -> OverlapMatch = {
-            try OverlapMatcher().match(previous: $0, current: $1)
-        },
+        matchingConfiguration: ScrollMatchingConfiguration = ScrollMatchingConfiguration(),
+        match: (@Sendable (LumaFrame, LumaFrame) throws -> OverlapMatch)? = nil,
         validate: @escaping (ScrollCaptureTargetSnapshot) throws -> Void
     ) {
         self.frameProvider = frameProvider
         self.automaticDriver = automaticDriver
         self.manualDriver = manualDriver
         self.rootDirectory = rootDirectory
-        self.match = match
+        self.match = match ?? { previous, current in
+            try OverlapMatcher(configuration: matchingConfiguration).matchPersistentContent(
+                previous: previous,
+                current: current
+            )
+        }
         self.validate = validate
     }
 
@@ -87,10 +91,14 @@ final class ScrollCaptureCoordinator {
             try validate(target)
             state = .capturingInitialFrame
             var previous = try await frameProvider.captureInitialFrame(target: target)
-            let store = try ScrollCaptureStripStore(
-                initialImage: previous.image,
-                rootDirectory: rootDirectory
-            )
+            let rootDirectory = rootDirectory
+            let initialImage = previous.image
+            let store = try await Task.detached {
+                try ScrollCaptureStripStore(
+                    initialImage: initialImage,
+                    rootDirectory: rootDirectory
+                )
+            }.value
             sessionDirectory = store.sessionDirectory
             progressHeight = store.logicalHeight
             var noMovementCount = 0
@@ -119,13 +127,19 @@ final class ScrollCaptureCoordinator {
                 }
                 try validate(target)
                 state = .matchingOverlap
-                let overlap = try match(previous.luma, current.luma)
+                let match = match
+                let previousLuma = previous.luma
+                let currentLuma = current.luma
+                let overlap = try await Task.detached {
+                    try match(previousLuma, currentLuma)
+                }.value
                 switch overlap.classification {
                 case .forward:
                     guard overlap.newRowCount > 0 else { throw ScrollCaptureError.invalidStrip }
                     state = .appending
                     do {
-                        try store.append(current.copyNewRows(previewRowCount: overlap.newRowCount))
+                        let newRows = try current.copyNewRows(previewRowCount: overlap.newRowCount)
+                        try await Task.detached { try store.append(newRows) }.value
                     } catch ScrollCaptureError.resourceLimitReached {
                         return try finish(store: store, completion: .resourceLimit)
                     }

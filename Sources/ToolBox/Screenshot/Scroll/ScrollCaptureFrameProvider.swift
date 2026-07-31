@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-struct ScrollCaptureFrame {
+struct ScrollCaptureFrame: @unchecked Sendable {
     let image: CGImage
     let luma: LumaFrame
     let timestamp: TimeInterval
@@ -12,6 +12,7 @@ struct ScrollCaptureFrame {
         }
         let scaledRows = Double(previewRowCount) * Double(image.height) / Double(luma.height)
         let originalRows = min(image.height, max(1, Int(scaledRows.rounded(.up))))
+        // CGImage crop coordinates are bottom-origin; forward scrolling reveals the bottom rows.
         let rect = CGRect(x: 0, y: 0, width: image.width, height: originalRows)
         guard let crop = image.cropping(to: rect) else { throw ScrollCaptureError.invalidStrip }
         return crop
@@ -24,7 +25,7 @@ protocol ScrollCaptureFrameProviding: AnyObject {
     func captureStableFrame(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame
 }
 
-struct ScrollCaptureLumaConverter {
+struct ScrollCaptureLumaConverter: Sendable {
     let maximumWidth: Int
 
     init(maximumWidth: Int = 128) {
@@ -103,9 +104,12 @@ final class DefaultScrollCaptureFrameProvider: ScrollCaptureFrameProviding {
             target.roiGlobal,
             displayID: target.displayID
         )
+        let luma = try await Task.detached { [converter] in
+            try converter.convert(image)
+        }.value
         return ScrollCaptureFrame(
             image: image,
-            luma: try converter.convert(image),
+            luma: luma,
             timestamp: ProcessInfo.processInfo.systemUptime
         )
     }

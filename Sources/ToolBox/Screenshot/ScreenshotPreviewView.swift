@@ -21,6 +21,10 @@ final class ScreenshotEditorModel: ObservableObject {
     @Published var showsTextPrompt = false
     @Published var textEntry = ""
     @Published private(set) var isExporting = false
+    @Published private(set) var isRecognizing = false
+    @Published private(set) var ocrDocument: TextOCRDocument?
+    @Published var showsOCRDownloadPrompt = false
+    @Published private(set) var ocrDownloadPrompt = ""
 
     var onClose: () -> Void = {}
     var onExportingChange: (Bool) -> Void = { _ in }
@@ -29,18 +33,31 @@ final class ScreenshotEditorModel: ObservableObject {
     private let preview: ScreenshotEditorPreview
     private let previewBuilder = ScreenshotEditorPreviewBuilder()
     private let exporter = ScreenshotPNGExporter()
+    private let ocrService: any OCRFeatureServing
+    private let ocrSettingsStore: OCRSettingsStore
     private var pendingTextOrigin: CGPoint?
     private var nextMarkerNumber = 1
+    private var ocrTask: Task<Void, Never>?
+    private var pendingOCRSettings: OCRSettings?
 
     var imageSize: CGSize { state.document.baseImage.pixelSize }
     var canUndo: Bool { !state.undoStack.isEmpty }
     var canRedo: Bool { !state.redoStack.isEmpty }
 
-    init(document: ScreenshotDocument, preview: ScreenshotEditorPreview) throws {
+    init(
+        document: ScreenshotDocument,
+        preview: ScreenshotEditorPreview,
+        ocrService: any OCRFeatureServing = OCRFeatureService.shared,
+        ocrSettingsStore: OCRSettingsStore = OCRSettingsStore()
+    ) throws {
         self.preview = preview
+        self.ocrService = ocrService
+        self.ocrSettingsStore = ocrSettingsStore
         state = AnnotationEditorState(document: document)
         renderedImage = try previewBuilder.render(document: document, preview: preview)
     }
+
+    deinit { ocrTask?.cancel() }
 
     func beginDraft(at point: CGPoint) {
         draft = ScreenshotAnnotationDraft(
@@ -122,6 +139,86 @@ final class ScreenshotEditorModel: ObservableObject {
         applyHistory(.redo)
     }
 
+    func requestOCR() {
+        guard !isRecognizing else { return }
+        let settings = ocrSettingsStore.load().settings
+        ocrTask?.cancel()
+        setRecognizing(true)
+        ocrTask = Task { [weak self] in
+            guard let self else { return }
+            defer { setRecognizing(false) }
+            do {
+                let descriptor = try await ocrService.descriptor(for: settings.profile)
+                try Task.checkCancellation()
+                guard descriptor.state == .ready else {
+                    pendingOCRSettings = settings
+                    ocrDownloadPrompt = "\(profileLabel(settings.profile)) 模型需要下载 \(Self.byteCountFormatter.string(fromByteCount: descriptor.downloadByteCount))。文件仅保存在本机。"
+                    showsOCRDownloadPrompt = true
+                    return
+                }
+                let result = try await ocrService.recognize(
+                    source: state.document.baseImage,
+                    settings: settings
+                )
+                try Task.checkCancellation()
+                applyOCRResult(result)
+            } catch is CancellationError {
+                return
+            } catch {
+                errorMessage = localized(error)
+            }
+        }
+    }
+
+    func confirmOCRDownload() {
+        guard let settings = pendingOCRSettings, !isRecognizing else { return }
+        pendingOCRSettings = nil
+        setRecognizing(true)
+        ocrTask?.cancel()
+        ocrTask = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await ocrService.install(profile: settings.profile, userConsented: true)
+                try Task.checkCancellation()
+                let result = try await ocrService.recognize(
+                    source: state.document.baseImage,
+                    settings: settings
+                )
+                try Task.checkCancellation()
+                applyOCRResult(result)
+            } catch is CancellationError {
+                // Closing the editor cancels model work without presenting an error.
+            } catch {
+                errorMessage = localized(error)
+            }
+            setRecognizing(false)
+        }
+    }
+
+    func clearOCR() {
+        ocrDocument = nil
+    }
+
+    func copyOCRText() {
+        guard let text = ocrDocument?.plainText, !text.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        guard pasteboard.setString(text, forType: .string) else {
+            errorMessage = "无法复制识别文字"
+            return
+        }
+        errorMessage = nil
+    }
+
+    func cancelBackgroundWork() {
+        ocrTask?.cancel()
+        ocrTask = nil
+    }
+
+    func cancelOCR() {
+        ocrTask?.cancel()
+    }
+
     func copy() {
         guard !isExporting else { return }
         setExporting(true)
@@ -175,7 +272,17 @@ final class ScreenshotEditorModel: ObservableObject {
 
     private func setExporting(_ value: Bool) {
         isExporting = value
-        onExportingChange(value)
+        onExportingChange(value || isRecognizing)
+    }
+
+    private func applyOCRResult(_ result: TextOCRDocument) {
+        ocrDocument = result
+        errorMessage = result.lines.isEmpty ? "未识别到文字" : nil
+    }
+
+    private func setRecognizing(_ value: Bool) {
+        isRecognizing = value
+        onExportingChange(value || isExporting)
     }
 
     private func add(_ payload: ScreenshotAnnotationPayload) throws {
@@ -241,10 +348,33 @@ final class ScreenshotEditorModel: ObservableObject {
             return "滚动截图数据已损坏"
         case ScrollCaptureError.storageFailure:
             return "无法读取滚动截图数据"
+        case OCRModelDownloadError.consentRequired:
+            return "需要确认后才能下载 OCR 模型"
+        case OCRFeatureServiceError.modelNotInstalled:
+            return "本地 OCR 模型尚未安装"
+        case OCRSettingsError.unavailablePipeline:
+            return "所选 OCR 模型当前不可用"
+        case let PaddleOCRInferenceError.sessionCreationFailed(message),
+             let PaddleOCRInferenceError.inferenceFailed(message):
+            return "本地 OCR 失败：\(message)"
         default:
             return "处理失败：\(error.localizedDescription)"
         }
     }
+
+    private func profileLabel(_ profile: PPOCRv6Profile) -> String {
+        switch profile {
+        case .tiny: "PP-OCRv6 Tiny"
+        case .small: "PP-OCRv6 Small"
+        case .medium: "PP-OCRv6 Medium"
+        }
+    }
+
+    private static let byteCountFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter
+    }()
 
     private static func copyPasteboardItems(_ items: [NSPasteboardItem]) -> [NSPasteboardItem] {
         items.map { source in
@@ -268,8 +398,15 @@ struct ScreenshotEditorView: View {
         VStack(spacing: 0) {
             toolBar
             Divider()
-            ScreenshotCanvasView(model: model)
-                .frame(minWidth: 640, minHeight: 400)
+            HStack(spacing: 0) {
+                ScreenshotCanvasView(model: model)
+                    .frame(minWidth: 640, minHeight: 400)
+                if let document = model.ocrDocument {
+                    Divider()
+                    OCRResultPanel(model: model, document: document)
+                        .frame(width: 260)
+                }
+            }
             Divider()
             actionBar
         }
@@ -278,6 +415,13 @@ struct ScreenshotEditorView: View {
             Button("取消", role: .cancel) {}
             Button("添加") { model.commitText() }
                 .keyboardShortcut(.defaultAction)
+        }
+        .alert("下载本地 OCR 模型", isPresented: $model.showsOCRDownloadPrompt) {
+            Button("取消", role: .cancel) {}
+            Button("下载并识别") { model.confirmOCRDownload() }
+                .keyboardShortcut(.defaultAction)
+        } message: {
+            Text(model.ocrDownloadPrompt)
         }
     }
 
@@ -326,6 +470,15 @@ struct ScreenshotEditorView: View {
             .buttonStyle(.plain)
             .disabled(model.zoom >= 4)
             .help("放大")
+            Divider().frame(height: 22)
+            Button { model.requestOCR() } label: {
+                Label("识别文字", systemImage: "text.viewfinder")
+            }
+            .disabled(model.isRecognizing)
+            .help("使用本地 PaddleOCR 识别文字")
+            if model.isRecognizing {
+                ProgressView().controlSize(.small)
+            }
             Spacer()
         }
         .padding(.horizontal, 12)
@@ -352,11 +505,15 @@ struct ScreenshotEditorView: View {
             if model.isExporting {
                 ProgressView().controlSize(.small)
             }
+            if model.isRecognizing {
+                Button("取消识别") { model.cancelOCR() }
+            }
             Button("复制", systemImage: "doc.on.doc") { model.copy() }
-                .disabled(model.isExporting)
+                .disabled(model.isExporting || model.isRecognizing)
             Button("保存", systemImage: "square.and.arrow.down") { model.save() }
-                .disabled(model.isExporting)
+                .disabled(model.isExporting || model.isRecognizing)
             Button("关闭") { model.onClose() }
+                .disabled(model.isExporting || model.isRecognizing)
                 .keyboardShortcut(.cancelAction)
         }
         .padding(.horizontal, 12)
@@ -387,6 +544,32 @@ struct ScreenshotEditorView: View {
         case .mosaic: "马赛克"
         case .numberedMarker: "编号"
         }
+    }
+}
+
+private struct OCRResultPanel: View {
+    @ObservedObject var model: ScreenshotEditorModel
+    let document: TextOCRDocument
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("识别文字").font(.headline)
+                Spacer()
+                Button { model.clearOCR() } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain)
+                    .help("关闭识别结果")
+            }
+            Divider()
+            ScrollView {
+                Text(document.plainText.isEmpty ? "未识别到文字" : document.plainText)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .textSelection(.enabled)
+            }
+            Button("复制文字", systemImage: "doc.on.doc") { model.copyOCRText() }
+                .disabled(document.plainText.isEmpty)
+        }
+        .padding(12)
     }
 }
 
@@ -423,11 +606,35 @@ private struct ScreenshotCanvasView: View {
                     .resizable()
                     .frame(width: transform.contentRect.width, height: transform.contentRect.height)
                     .position(x: transform.contentRect.midX, y: transform.contentRect.midY)
+                ocrOverlay(transform: transform)
                 draftOverlay(transform: transform)
             }
             .contentShape(Rectangle())
             .gesture(dragGesture(transform: transform))
         }
+    }
+
+    @ViewBuilder
+    private func ocrOverlay(transform: ScreenshotCanvasTransform) -> some View {
+        Canvas { context, _ in
+            guard let document = model.ocrDocument else { return }
+            for line in document.lines {
+                let points = line.normalizedPolygon.map {
+                    transform.viewPoint(forImagePoint: CGPoint(
+                        x: $0.x * model.imageSize.width,
+                        y: $0.y * model.imageSize.height
+                    ))
+                }
+                guard let first = points.first else { continue }
+                var path = Path()
+                path.move(to: first)
+                for point in points.dropFirst() { path.addLine(to: point) }
+                path.closeSubpath()
+                context.fill(path, with: .color(.yellow.opacity(0.16)))
+                context.stroke(path, with: .color(.yellow), lineWidth: 1.5)
+            }
+        }
+        .allowsHitTesting(false)
     }
 
     private func dragGesture(transform: ScreenshotCanvasTransform) -> some Gesture {
@@ -575,7 +782,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         window.delegate = self
         let controller = NSWindowController(window: window)
         windowController = controller
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         controller.showWindow(nil)
         window.makeKeyAndOrderFront(nil)
     }
@@ -586,7 +793,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
 
     func close() {
         guard let window = windowController?.window else { return }
-        guard editorModel?.isExporting != true else {
+        guard editorModel?.isExporting != true, editorModel?.isRecognizing != true else {
             NSSound.beep()
             return
         }
@@ -596,6 +803,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         worker?.cancel()
         previewTask?.cancel()
         previewTask = nil
+        editorModel?.cancelBackgroundWork()
         editorModel = nil
         window.delegate = nil
         windowController = nil
@@ -605,7 +813,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        guard editorModel?.isExporting != true else {
+        guard editorModel?.isExporting != true, editorModel?.isRecognizing != true else {
             NSSound.beep()
             return false
         }
@@ -619,6 +827,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         worker?.cancel()
         previewTask?.cancel()
         previewTask = nil
+        editorModel?.cancelBackgroundWork()
         editorModel = nil
         windowController = nil
         releaseDocument(after: worker)

@@ -42,6 +42,12 @@ struct PaddleOCRTilePlanner: Sendable {
     private func offsets(length: Int) -> [Int] {
         guard length > maximumSide else { return [0] }
         let stride = maximumSide - overlap
-        return Swift.stride(from: 0, to: length, by: stride).map { $0 }
+        var result = [0]
+        while let current = result.last, current + maximumSide < length {
+            let next = min(current + stride, length - maximumSide)
+            guard next > current else { break }
+            result.append(next)
+        }
+        return result
     }
 }

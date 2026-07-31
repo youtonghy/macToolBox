@@ -7,6 +7,22 @@ struct OverlapMatcher {
         self.configuration = configuration
     }
 
+    func matchPersistentContent(
+        previous: LumaFrame,
+        current: LumaFrame
+    ) throws -> OverlapMatch {
+        let mask = try StableContentMask.detectPersistentRows(
+            previous: previous,
+            current: current,
+            threshold: 1
+        )
+        do {
+            return try match(previous: previous, current: current, mask: mask)
+        } catch ScrollCaptureError.insufficientComparableContent {
+            return try match(previous: previous, current: current)
+        }
+    }
+
     func match(
         previous: LumaFrame,
         current: LumaFrame,

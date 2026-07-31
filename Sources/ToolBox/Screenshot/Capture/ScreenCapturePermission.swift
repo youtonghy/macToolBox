@@ -3,6 +3,7 @@ enum ScreenCapturePermissionState: Equatable {
     case denied
 }
 
+@MainActor
 protocol ScreenCapturePermissionProviding: AnyObject {
     var state: ScreenCapturePermissionState { get }
 

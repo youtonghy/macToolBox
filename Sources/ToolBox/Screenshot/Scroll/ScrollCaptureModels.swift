@@ -42,6 +42,18 @@ struct ScrollMatchingConfiguration: Equatable, Sendable {
         self.minimumTexture = max(0, minimumTexture)
         self.outlierFraction = min(0.25, max(0, outlierFraction))
     }
+
+    static func automaticScroll(
+        stepPixels: Int32,
+        roiWidth: CGFloat,
+        maximumLumaWidth: Int = 128
+    ) -> Self {
+        let safeWidth = max(1, Double(roiWidth))
+        let safeStep = Double(max(1, abs(Int64(stepPixels))))
+        let projectedOffset = safeStep * Double(max(16, maximumLumaWidth)) / safeWidth
+        let searchRows = max(16, Int((projectedOffset * 1.25).rounded(.up)) + 4)
+        return Self(maximumOffsetRows: searchRows)
+    }
 }
 
 struct LumaFrame: Equatable, Sendable {

@@ -2,7 +2,7 @@ import CoreGraphics
 import Darwin
 import Foundation
 
-final class ScrollCaptureStripStore {
+final class ScrollCaptureStripStore: @unchecked Sendable {
     let sessionDirectory: URL
     let width: Int
     private(set) var logicalHeight: Int = 0

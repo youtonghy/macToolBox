@@ -43,7 +43,7 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
         self.activateApplication = activateApplication
         let previous = NSWorkspace.shared.frontmostApplication
         self.restorePreviousApplication = restorePreviousApplication ?? {
-            previous?.activate(options: [.activateIgnoringOtherApps])
+            previous?.activate()
         }
     }
 
@@ -101,7 +101,7 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
         }
 
         if activateApplication {
-            NSApp.activate(ignoringOtherApps: true)
+            NSApp.activate()
             panels.values.forEach { $0.orderFront(nil) }
         }
     }

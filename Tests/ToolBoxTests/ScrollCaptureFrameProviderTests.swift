@@ -24,6 +24,11 @@ final class ScrollCaptureFrameProviderTests: XCTestCase {
 
         XCTAssertEqual(strip.width, 10)
         XCTAssertEqual(strip.height, 15)
+        let first = try gray(in: strip, x: 0, y: 0)
+        let last = try gray(in: strip, x: 0, y: 14)
+        XCTAssertGreaterThan(first, 180)
+        XCTAssertGreaterThan(last, 180)
+        XCTAssertGreaterThan(first, last)
     }
 
     private func makeGradient(width: Int, height: Int) -> CGImage {
@@ -33,5 +38,12 @@ final class ScrollCaptureFrameProviderTests: XCTestCase {
             context.fill(CGRect(x: 0, y: y, width: width, height: 1))
         }
         return context.makeImage()!
+    }
+
+    private func gray(in image: CGImage, x: Int, y: Int) throws -> UInt8 {
+        guard let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else {
+            throw ScrollCaptureError.invalidStrip
+        }
+        return bytes[y * image.bytesPerRow + x * 4]
     }
 }

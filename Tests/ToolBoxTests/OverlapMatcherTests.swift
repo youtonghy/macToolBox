@@ -12,6 +12,20 @@ final class OverlapMatcherTests: XCTestCase {
         XCTAssertGreaterThan(match.confidence, 0.9)
     }
 
+    func testAutomaticScrollConfigurationSearchesDefaultStepAtTypicalWidth() throws {
+        let sequence = try makeSequence(offset: 34, height: 96)
+        let configuration = ScrollMatchingConfiguration.automaticScroll(
+            stepPixels: 160,
+            roiWidth: 600
+        )
+
+        let match = try OverlapMatcher(configuration: configuration)
+            .matchPersistentContent(previous: sequence.previous, current: sequence.current)
+
+        XCTAssertEqual(match.classification, .forward)
+        XCTAssertEqual(match.newRowCount, 34)
+    }
+
     func testIdenticalFramesReturnNoNewContent() throws {
         let frame = try patternedFrame(startRow: 0)
         let match = try OverlapMatcher().match(previous: frame, current: frame)
@@ -90,10 +104,13 @@ final class OverlapMatcherTests: XCTestCase {
         }
     }
 
-    private func makeSequence(offset: Int) throws -> (previous: LumaFrame, current: LumaFrame) {
+    private func makeSequence(
+        offset: Int,
+        height: Int = 32
+    ) throws -> (previous: LumaFrame, current: LumaFrame) {
         (
-            previous: try patternedFrame(startRow: 0),
-            current: try patternedFrame(startRow: offset)
+            previous: try patternedFrame(startRow: 0, height: height),
+            current: try patternedFrame(startRow: offset, height: height)
         )
     }
 
