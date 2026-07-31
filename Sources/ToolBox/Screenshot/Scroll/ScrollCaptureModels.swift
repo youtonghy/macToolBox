@@ -5,6 +5,10 @@ enum ScrollCaptureError: Error, Equatable {
     case frameDimensionsChanged
     case nonMonotonicTimestamp
     case insufficientComparableContent
+    case invalidStrip
+    case resourceLimitReached
+    case storageFailure
+    case corruptMetadata
 }
 
 struct ScrollMatchingConfiguration: Equatable, Sendable {
