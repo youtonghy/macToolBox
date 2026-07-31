@@ -56,7 +56,7 @@ struct ShortcutRuleStore {
         defaults.set(data, forKey: key)
     }
 
-    private static func validationError(for rules: [ShortcutRule]) -> ShortcutRuleStoreError? {
+    static func validationError(for rules: [ShortcutRule]) -> ShortcutRuleStoreError? {
         guard rules.allSatisfy({ !$0.binding.modifiers.isEmpty }) else {
             return .emptyModifiers
         }
