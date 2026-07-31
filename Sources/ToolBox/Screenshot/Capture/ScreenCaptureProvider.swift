@@ -5,6 +5,17 @@ import ScreenCaptureKit
 @MainActor
 protocol ScreenCaptureProviding: AnyObject {
     func captureDisplays() async throws -> [DisplayCaptureFrame]
+    func captureRegion(_ region: CGRect, displayID: CGDirectDisplayID) async throws -> CGImage
+}
+
+extension ScreenCaptureProviding {
+    func captureRegion(_ region: CGRect, displayID: CGDirectDisplayID) async throws -> CGImage {
+        let frames = try await captureDisplays()
+        guard frames.contains(where: { $0.geometry.displayID == displayID }) else {
+            throw ScreenshotCaptureError.missingDisplayFrame(displayID)
+        }
+        return try ScreenshotImageComposer.compose(selection: region, frames: frames)
+    }
 }
 
 @MainActor

@@ -9,6 +9,8 @@ enum ScrollCaptureError: Error, Equatable {
     case resourceLimitReached
     case storageFailure
     case corruptMetadata
+    case captureFailed
+    case cancelled
 }
 
 struct ScrollMatchingConfiguration: Equatable, Sendable {
