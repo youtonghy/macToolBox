@@ -96,6 +96,15 @@ final class CaptureGeometryTests: XCTestCase {
         }
     }
 
+    func testZeroHeightSelectionIsInvalid() {
+        XCTAssertThrowsError(try CaptureGeometry.fragments(
+            selection: CGRect(x: 0, y: 0, width: 20, height: 0),
+            displays: [validDisplay]
+        )) {
+            XCTAssertEqual($0 as? CaptureGeometryError, .invalidSelection)
+        }
+    }
+
     func testNonFiniteSelectionIsInvalid() {
         XCTAssertThrowsError(try CaptureGeometry.fragments(
             selection: CGRect(x: CGFloat.infinity, y: 0, width: 20, height: 20),
@@ -142,6 +151,21 @@ final class CaptureGeometryTests: XCTestCase {
         )
 
         XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 0, y: 0, width: 2, height: 2))
+    }
+
+    func testDisplayEdgeClampsFloatingPointPixelBounds() throws {
+        let display = DisplayCaptureGeometry(
+            displayID: 11,
+            globalFramePoints: CGRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2),
+            pixelSize: CGSize(width: 100, height: 100)
+        )
+
+        let fragments = try CaptureGeometry.fragments(
+            selection: display.globalFramePoints,
+            displays: [display]
+        )
+
+        XCTAssertEqual(fragments[0].sourcePixels, CGRect(x: 0, y: 0, width: 100, height: 100))
     }
 
     func testFragmentsUseStableGlobalIntersectionOrder() throws {
