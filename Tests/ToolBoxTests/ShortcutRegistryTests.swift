@@ -330,6 +330,19 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertEqual(recorder.activeRegistrationCount, 0)
     }
 
+    func testFailedStopDoesNotReportResidualRegistrationAsAvailable() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        try registry.start(rules: ShortcutRule.defaults)
+        recorder.unregisterStatusQueue = [OSStatus(eventInternalErr), noErr]
+
+        XCTAssertEqual(registry.stop(), OSStatus(eventInternalErr))
+
+        XCTAssertEqual(recorder.activeRegistrationCount, 1)
+        XCTAssertFalse(registry.isRegistered(.captureRegion))
+        XCTAssertFalse(registry.isRegistered(.screenWipeExit))
+    }
+
     func testStartAfterStopRestoresEventDispatch() throws {
         let recorder = ShortcutCarbonSystemRecorder()
         let registry = ShortcutRegistry(system: recorder.system)
