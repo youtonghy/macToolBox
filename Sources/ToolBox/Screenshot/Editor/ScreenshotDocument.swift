@@ -1,4 +1,4 @@
-struct ScreenshotDocument {
+struct ScreenshotDocument: Sendable {
     let baseImage: ScreenshotImageSource
     var annotations: [ScreenshotAnnotation]
 

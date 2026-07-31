@@ -87,8 +87,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
             return try? await self.screenshotWindowProvider.region(at: point, generation: generation)
         },
+        windowCandidateResolver: { [weak self] point, generation in
+            try? await self?.screenshotWindowProvider.region(at: point, generation: generation)
+        },
         bringEditorForward: { [weak self] in self?.screenshotPreview.bringForward() },
-        editorHandoff: { [weak self] image in self?.screenshotPreview.show(image: image) }
+        editorHandoff: { [weak self] image in self?.screenshotPreview.show(image: image) },
+        documentHandoff: { [weak self] document, cleanup in
+            self?.screenshotPreview.show(document: document, cleanup: cleanup)
+        }
     )
     private let logger = Logger(subsystem: "ToolBox", category: "AppDelegate")
     private lazy var displayControlKeys = DisplayControlMediaKeyController(
@@ -128,6 +134,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         screenshotPreview.onClose = { [weak self] in
             self?.screenshotCoordinator.previewClosed()
         }
+        try? ScrollCaptureCleanup.removeStaleSessions()
 
         // Menu-bar status item.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)

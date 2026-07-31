@@ -29,7 +29,7 @@ enum SelectionReducer {
             guard isValid(rect) else { throw SelectionError.invalidRegion }
             state.replaceSelection(with: [], manualRegion: rect)
 
-        case .confirm:
+        case .confirm, .confirmScroll:
             guard state.captureBounds != nil else { throw SelectionError.emptySelection }
         }
     }

@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 
-final class ScrollCaptureImageSource: ScreenshotImageSource {
+final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable {
     let id: UUID
     let pixelSize: CGSize
     private(set) var lastReadByteCount = 0

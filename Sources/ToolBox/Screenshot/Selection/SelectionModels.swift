@@ -124,6 +124,7 @@ enum SelectionAction: Equatable, Sendable {
     case undo
     case manualDrag(CGRect)
     case confirm
+    case confirmScroll
 }
 
 enum SelectionError: Error, Equatable {

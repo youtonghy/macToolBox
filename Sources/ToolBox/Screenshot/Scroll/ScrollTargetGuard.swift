@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import AppKit
 
 struct ScrollTargetObservation: Equatable, Sendable {
     let isProcessRunning: Bool
@@ -8,6 +9,47 @@ struct ScrollTargetObservation: Equatable, Sendable {
     let displayID: CGDirectDisplayID
     let topologyGeneration: UInt64
     let windowGlobalFrame: CGRect
+}
+
+@MainActor
+struct SystemScrollTargetObserver {
+    func observe(_ target: ScrollCaptureTargetSnapshot) throws -> ScrollTargetObservation {
+        guard let application = NSRunningApplication(processIdentifier: target.ownerPID),
+              !application.isTerminated,
+              let windows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[CFString: Any]],
+              let window = windows.first(where: {
+                  ($0[kCGWindowNumber] as? NSNumber)?.uint32Value == target.windowID
+                      && ($0[kCGWindowOwnerPID] as? NSNumber)?.int32Value == target.ownerPID
+              }),
+              let bounds = window[kCGWindowBounds] as? [String: Any]
+        else {
+            throw ScrollCaptureTargetError.targetUnavailable
+        }
+        let boundsDictionary = bounds as CFDictionary
+        var quartzFrame = CGRect.zero
+        guard CGRectMakeWithDictionaryRepresentation(boundsDictionary, &quartzFrame) else {
+            throw ScrollCaptureTargetError.targetUnavailable
+        }
+        let screenTop = NSScreen.main?.frame.maxY ?? 0
+        let appKitFrame = CGRect(
+            x: quartzFrame.minX,
+            y: screenTop - quartzFrame.maxY,
+            width: quartzFrame.width,
+            height: quartzFrame.height
+        )
+        let screen = NSScreen.screens.first(where: {
+            $0.frame.contains(CGPoint(x: appKitFrame.midX, y: appKitFrame.midY))
+        })
+        let displayID = (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        return ScrollTargetObservation(
+            isProcessRunning: true,
+            ownerPID: target.ownerPID,
+            windowID: target.windowID,
+            displayID: displayID,
+            topologyGeneration: target.topologyGeneration,
+            windowGlobalFrame: appKitFrame
+        )
+    }
 }
 
 struct ScrollTargetGuard {

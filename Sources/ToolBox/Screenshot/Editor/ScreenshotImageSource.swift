@@ -1,13 +1,13 @@
 import CoreGraphics
 import Foundation
 
-protocol ScreenshotImageSource: AnyObject {
+protocol ScreenshotImageSource: AnyObject, Sendable {
     var id: UUID { get }
     var pixelSize: CGSize { get }
     func copyPixels(in rect: CGRect) throws -> CGImage
 }
 
-final class CGImageScreenshotSource: ScreenshotImageSource {
+final class CGImageScreenshotSource: ScreenshotImageSource, @unchecked Sendable {
     let id = UUID()
     let image: CGImage
 

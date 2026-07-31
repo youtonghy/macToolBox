@@ -7,12 +7,19 @@ final class ScreenshotCoordinator {
     private let overlay: ScreenshotSelectionOverlayManaging
     private let compose: (CGRect, [DisplayCaptureFrame]) throws -> CGImage
     private let editorHandoff: (CGImage) -> Void
+    private let documentHandoff: (ScreenshotDocument, @escaping () -> Void) -> Void
     private let bringEditorForward: () -> Void
     private let candidateResolver: ScreenshotCandidateResolver?
+    private let windowCandidateResolver: ScreenshotCandidateResolver?
+    private let targetActivator: ScrollTargetActivating
+    private let scrollControls: ScrollCaptureControlController
     private var frames: [DisplayCaptureFrame] = []
     private var selectionState = SelectionSessionState.empty
     private var generation: UInt64 = 0
     private var hoverTask: Task<Void, Never>?
+    private var scrollTask: Task<Void, Never>?
+    private var scrollCoordinator: ScrollCaptureCoordinator?
+    private var targetRestoration: ScrollTargetRestoration?
 
     private(set) var state: ScreenshotWorkflowState = .idle
     private(set) var lastError: ScreenshotCoordinatorError?
@@ -26,16 +33,24 @@ final class ScreenshotCoordinator {
             try ScreenshotImageComposer.compose(selection: $0, frames: $1)
         },
         candidateResolver: ScreenshotCandidateResolver? = nil,
+        windowCandidateResolver: ScreenshotCandidateResolver? = nil,
+        targetActivator: ScrollTargetActivating? = nil,
+        scrollControls: ScrollCaptureControlController? = nil,
         bringEditorForward: @escaping () -> Void = {},
-        editorHandoff: @escaping (CGImage) -> Void = { _ in }
+        editorHandoff: @escaping (CGImage) -> Void = { _ in },
+        documentHandoff: @escaping (ScreenshotDocument, @escaping () -> Void) -> Void = { _, _ in }
     ) {
         self.permission = permission
         self.captureProvider = captureProvider
         self.overlay = overlay
         self.compose = compose
         self.candidateResolver = candidateResolver
+        self.windowCandidateResolver = windowCandidateResolver
+        self.targetActivator = targetActivator ?? WorkspaceScrollTargetActivation()
+        self.scrollControls = scrollControls ?? ScrollCaptureControlController()
         self.bringEditorForward = bringEditorForward
         self.editorHandoff = editorHandoff
+        self.documentHandoff = documentHandoff
     }
 
     convenience init() {
@@ -58,6 +73,13 @@ final class ScreenshotCoordinator {
 
         lastError = nil
         generation &+= 1
+        scrollTask?.cancel()
+        scrollTask = nil
+        scrollCoordinator?.cancel()
+        scrollCoordinator = nil
+        scrollControls.close()
+        targetRestoration?.restore()
+        targetRestoration = nil
         let sessionGeneration = generation
         state = .preparing
 
@@ -110,6 +132,12 @@ final class ScreenshotCoordinator {
             try SelectionReducer.reduce(state: &selectionState, action: action)
             if action == .confirm {
                 try confirmSelection()
+            } else if action == .confirmScroll {
+                let snapshot = selectionState
+                let sessionGeneration = generation
+                scrollTask = Task { [weak self] in
+                    await self?.beginLongCapture(selection: snapshot, generation: sessionGeneration)
+                }
             } else {
                 overlay.update(state: selectionState)
             }
@@ -126,6 +154,96 @@ final class ScreenshotCoordinator {
             state = .idle
             lastError = .overlay
         }
+    }
+
+    private func beginLongCapture(
+        selection: SelectionSessionState,
+        generation sessionGeneration: UInt64
+    ) async {
+        guard state == .selecting,
+              generation == sessionGeneration,
+              let bounds = selection.captureBounds
+        else { return }
+        do {
+            let containingWindow = try await windowCandidateResolver?(bounds.center, sessionGeneration)
+            guard generation == sessionGeneration, state == .selecting else { return }
+            let target = try ScrollCaptureTargetSnapshot.make(
+                selection: selection,
+                containingWindow: containingWindow
+            )
+            frames.removeAll()
+            hoverTask?.cancel()
+            hoverTask = nil
+            overlay.close(cancelled: false)
+            state = .longCapturing
+
+            let restoration = try targetActivator.activate(target)
+            targetRestoration = restoration
+            let observer = SystemScrollTargetObserver()
+            let guarder = ScrollTargetGuard()
+            let defaults = UserDefaults.standard
+            let automatic = defaults.object(forKey: "screenshot.scrollCapture.automatic") as? Bool ?? true
+            let configuredStep = defaults.object(forKey: "screenshot.scrollCapture.stepPixels") as? Double ?? 160
+            let step = Int32(max(40, min(400, configuredStep)))
+            let child = ScrollCaptureCoordinator(
+                frameProvider: DefaultScrollCaptureFrameProvider(captureProvider: captureProvider),
+                automaticDriver: AutomaticScrollDriver(stepPixels: step),
+                validate: { snapshot in
+                    try guarder.validate(snapshot, against: try observer.observe(snapshot))
+                }
+            )
+            scrollCoordinator = child
+            scrollControls.onRetry = { [weak child] in child?.retry() }
+            scrollControls.onManual = { [weak child] in child?.switchToManual() }
+            scrollControls.onFinish = { [weak child] in child?.finishPartial() }
+            scrollControls.onCancel = { [weak self] in self?.cancel() }
+            child.onStateChange = { [weak self, weak child] childState in
+                guard let self, let child else { return }
+                self.scrollControls.update(
+                    state: childState,
+                    mode: child.mode,
+                    height: child.progressHeight
+                )
+            }
+            scrollControls.show()
+            let result = try await child.capture(
+                target: target,
+                initialMode: automatic ? .automatic : .manual
+            )
+            guard generation == sessionGeneration, state == .longCapturing else {
+                try? FileManager.default.removeItem(at: result.sessionDirectory)
+                restoration.restore()
+                return
+            }
+            scrollControls.close()
+            scrollCoordinator = nil
+            scrollTask = nil
+            targetRestoration = nil
+            restoration.restore()
+            state = .previewing
+            let directory = result.sessionDirectory
+            documentHandoff(
+                ScreenshotDocument(baseImage: result.source),
+                { try? FileManager.default.removeItem(at: directory) }
+            )
+        } catch is CancellationError {
+            finishLongCaptureFailure(generation: sessionGeneration, reportError: false)
+        } catch ScrollCaptureError.cancelled {
+            finishLongCaptureFailure(generation: sessionGeneration, reportError: false)
+        } catch {
+            finishLongCaptureFailure(generation: sessionGeneration, reportError: true)
+        }
+    }
+
+    private func finishLongCaptureFailure(generation sessionGeneration: UInt64, reportError: Bool) {
+        guard generation == sessionGeneration else { return }
+        scrollControls.close()
+        scrollCoordinator = nil
+        scrollTask = nil
+        targetRestoration?.restore()
+        targetRestoration = nil
+        state = .idle
+        if reportError { lastError = .longCaptureFailed }
     }
 
     private func confirmSelection() throws {
@@ -183,4 +301,8 @@ final class ScreenshotCoordinator {
         state = .idle
         lastError = error
     }
+}
+
+private extension CGRect {
+    var center: CGPoint { CGPoint(x: midX, y: midY) }
 }

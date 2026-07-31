@@ -16,14 +16,17 @@ final class ScreenshotEditorModel: ObservableObject {
     @Published var selectedTool: ScreenshotAnnotationTool = .rectangle
     @Published var annotationColor: Color = .red
     @Published var lineWidth: Double = 4
+    @Published var zoom: Double = 1
     @Published var errorMessage: String?
     @Published var showsTextPrompt = false
     @Published var textEntry = ""
+    @Published private(set) var isExporting = false
 
     var onClose: () -> Void = {}
 
     private var state: AnnotationEditorState
-    private let previewRenderer = AnnotationRenderer(maximumBandBytes: 256 * 1_024 * 1_024)
+    private let preview: ScreenshotEditorPreview
+    private let previewBuilder = ScreenshotEditorPreviewBuilder()
     private let exporter = ScreenshotPNGExporter()
     private var pendingTextOrigin: CGPoint?
     private var nextMarkerNumber = 1
@@ -32,11 +35,10 @@ final class ScreenshotEditorModel: ObservableObject {
     var canUndo: Bool { !state.undoStack.isEmpty }
     var canRedo: Bool { !state.redoStack.isEmpty }
 
-    init(image: CGImage) {
-        renderedImage = image
-        state = AnnotationEditorState(
-            document: ScreenshotDocument(baseImage: CGImageScreenshotSource(image: image))
-        )
+    init(document: ScreenshotDocument, preview: ScreenshotEditorPreview) throws {
+        self.preview = preview
+        state = AnnotationEditorState(document: document)
+        renderedImage = try previewBuilder.render(document: document, preview: preview)
     }
 
     func beginDraft(at point: CGPoint) {
@@ -120,19 +122,31 @@ final class ScreenshotEditorModel: ObservableObject {
     }
 
     func copy() {
+        guard !isExporting else { return }
+        isExporting = true
+        let document = state.document
+        let exporter = exporter
         let url = temporaryPNGURL()
-        defer { try? FileManager.default.removeItem(at: url) }
-        do {
-            try exporter.export(document: state.document, to: url)
-            let png = try Data(contentsOf: url, options: .mappedIfSafe)
-            let pasteboard = NSPasteboard.general
-            pasteboard.clearContents()
-            guard pasteboard.setData(png, forType: .png) else {
-                throw AnnotationRenderError.exportFailed
+        Task { [weak self] in
+            do {
+                let png = try await Task.detached {
+                    defer { try? FileManager.default.removeItem(at: url) }
+                    try exporter.export(document: document, to: url)
+                    return try Data(contentsOf: url, options: .mappedIfSafe)
+                }.value
+                let pasteboard = NSPasteboard.general
+                let previousItems = Self.copyPasteboardItems(pasteboard.pasteboardItems ?? [])
+                pasteboard.clearContents()
+                guard pasteboard.setData(png, forType: .png) else {
+                    pasteboard.clearContents()
+                    pasteboard.writeObjects(previousItems)
+                    throw AnnotationRenderError.exportFailed
+                }
+                self?.errorMessage = nil
+            } catch {
+                self?.errorMessage = self?.localized(error)
             }
-            errorMessage = nil
-        } catch {
-            errorMessage = localized(error)
+            self?.isExporting = false
         }
     }
 
@@ -141,11 +155,20 @@ final class ScreenshotEditorModel: ObservableObject {
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "ToolBox Screenshot.png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try exporter.export(document: state.document, to: url)
-            errorMessage = nil
-        } catch {
-            errorMessage = localized(error)
+        guard !isExporting else { return }
+        isExporting = true
+        let document = state.document
+        let exporter = exporter
+        Task { [weak self] in
+            do {
+                try await Task.detached {
+                    try exporter.export(document: document, to: url)
+                }.value
+                self?.errorMessage = nil
+            } catch {
+                self?.errorMessage = self?.localized(error)
+            }
+            self?.isExporting = false
         }
     }
 
@@ -175,7 +198,7 @@ final class ScreenshotEditorModel: ObservableObject {
 
     private func refreshPreview() {
         do {
-            renderedImage = try previewRenderer.render(document: state.document)
+            renderedImage = try previewBuilder.render(document: state.document, preview: preview)
             errorMessage = nil
             objectWillChange.send()
         } catch {
@@ -204,8 +227,30 @@ final class ScreenshotEditorModel: ObservableObject {
             return "图片超过 512 MiB 导出上限"
         case AnnotationRenderError.bandTooLarge:
             return "图片过大，无法生成编辑预览"
+        case AnnotationRenderError.contextCreationFailed:
+            return "无法创建图像缓冲区"
+        case AnnotationRenderError.fileMappingFailed:
+            return "无法创建安全的导出缓存"
+        case ScrollCaptureError.corruptMetadata:
+            return "滚动截图数据已损坏"
+        case ScrollCaptureError.storageFailure:
+            return "无法读取滚动截图数据"
         default:
             return "处理失败：\(error.localizedDescription)"
+        }
+    }
+
+    private static func copyPasteboardItems(_ items: [NSPasteboardItem]) -> [NSPasteboardItem] {
+        items.map { source in
+            let copy = NSPasteboardItem()
+            for type in source.types {
+                if let data = source.data(forType: type) {
+                    copy.setData(data, forType: type)
+                } else if let value = source.string(forType: type) {
+                    copy.setString(value, forType: type)
+                }
+            }
+            return copy
         }
     }
 }
@@ -259,6 +304,22 @@ struct ScreenshotEditorView: View {
             Text("\(Int(model.lineWidth))")
                 .font(.caption.monospacedDigit())
                 .frame(width: 24)
+            Divider().frame(height: 22)
+            Button { model.zoom = max(1, model.zoom - 0.25) } label: {
+                Image(systemName: "minus.magnifyingglass")
+            }
+            .buttonStyle(.plain)
+            .disabled(model.zoom <= 1)
+            .help("缩小")
+            Slider(value: $model.zoom, in: 1...4, step: 0.25)
+                .frame(width: 90)
+                .help("缩放")
+            Button { model.zoom = min(4, model.zoom + 0.25) } label: {
+                Image(systemName: "plus.magnifyingglass")
+            }
+            .buttonStyle(.plain)
+            .disabled(model.zoom >= 4)
+            .help("放大")
             Spacer()
         }
         .padding(.horizontal, 12)
@@ -282,8 +343,13 @@ struct ScreenshotEditorView: View {
                     .lineLimit(2)
             }
             Spacer()
+            if model.isExporting {
+                ProgressView().controlSize(.small)
+            }
             Button("复制", systemImage: "doc.on.doc") { model.copy() }
+                .disabled(model.isExporting)
             Button("保存", systemImage: "square.and.arrow.down") { model.save() }
+                .disabled(model.isExporting)
             Button("关闭") { model.onClose() }
                 .keyboardShortcut(.cancelAction)
         }
@@ -323,21 +389,38 @@ private struct ScreenshotCanvasView: View {
 
     var body: some View {
         GeometryReader { proxy in
-            if let transform = try? ScreenshotCanvasTransform(
-                imageSize: model.imageSize,
-                viewportSize: proxy.size
-            ) {
-                ZStack {
-                    Color(nsColor: .controlBackgroundColor)
-                    Image(nsImage: NSImage(cgImage: model.renderedImage, size: model.imageSize))
-                        .resizable()
-                        .frame(width: transform.contentRect.width, height: transform.contentRect.height)
-                        .position(x: transform.contentRect.midX, y: transform.contentRect.midY)
-                    draftOverlay(transform: transform)
-                }
-                .contentShape(Rectangle())
-                .gesture(dragGesture(transform: transform))
+            let fitScale = min(
+                proxy.size.width / max(1, model.imageSize.width),
+                proxy.size.height / max(1, model.imageSize.height)
+            )
+            let contentSize = CGSize(
+                width: max(proxy.size.width, model.imageSize.width * fitScale * model.zoom),
+                height: max(proxy.size.height, model.imageSize.height * fitScale * model.zoom)
+            )
+            ScrollView([.horizontal, .vertical]) {
+                canvasSurface(size: contentSize)
+                    .frame(width: contentSize.width, height: contentSize.height)
             }
+            .background(Color(nsColor: .controlBackgroundColor))
+        }
+    }
+
+    @ViewBuilder
+    private func canvasSurface(size: CGSize) -> some View {
+        if let transform = try? ScreenshotCanvasTransform(
+            imageSize: model.imageSize,
+            viewportSize: size
+        ) {
+            ZStack {
+                Color(nsColor: .controlBackgroundColor)
+                Image(nsImage: NSImage(cgImage: model.renderedImage, size: model.imageSize))
+                    .resizable()
+                    .frame(width: transform.contentRect.width, height: transform.contentRect.height)
+                    .position(x: transform.contentRect.midX, y: transform.contentRect.midY)
+                draftOverlay(transform: transform)
+            }
+            .contentShape(Rectangle())
+            .gesture(dragGesture(transform: transform))
         }
     }
 
@@ -388,8 +471,14 @@ private struct ScreenshotCanvasView: View {
                 context.stroke(path, with: .color(draftColor), lineWidth: width)
             case .numberedMarker:
                 let center = transform.viewPoint(forImagePoint: draft.start)
+                let radius = max(10, model.lineWidth * 3) * Double(transform.scale)
                 context.fill(
-                    Path(ellipseIn: CGRect(x: center.x - 10, y: center.y - 10, width: 20, height: 20)),
+                    Path(ellipseIn: CGRect(
+                        x: center.x - radius,
+                        y: center.y - radius,
+                        width: radius * 2,
+                        height: radius * 2
+                    )),
                     with: .color(color)
                 )
             case .text:
@@ -417,6 +506,9 @@ private struct ScreenshotCanvasView: View {
 @MainActor
 final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
     private var windowController: NSWindowController?
+    private var previewTask: Task<Void, Never>?
+    private var documentCleanup: (() -> Void)?
+    private var generation: UInt64 = 0
     var onClose: () -> Void
 
     init(onClose: @escaping () -> Void = {}) {
@@ -424,11 +516,42 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
     }
 
     func show(image: CGImage) {
+        show(document: ScreenshotDocument(baseImage: CGImageScreenshotSource(image: image)))
+    }
+
+    func show(document: ScreenshotDocument, cleanup: @escaping () -> Void = {}) {
         close()
-        let model = ScreenshotEditorModel(image: image)
-        model.onClose = { [weak self] in self?.close() }
-        let hosting = NSHostingController(rootView: ScreenshotEditorView(model: model))
-        let window = NSWindow(contentViewController: hosting)
+        generation &+= 1
+        let currentGeneration = generation
+        documentCleanup = cleanup
+        let loading = NSHostingController(rootView: ProgressView().controlSize(.large).frame(width: 320, height: 180))
+        let window = NSWindow(contentViewController: loading)
+        configure(window: window)
+        previewTask = Task { [weak self] in
+            do {
+                let preview = try await Task.detached {
+                    try ScreenshotEditorPreviewBuilder().makeBasePreview(document: document)
+                }.value
+                guard let self, self.generation == currentGeneration, !Task.isCancelled else { return }
+                let model = try ScreenshotEditorModel(document: document, preview: preview)
+                model.onClose = { [weak self] in self?.close() }
+                window.contentViewController = NSHostingController(rootView: ScreenshotEditorView(model: model))
+                window.setContentSize(NSSize(width: 900, height: 680))
+                window.center()
+            } catch is CancellationError {
+                return
+            } catch {
+                guard let self, self.generation == currentGeneration else { return }
+                window.contentViewController = NSHostingController(
+                    rootView: Text("无法打开截图：\(error.localizedDescription)")
+                        .foregroundStyle(.red)
+                        .padding(24)
+                )
+            }
+        }
+    }
+
+    private func configure(window: NSWindow) {
         window.title = "截图编辑"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
         window.setContentSize(NSSize(width: 900, height: 680))
@@ -447,14 +570,26 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
 
     func close() {
         guard let window = windowController?.window else { return }
+        generation &+= 1
+        previewTask?.cancel()
+        previewTask = nil
         window.delegate = nil
         windowController = nil
         window.close()
+        let cleanup = documentCleanup
+        documentCleanup = nil
+        cleanup?()
         onClose()
     }
 
     func windowWillClose(_ notification: Notification) {
+        generation &+= 1
+        previewTask?.cancel()
+        previewTask = nil
         windowController = nil
+        let cleanup = documentCleanup
+        documentCleanup = nil
+        cleanup?()
         onClose()
     }
 }

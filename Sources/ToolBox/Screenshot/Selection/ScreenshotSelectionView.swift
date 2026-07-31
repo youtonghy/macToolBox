@@ -65,6 +65,7 @@ final class ScreenshotSelectionView: NSView {
         if let start = dragStart, let current = dragCurrent {
             stroke(globalRect: normalizedRect(from: start, to: current), color: .white, width: 1)
         }
+        drawCaptureControls()
     }
 
     override func mouseMoved(with event: NSEvent) {
@@ -73,6 +74,15 @@ final class ScreenshotSelectionView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         onInteraction()
+        let local = convert(event.locationInWindow, from: nil)
+        if staticCaptureButtonRect.contains(local) {
+            onAction(.confirm)
+            return
+        }
+        if scrollCaptureButtonRect.contains(local) {
+            onAction(.confirmScroll)
+            return
+        }
         let point = globalPoint(for: event)
         if event.clickCount == 2, state.captureBounds != nil {
             onAction(.confirm)
@@ -106,7 +116,8 @@ final class ScreenshotSelectionView: NSView {
         case 53: onCancel()
         case 51, 117: onAction(.deleteLast)
         case 6 where event.modifierFlags.contains(.command): onAction(.undo)
-        case 36, 76: onAction(.confirm)
+        case 36, 76:
+            onAction(event.modifierFlags.contains(.option) ? .confirmScroll : .confirm)
         default: super.keyDown(with: event)
         }
     }
@@ -141,5 +152,30 @@ final class ScreenshotSelectionView: NSView {
             width: abs(end.x - start.x),
             height: abs(end.y - start.y)
         )
+    }
+
+    private var staticCaptureButtonRect: CGRect {
+        CGRect(x: bounds.midX - 43, y: 18, width: 40, height: 34)
+    }
+
+    private var scrollCaptureButtonRect: CGRect {
+        CGRect(x: bounds.midX + 3, y: 18, width: 40, height: 34)
+    }
+
+    private func drawCaptureControls() {
+        for (rect, symbol, help) in [
+            (staticCaptureButtonRect, "camera", "截图"),
+            (scrollCaptureButtonRect, "rectangle.and.arrow.up.right.and.arrow.down.left", "滚动截图"),
+        ] {
+            let path = NSBezierPath(roundedRect: rect, xRadius: 6, yRadius: 6)
+            NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
+            path.fill()
+            NSColor.separatorColor.setStroke()
+            path.lineWidth = 1
+            path.stroke()
+            if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: help) {
+                image.draw(in: rect.insetBy(dx: 10, dy: 7))
+            }
+        }
     }
 }

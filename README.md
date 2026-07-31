@@ -14,7 +14,7 @@
    - 机制：`PreventUserIdleSystemSleep` 电源断言 + `caffeinate -s` 子进程（AC 电源下阻止合盖休眠）。
 7. **菜单交互** — 左键点击菜单栏图标时，窗口会贴着图标下方弹出，并完整限制在图标所在的屏幕内；点击其他区域自动收起。右键点击菜单栏图标可直接打开面板、切换常用功能、进入“设置”或退出应用。弹窗采用紧凑的圆角玻璃表面，并在屏幕高度不足时允许纵向滚动。
 8. **分应用音频** — macOS 14.2+ 使用公开 Core Audio Process Tap，为正在播放音频的应用设置 0%–300% 音量并选择输出设备；100% 为原始增益。超过 100% 可能削波失真。
-9. **设置窗口** — “首页 / 线缆 / Wi-Fi / 显示器 / 音频 / 截图 / 快捷键 / 通用”；截图页显示屏幕录制与辅助功能权限，并可控制智能元素候选；快捷键页可启停、自定义区域截图组合键并恢复默认值。
+9. **设置窗口** — “首页 / 线缆 / Wi-Fi / 显示器 / 音频 / 截图 / 快捷键 / 通用”；截图页显示屏幕录制、辅助功能与自动滚动所需的事件投递权限，并可控制智能元素候选、自动滚动和滚动步长；快捷键页可启停、自定义区域截图组合键并恢复默认值。
 10. **Wi-Fi 信号** — 使用公开 CoreWLAN 每 2 秒读取当前连接的 RSSI、噪声、SNR、链路速率、信道、频段、宽度、PHY 和安全模式；弹窗提供紧凑概览，设置 → Wi-Fi 提供最近 5 分钟的 RSSI / SNR 内存曲线和完整参数。
 
 ## 构建
@@ -82,6 +82,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 | `Sources/ToolBox/FocusMode/*` | 聚焦模式状态机、AX 焦点追踪、显示器目标解析和被动遮罩窗口 |
 | `Sources/ToolBox/AudioRouting/*` | 分应用规则、HAL 进程/设备注册表、Process Tap 路由引擎、实时 DSP 与两套 UI |
 | `Sources/ToolBox/WiFiSignal/*` | CoreWLAN 当前连接采样、五分钟内存历史、弹窗概览和设置详情 |
+| `Sources/ToolBox/Screenshot/*` | 跨屏区域选择、Shift 多区域、滚动截图、标注编辑与受限内存 PNG 导出 |
 | `Sources/ToolBox/Settings/*` | 设置窗口玻璃卡片等共享 UI 原语 |
 | `Sources/ToolBox/Permissions.swift` | 输入监控 / 辅助功能检测与引导 |
 | `Sources/ToolBox/Shortcuts/*` | 全局快捷键规则、持久化、Carbon 注册器、录制控件与设置 UI |
@@ -103,7 +104,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 - **Wi-Fi 网络身份**：当前版本不请求定位权限，也不主动扫描附近网络。RSSI、噪声、SNR、链路速率和信道来自公开 CoreWLAN 当前接口查询；SSID / BSSID 可能被系统隐藏。链路速率是当前 Wi-Fi 协商速率，不代表互联网下载速度。
 - **应用与设备是独立概念**：Zoom 只是示例，ToolBox 不创建 `ZoomDevice` 或其他应用专用设备。输出设备列表来自 Core Audio 系统枚举；只要应用的 HAL Process Object 存在，音量调整会立即写入其 route，即使应用当时静音，也会在下一帧音频到来时使用新 gain。
 - **输出设备兼容预检**：设置页会在创建 Tap 前读取输出 stream 的虚拟格式和 nominal sample rate。当前只接受 alive、单 stream、native-endian packed interleaved Float32 stereo，且源/目标采样率误差不超过 `1000 ppm` 的设备；不兼容项会禁用并显示原因，这表示明确降级，不代表设备损坏。蓝牙耳机收到 profile/流/格式变化通知时会立即暂停引用它的分应用路由；HAL 状态稳定 1 秒后重新读取完整配置，A2DP 恢复兼容时自动恢复路由。USB、HDMI、内建和有线设备不使用这条蓝牙保护路径。跨采样率转换、多声道与 non-interleaved layout 尚未启用。
-- **区域截图**：快捷键会冻结所有显示器后打开跨屏选择层；支持窗口/辅助功能元素候选、Shift 多元素增减、手动拖拽、撤销与 Delete，确认后可复制或保存 PNG。
+- **区域截图**：快捷键会冻结所有显示器后打开跨屏选择层；支持窗口/辅助功能元素候选、Shift 连续增减多个区域、手动拖拽、撤销与 Delete。选择层可直接确认普通截图或滚动截图；滚动截图会锁定同一窗口并提供自动/手动模式、重试、保留当前结果和取消。完成后可用矩形、椭圆、直线、箭头、画笔、高亮、文字、马赛克和序号标记编辑，并复制或保存 PNG。自动滚动需要事件投递权限；目标窗口移动、缩放、换屏或消失时会暂停，避免拼接错误。
 - 默认快捷键可在设置 → 快捷键中修改；若新组合键与系统或其他 App 冲突，当前绑定保持不变。
 
 ## 验证
