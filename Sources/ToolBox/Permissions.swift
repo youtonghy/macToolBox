@@ -12,6 +12,18 @@ import IOKit.hid
 /// - **Accessibility** (modify / suppress the event stream)
 enum Permissions {
 
+    // MARK: - Event posting
+
+    static var canPostEvents: Bool {
+        CGPreflightPostEventAccess()
+    }
+
+    /// Requests event-posting access only from an explicit user action.
+    @discardableResult
+    static func requestEventPosting() -> Bool {
+        CGRequestPostEventAccess() || CGPreflightPostEventAccess()
+    }
+
     // MARK: - Screen Capture
 
     static var isScreenCaptureTrusted: Bool {
