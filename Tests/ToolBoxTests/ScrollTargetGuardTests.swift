@@ -3,6 +3,25 @@ import XCTest
 @testable import ToolBox
 
 final class ScrollTargetGuardTests: XCTestCase {
+    func testQuartzCoordinateConversionUsesStablePrimaryDisplayHeight() {
+        let converter = QuartzWindowCoordinateConverter(
+            primaryDisplayHeight: 900,
+            screens: [
+                .init(displayID: 1, appKitFrame: CGRect(x: 0, y: 0, width: 1_440, height: 900)),
+                .init(displayID: 2, appKitFrame: CGRect(x: 0, y: 900, width: 1_920, height: 1_080)),
+                .init(displayID: 3, appKitFrame: CGRect(x: -1_280, y: 0, width: 1_280, height: 720)),
+            ]
+        )
+
+        let upper = converter.appKitFrame(fromQuartzFrame: CGRect(x: 100, y: -700, width: 300, height: 200))
+        let left = converter.appKitFrame(fromQuartzFrame: CGRect(x: -1_000, y: 300, width: 200, height: 100))
+
+        XCTAssertEqual(upper, CGRect(x: 100, y: 1_400, width: 300, height: 200))
+        XCTAssertEqual(converter.displayID(containing: upper), 2)
+        XCTAssertEqual(left, CGRect(x: -1_000, y: 500, width: 200, height: 100))
+        XCTAssertEqual(converter.displayID(containing: left), 3)
+    }
+
     func testAcceptsMatchingObservationAndRejectsIdentityOrGeometryChange() throws {
         let target = snapshot()
         let guarder = ScrollTargetGuard()

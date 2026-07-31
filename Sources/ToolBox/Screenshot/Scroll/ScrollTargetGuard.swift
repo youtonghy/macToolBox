@@ -30,17 +30,18 @@ struct SystemScrollTargetObserver {
         guard CGRectMakeWithDictionaryRepresentation(boundsDictionary, &quartzFrame) else {
             throw ScrollCaptureTargetError.targetUnavailable
         }
-        let screenTop = NSScreen.main?.frame.maxY ?? 0
-        let appKitFrame = CGRect(
-            x: quartzFrame.minX,
-            y: screenTop - quartzFrame.maxY,
-            width: quartzFrame.width,
-            height: quartzFrame.height
+        let screens = NSScreen.screens.compactMap { screen -> QuartzWindowCoordinateConverter.Screen? in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            return .init(displayID: number.uint32Value, appKitFrame: screen.frame)
+        }
+        let converter = QuartzWindowCoordinateConverter(
+            primaryDisplayHeight: CGDisplayBounds(CGMainDisplayID()).height,
+            screens: screens
         )
-        let screen = NSScreen.screens.first(where: {
-            $0.frame.contains(CGPoint(x: appKitFrame.midX, y: appKitFrame.midY))
-        })
-        let displayID = (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+        let appKitFrame = converter.appKitFrame(fromQuartzFrame: quartzFrame)
+        let displayID = converter.displayID(containing: appKitFrame)
         return ScrollTargetObservation(
             isProcessRunning: true,
             ownerPID: target.ownerPID,
@@ -49,6 +50,30 @@ struct SystemScrollTargetObserver {
             topologyGeneration: target.topologyGeneration,
             windowGlobalFrame: appKitFrame
         )
+    }
+}
+
+struct QuartzWindowCoordinateConverter: Sendable {
+    struct Screen: Equatable, Sendable {
+        let displayID: CGDirectDisplayID
+        let appKitFrame: CGRect
+    }
+
+    let primaryDisplayHeight: CGFloat
+    let screens: [Screen]
+
+    func appKitFrame(fromQuartzFrame frame: CGRect) -> CGRect {
+        CGRect(
+            x: frame.minX,
+            y: primaryDisplayHeight - frame.maxY,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    func displayID(containing frame: CGRect) -> CGDirectDisplayID {
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        return screens.first(where: { $0.appKitFrame.contains(center) })?.displayID ?? 0
     }
 }
 

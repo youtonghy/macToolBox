@@ -113,6 +113,13 @@ final class ScreenshotCoordinator {
         generation &+= 1
         hoverTask?.cancel()
         hoverTask = nil
+        scrollCoordinator?.cancel()
+        scrollTask?.cancel()
+        scrollTask = nil
+        scrollCoordinator = nil
+        scrollControls.close()
+        targetRestoration?.restore()
+        targetRestoration = nil
         frames.removeAll()
         selectionState = .empty
         if state == .selecting {

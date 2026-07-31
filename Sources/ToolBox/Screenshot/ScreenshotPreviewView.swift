@@ -23,6 +23,7 @@ final class ScreenshotEditorModel: ObservableObject {
     @Published private(set) var isExporting = false
 
     var onClose: () -> Void = {}
+    var onExportingChange: (Bool) -> Void = { _ in }
 
     private var state: AnnotationEditorState
     private let preview: ScreenshotEditorPreview
@@ -123,7 +124,7 @@ final class ScreenshotEditorModel: ObservableObject {
 
     func copy() {
         guard !isExporting else { return }
-        isExporting = true
+        setExporting(true)
         let document = state.document
         let exporter = exporter
         let url = temporaryPNGURL()
@@ -146,7 +147,7 @@ final class ScreenshotEditorModel: ObservableObject {
             } catch {
                 self?.errorMessage = self?.localized(error)
             }
-            self?.isExporting = false
+            self?.setExporting(false)
         }
     }
 
@@ -156,7 +157,7 @@ final class ScreenshotEditorModel: ObservableObject {
         panel.nameFieldStringValue = "ToolBox Screenshot.png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         guard !isExporting else { return }
-        isExporting = true
+        setExporting(true)
         let document = state.document
         let exporter = exporter
         Task { [weak self] in
@@ -168,8 +169,13 @@ final class ScreenshotEditorModel: ObservableObject {
             } catch {
                 self?.errorMessage = self?.localized(error)
             }
-            self?.isExporting = false
+            self?.setExporting(false)
         }
+    }
+
+    private func setExporting(_ value: Bool) {
+        isExporting = value
+        onExportingChange(value)
     }
 
     private func add(_ payload: ScreenshotAnnotationPayload) throws {
@@ -507,6 +513,8 @@ private struct ScreenshotCanvasView: View {
 final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
     private var windowController: NSWindowController?
     private var previewTask: Task<Void, Never>?
+    private var previewWorkerTask: Task<ScreenshotEditorPreview, Error>?
+    private var editorModel: ScreenshotEditorModel?
     private var documentCleanup: (() -> Void)?
     private var generation: UInt64 = 0
     var onClose: () -> Void
@@ -527,14 +535,21 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         let loading = NSHostingController(rootView: ProgressView().controlSize(.large).frame(width: 320, height: 180))
         let window = NSWindow(contentViewController: loading)
         configure(window: window)
+        let worker = Task.detached {
+            try ScreenshotEditorPreviewBuilder().makeBasePreview(document: document)
+        }
+        previewWorkerTask = worker
         previewTask = Task { [weak self] in
             do {
-                let preview = try await Task.detached {
-                    try ScreenshotEditorPreviewBuilder().makeBasePreview(document: document)
-                }.value
+                let preview = try await worker.value
                 guard let self, self.generation == currentGeneration, !Task.isCancelled else { return }
+                self.previewWorkerTask = nil
                 let model = try ScreenshotEditorModel(document: document, preview: preview)
                 model.onClose = { [weak self] in self?.close() }
+                model.onExportingChange = { [weak self] exporting in
+                    self?.setWindowCloseEnabled(!exporting)
+                }
+                self.editorModel = model
                 window.contentViewController = NSHostingController(rootView: ScreenshotEditorView(model: model))
                 window.setContentSize(NSSize(width: 900, height: 680))
                 window.center()
@@ -542,6 +557,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
                 return
             } catch {
                 guard let self, self.generation == currentGeneration else { return }
+                self.previewWorkerTask = nil
                 window.contentViewController = NSHostingController(
                     rootView: Text("无法打开截图：\(error.localizedDescription)")
                         .foregroundStyle(.red)
@@ -570,26 +586,60 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
 
     func close() {
         guard let window = windowController?.window else { return }
+        guard editorModel?.isExporting != true else {
+            NSSound.beep()
+            return
+        }
         generation &+= 1
+        let worker = previewWorkerTask
+        previewWorkerTask = nil
+        worker?.cancel()
         previewTask?.cancel()
         previewTask = nil
+        editorModel = nil
         window.delegate = nil
         windowController = nil
         window.close()
-        let cleanup = documentCleanup
-        documentCleanup = nil
-        cleanup?()
+        releaseDocument(after: worker)
         onClose()
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard editorModel?.isExporting != true else {
+            NSSound.beep()
+            return false
+        }
+        return true
     }
 
     func windowWillClose(_ notification: Notification) {
         generation &+= 1
+        let worker = previewWorkerTask
+        previewWorkerTask = nil
+        worker?.cancel()
         previewTask?.cancel()
         previewTask = nil
+        editorModel = nil
         windowController = nil
+        releaseDocument(after: worker)
+        onClose()
+    }
+
+    private func setWindowCloseEnabled(_ enabled: Bool) {
+        windowController?.window?.standardWindowButton(.closeButton)?.isEnabled = enabled
+    }
+
+    private func releaseDocument(after worker: Task<ScreenshotEditorPreview, Error>?) {
         let cleanup = documentCleanup
         documentCleanup = nil
-        cleanup?()
-        onClose()
+        guard let cleanup else { return }
+        guard let worker else {
+            cleanup()
+            return
+        }
+        Task {
+            _ = try? await worker.value
+            cleanup()
+        }
     }
 }
