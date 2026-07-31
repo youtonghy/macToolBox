@@ -23,4 +23,23 @@ struct ShortcutRule: Codable, Equatable, Sendable {
     let id: ShortcutActionID
     let binding: ShortcutBinding
     var isEnabled: Bool
+
+    static let defaults = [
+        ShortcutRule(
+            id: .captureRegion,
+            binding: ShortcutBinding(
+                keyCode: UInt32(kVK_ANSI_S),
+                modifiers: [.control, .option]
+            ),
+            isEnabled: true
+        ),
+        ShortcutRule(
+            id: .screenWipeExit,
+            binding: ShortcutBinding(
+                keyCode: UInt32(kVK_Escape),
+                modifiers: [.control, .option, .command]
+            ),
+            isEnabled: true
+        ),
+    ]
 }

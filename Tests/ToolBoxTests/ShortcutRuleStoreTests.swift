@@ -27,7 +27,11 @@ final class ShortcutRuleStoreTests: XCTestCase {
         let result = store.load()
 
         XCTAssertNil(result.issue)
-        XCTAssertEqual(result.rules, [
+        XCTAssertEqual(result.rules, approvedDefaults)
+    }
+
+    func testRuleDefaultsExposeApprovedBindingsForRegistryStartup() {
+        XCTAssertEqual(ShortcutRule.defaults, [
             .init(
                 id: .captureRegion,
                 binding: .init(

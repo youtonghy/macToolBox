@@ -25,7 +25,7 @@ struct ShortcutRuleStore {
 
     func load() -> ShortcutRuleLoadResult {
         guard let data = defaults.data(forKey: key) else {
-            return ShortcutRuleLoadResult(rules: Self.approvedDefaults, issue: nil)
+            return ShortcutRuleLoadResult(rules: ShortcutRule.defaults, issue: nil)
         }
 
         do {
@@ -33,18 +33,18 @@ struct ShortcutRuleStore {
             guard document.schemaVersion == 1 else {
                 logger.error("Unknown shortcut rule schema \(document.schemaVersion, privacy: .public)")
                 return ShortcutRuleLoadResult(
-                    rules: Self.approvedDefaults,
+                    rules: ShortcutRule.defaults,
                     issue: .unknownSchema(document.schemaVersion)
                 )
             }
             guard Self.validationError(for: document.rules) == nil else {
                 logger.error("Shortcut rules do not satisfy the registry invariants")
-                return ShortcutRuleLoadResult(rules: Self.approvedDefaults, issue: .corruptData)
+                return ShortcutRuleLoadResult(rules: ShortcutRule.defaults, issue: .corruptData)
             }
             return ShortcutRuleLoadResult(rules: document.rules, issue: nil)
         } catch {
             logger.error("Corrupt shortcut rules")
-            return ShortcutRuleLoadResult(rules: Self.approvedDefaults, issue: .corruptData)
+            return ShortcutRuleLoadResult(rules: ShortcutRule.defaults, issue: .corruptData)
         }
     }
 
@@ -82,25 +82,6 @@ struct ShortcutRuleStore {
 
         return nil
     }
-
-    private static let approvedDefaults = [
-        ShortcutRule(
-            id: .captureRegion,
-            binding: ShortcutBinding(
-                keyCode: UInt32(kVK_ANSI_S),
-                modifiers: [.control, .option]
-            ),
-            isEnabled: true
-        ),
-        ShortcutRule(
-            id: .screenWipeExit,
-            binding: ShortcutBinding(
-                keyCode: UInt32(kVK_Escape),
-                modifiers: [.control, .option, .command]
-            ),
-            isEnabled: true
-        ),
-    ]
 }
 
 private struct ShortcutRuleDocumentV1: Codable {
