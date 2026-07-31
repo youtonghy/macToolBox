@@ -21,10 +21,15 @@
 
 ```bash
 brew install xcodegen        # 仅需一次
-./build.sh                   # 生成工程 + Release 构建 + 启动
+./build.sh                   # 校验 OCR 运行时 + 生成工程 + Release 构建 + 启动
 ```
 
 产物：`build/Build/Products/Release/ToolBox.app`（ad-hoc 签名 + Hardened Runtime）。
+
+首次构建会下载固定版本的 ONNX Runtime macOS arm64 官方归档，并在解压前校验
+SHA-256；缓存位于未跟踪的 `.build/ocr-runtime`。也可先单独执行
+`./scripts/bootstrap_ocr_runtime.sh`。Xcode 的用户脚本沙箱保持开启，运行时由
+Xcode 的标准 Embed Frameworks 阶段复制和签名。
 
 本地默认版本号为 `DEV0.0.0`。可覆盖：
 

@@ -7,6 +7,7 @@
 #import "../../AudioRouting/AudioRouteRealtime.hpp"
 #import "../../AudioRouting/AudioRouteRealtimeKernel.h"
 #import "../../AudioRouting/AudioRouteEngine.h"
+#import "OCRRuntimeBridge.h"
 
 typedef CFTypeRef IOAVService;
 
