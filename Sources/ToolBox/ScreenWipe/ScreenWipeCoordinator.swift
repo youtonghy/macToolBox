@@ -1,17 +1,12 @@
 import AppKit
-import Carbon.HIToolbox
 import CoreGraphics
 
 /// F1 — 擦屏幕: turns every display fully black for 60s with a centered countdown.
-/// Exit by pressing ⌃⌥⌘ + Esc (a Carbon global hotkey that needs no TCC permission).
-/// The overlay fails closed if that exit path cannot be registered. Auto-dismisses at 0.
+/// Exit is routed by the app-wide shortcut registry. The overlay fails closed if that
+/// exit path is unavailable. Auto-dismisses at 0.
 final class ScreenWipeCoordinator {
 
     private let totalSeconds = 60
-
-    /// Exit combo: ⌃⌥⌘ + Esc, registered as a Carbon global hotkey (no TCC permission needed).
-    private let exitKeyCode = UInt32(kVK_Escape)
-    private let exitMods: HotKeyController.Modifiers = [.control, .option, .command]
 
     private var blackWindows: [NSWindow] = []
     private var countdownViews: [CountdownView] = []
@@ -19,30 +14,20 @@ final class ScreenWipeCoordinator {
     private var remaining = 0
     private var onDone: (() -> Void)?
 
-    private let hotKey: HotKeyController
     private var screenObserver: NSObjectProtocol?
     /// Accessory apps often fail to raise secondary-display overlays; bump to `.regular` while active.
     private var previousActivationPolicy: NSApplication.ActivationPolicy?
 
-    init(hotKey: HotKeyController = HotKeyController()) {
-        self.hotKey = hotKey
-    }
-
     @discardableResult
-    func start(onDone: @escaping () -> Void) -> Bool {
+    func start(
+        exitShortcutAvailable: Bool,
+        onDone: @escaping () -> Void
+    ) -> Bool {
         guard blackWindows.isEmpty else { return true }
-
-        // Establish the emergency exit before covering any display.
-        hotKey.onTrigger = { [weak self] in self?.finish() }
-        let hotKeyInstalled = hotKey.install()
-        let hotKeyRegistered = hotKeyInstalled
-            && hotKey.register(keyCode: exitKeyCode, modifiers: exitMods)
-        guard hotKeyRegistered else {
-            hotKey.onTrigger = nil
-            NSLog("[ToolBox] screen-wipe exit hotkey registration failed")
+        guard exitShortcutAvailable else {
+            NSLog("[ToolBox] screen-wipe exit shortcut is unavailable")
             return false
         }
-        NSLog("[ToolBox] screen-wipe exit hotkey registered (⌃⌥⌘+Esc, no permission needed)")
 
         self.onDone = onDone
         remaining = totalSeconds
@@ -69,10 +54,6 @@ final class ScreenWipeCoordinator {
 
     private func finish() {
         timer?.invalidate(); timer = nil
-        if !hotKey.unregister() {
-            NSLog("[ToolBox] screen-wipe exit hotkey removal failed")
-        }
-        hotKey.onTrigger = nil
         if let o = screenObserver { NotificationCenter.default.removeObserver(o); screenObserver = nil }
         for w in blackWindows {
             w.orderOut(nil)
