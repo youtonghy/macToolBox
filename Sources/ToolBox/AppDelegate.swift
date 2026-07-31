@@ -1,6 +1,7 @@
 import AppKit
 import SwiftUI
 import Combine
+import OSLog
 
 @MainActor
 final class TerminationShutdownCoordinator {
@@ -65,6 +66,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displayControlMenu = DisplayControlMenuModel()
     private let audioRouting = AudioRoutingService()
     private let wifiSignal = WiFiSignalModel()
+    private let shortcutRegistry = ShortcutRegistry()
+    private lazy var shortcutSettings = ShortcutSettingsModel(registry: shortcutRegistry)
+    private let screenshotWindowProvider = WindowRegionProvider()
+    private lazy var screenshotAXProvider = AXRegionProvider()
+    private let screenshotPreview = ScreenshotPreviewController()
+    private lazy var screenshotCoordinator = ScreenshotCoordinator(
+        permission: ScreenCapturePermission(),
+        captureProvider: ScreenCaptureProvider(),
+        overlay: ScreenshotSelectionOverlayManager(),
+        candidateResolver: { [weak self] point, generation in
+            guard let self else { return nil }
+            let defaults = UserDefaults.standard
+            let key = "screenshot.smartElementCandidates"
+            let smartCandidates = defaults.object(forKey: key) as? Bool ?? true
+            if smartCandidates,
+               let candidate = try? await self.screenshotAXProvider
+                   .regions(at: point, generation: generation).first {
+                return candidate
+            }
+            return try? await self.screenshotWindowProvider.region(at: point, generation: generation)
+        },
+        windowCandidateResolver: { [weak self] point, generation in
+            try? await self?.screenshotWindowProvider.region(at: point, generation: generation)
+        },
+        bringEditorForward: { [weak self] in self?.screenshotPreview.bringForward() },
+        editorHandoff: { [weak self] image in self?.screenshotPreview.show(image: image) },
+        documentHandoff: { [weak self] document, cleanup in
+            self?.screenshotPreview.show(document: document, cleanup: cleanup)
+        }
+    )
+    private let logger = Logger(subsystem: "ToolBox", category: "AppDelegate")
     private lazy var displayControlKeys = DisplayControlMediaKeyController(
         service: displayControl,
         menuModel: displayControlMenu
@@ -99,6 +131,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Belt-and-suspenders with Info.plist LSUIElement.
         NSApp.setActivationPolicy(.accessory)
+        screenshotPreview.onClose = { [weak self] in
+            self?.screenshotCoordinator.previewClosed()
+        }
+        try? ScrollCaptureCleanup.removeStaleSessions()
 
         // Menu-bar status item.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -121,6 +157,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] on in self?.applyAwake(on) }
             .store(in: &cancellables)
+
+        shortcutRegistry.onAction = { [weak self] action in
+            self?.handleShortcutAction(action)
+        }
+        do {
+            try shortcutRegistry.start(rules: shortcutSettings.rules)
+        } catch {
+            logger.error(
+                "Failed to start shortcut registry: \(String(describing: error), privacy: .public)"
+            )
+        }
 
         hardware.start()
         displayControl.start()
@@ -181,6 +228,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopNonAudioServices() {
         screenWipe.stop()
+        screenshotCoordinator.cancel()
+        screenshotPreview.close()
+        if let status = shortcutRegistry.stop() {
+            logger.error("Shortcut registry cleanup incomplete: \(status, privacy: .public)")
+        }
         awake.stop()
         focusMode.stop()
         hardware.stop()
@@ -307,7 +359,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 brightnessSchedule: brightnessSchedule,
                 audioRouting: audioRouting,
                 focusMode: focusMode,
-                wifiSignal: wifiSignal
+                wifiSignal: wifiSignal,
+                shortcutSettings: shortcutSettings
             ),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)
@@ -340,8 +393,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyWipe(_ on: Bool) {
         if on {
-            let started = screenWipe.start { [weak self] in
-                // Auto-dismissed (timeout or long-press) -> reflect in UI.
+            let started = screenWipe.start(
+                exitShortcutAvailable: shortcutRegistry.isRegistered(.screenWipeExit)
+            ) { [weak self] in
+                // Auto-dismissed (timeout or shortcut) -> reflect in UI.
                 DispatchQueue.main.async { self?.state.wipeOn = false }
             }
             if !started {
@@ -354,5 +409,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func applyAwake(_ on: Bool) {
         if on { awake.start() } else { awake.stop() }
+    }
+
+    private func handleShortcutAction(_ action: ShortcutActionID) {
+        switch action {
+        case .captureRegion:
+            Task { [weak self] in await self?.screenshotCoordinator.startRegionCapture() }
+        case .screenWipeExit:
+            state.wipeOn = false
+            screenWipe.stop()
+        }
     }
 }

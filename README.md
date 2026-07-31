@@ -9,22 +9,27 @@
 3. **聚焦模式** — 自动保持当前使用的显示器清晰，并用点击穿透的黑色遮罩降低其他显示器的干扰。优先跟随键盘焦点窗口；辅助功能未授权或窗口不可读时继续按鼠标所在显示器回退。开关和“聚焦变暗强度”会持久保存。
 4. **定时亮度** — 在设置 → 显示器中按本地时间配置覆盖全天的亮度时段；仅作用于当前所有可 DDC 写亮度的外接屏。手动滑杆 / 媒体键调节单屏，直到下一个时段边界后恢复计划。仅在 ToolBox 运行时生效，建议配合开机自启动。
 5. **擦屏幕** — 启用后所有屏幕全黑 60 秒，每个屏幕中央显示同步倒计时。
-   - 退出：长按 `⌃ ⌥ ⌘ + Esc` ≥ 1.5 秒；或等倒计时到 0 自动收起。
+   - 退出：按下 `⌃ ⌥ ⌘ + Esc`；或等倒计时到 0 自动收起。
 6. **后台干** — 防止系统睡眠（后台软件可继续运行），允许屏幕熄灭省电；接通电源时合盖也不睡。
    - 机制：`PreventUserIdleSystemSleep` 电源断言 + `caffeinate -s` 子进程（AC 电源下阻止合盖休眠）。
 7. **菜单交互** — 左键点击菜单栏图标时，窗口会贴着图标下方弹出，并完整限制在图标所在的屏幕内；点击其他区域自动收起。右键点击菜单栏图标可直接打开面板、切换常用功能、进入“设置”或退出应用。弹窗采用紧凑的圆角玻璃表面，并在屏幕高度不足时允许纵向滚动。
 8. **分应用音频** — macOS 14.2+ 使用公开 Core Audio Process Tap，为正在播放音频的应用设置 0%–300% 音量并选择输出设备；100% 为原始增益。超过 100% 可能削波失真。
-9. **设置窗口** — “首页 / 线缆 / Wi-Fi / 显示器 / 音频 / 通用”；显示器页提供聚焦模式开关和 20%–85% 变暗强度，音频页提供精确百分比滑杆、恢复 100% 和输出设备选择。
+9. **设置窗口** — “首页 / 线缆 / Wi-Fi / 显示器 / 音频 / 截图 / 快捷键 / 通用”；截图页显示屏幕录制、辅助功能与自动滚动所需的事件投递权限，并可控制智能元素候选、自动滚动、滚动步长和本地 OCR 模型；快捷键页可启停、自定义区域截图组合键并恢复默认值。
 10. **Wi-Fi 信号** — 使用公开 CoreWLAN 每 2 秒读取当前连接的 RSSI、噪声、SNR、链路速率、信道、频段、宽度、PHY 和安全模式；弹窗提供紧凑概览，设置 → Wi-Fi 提供最近 5 分钟的 RSSI / SNR 内存曲线和完整参数。
 
 ## 构建
 
 ```bash
 brew install xcodegen        # 仅需一次
-./build.sh                   # 生成工程 + Release 构建 + 启动
+./build.sh                   # 校验 OCR 运行时 + 生成工程 + Release 构建 + 启动
 ```
 
 产物：`build/Build/Products/Release/ToolBox.app`（ad-hoc 签名 + Hardened Runtime）。
+
+首次构建会下载固定版本的 ONNX Runtime macOS arm64 官方归档，并在解压前校验
+SHA-256；缓存位于未跟踪的 `.build/ocr-runtime`。也可先单独执行
+`./scripts/bootstrap_ocr_runtime.sh`。Xcode 的用户脚本沙箱保持开启，运行时由
+Xcode 的标准 Embed Frameworks 阶段复制和签名。
 
 本地默认版本号为 `DEV0.0.0`。可覆盖：
 
@@ -51,7 +56,7 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 
 ## 权限
 
-- **后台干 / 擦屏幕退出热键**：无需权限（Carbon 全局热键）。
+- **全局快捷键**：无需权限（Carbon 全局热键）。
 - **聚焦模式**：建议授予 **辅助功能 (Accessibility)**，以事件驱动方式跟随键盘焦点窗口；首次主动开启时会提示授权，设置 → 显示器会显示状态并提供系统设置入口。未授权时功能保持开启，跨屏鼠标移动会即时更新清晰显示器，另有约 2 秒健康检查兜底，不需要输入监控权限。
 - **外接显示器媒体键（亮度 / 音量）**：需要 **辅助功能 (Accessibility)** + **输入监控 (Input Monitoring)**。
   - 拦截媒体键使用可修改事件的 `CGEvent` tap（`.defaultTap`），用于吞掉系统媒体键，避免内置屏也被调节；因此通常还需要辅助功能，而不仅是输入监控。
@@ -82,11 +87,13 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 | `Sources/ToolBox/FocusMode/*` | 聚焦模式状态机、AX 焦点追踪、显示器目标解析和被动遮罩窗口 |
 | `Sources/ToolBox/AudioRouting/*` | 分应用规则、HAL 进程/设备注册表、Process Tap 路由引擎、实时 DSP 与两套 UI |
 | `Sources/ToolBox/WiFiSignal/*` | CoreWLAN 当前连接采样、五分钟内存历史、弹窗概览和设置详情 |
+| `Sources/ToolBox/Screenshot/*` | 跨屏区域选择、Shift 多区域、滚动截图、标注编辑与受限内存 PNG 导出 |
+| `Sources/ToolBox/OCR/*` | PP-OCRv6 本地模型清单、下载校验、ONNX Runtime 推理、长图切片与识别结果投影 |
 | `Sources/ToolBox/Settings/*` | 设置窗口玻璃卡片等共享 UI 原语 |
 | `Sources/ToolBox/Permissions.swift` | 输入监控 / 辅助功能检测与引导 |
-| `Sources/ToolBox/HotKeyController.swift` | Carbon 全局热键（无需权限） |
+| `Sources/ToolBox/Shortcuts/*` | 全局快捷键规则、持久化、Carbon 注册器、录制控件与设置 UI |
 | `Sources/ToolBox/DisplayControl/DisplayControlMediaKeyController.swift` | 外接显示器亮度 / 音量媒体键 CGEventTap |
-| `Sources/ToolBox/ScreenWipe/*` | 擦屏幕：每屏黑窗 + 倒计时 + 长按退出 |
+| `Sources/ToolBox/ScreenWipe/*` | 擦屏幕：每屏黑窗 + 倒计时；退出动作由统一快捷键注册器路由 |
 | `Sources/ToolBox/Awake/*` | 后台干：电源断言 + caffeinate |
 | `Resources/ToolBox.entitlements` | 仅 `hardened-runtime`（非沙盒） |
 | `Resources/Assets.xcassets/AppIcon.appiconset` | 应用图标（Finder / 通知 / 「关于」使用；菜单栏图标仍是 SF Symbol `hammer` 模板图） |
@@ -103,7 +110,9 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 - **Wi-Fi 网络身份**：当前版本不请求定位权限，也不主动扫描附近网络。RSSI、噪声、SNR、链路速率和信道来自公开 CoreWLAN 当前接口查询；SSID / BSSID 可能被系统隐藏。链路速率是当前 Wi-Fi 协商速率，不代表互联网下载速度。
 - **应用与设备是独立概念**：Zoom 只是示例，ToolBox 不创建 `ZoomDevice` 或其他应用专用设备。输出设备列表来自 Core Audio 系统枚举；只要应用的 HAL Process Object 存在，音量调整会立即写入其 route，即使应用当时静音，也会在下一帧音频到来时使用新 gain。
 - **输出设备兼容预检**：设置页会在创建 Tap 前读取输出 stream 的虚拟格式和 nominal sample rate。当前只接受 alive、单 stream、native-endian packed interleaved Float32 stereo，且源/目标采样率误差不超过 `1000 ppm` 的设备；不兼容项会禁用并显示原因，这表示明确降级，不代表设备损坏。蓝牙耳机收到 profile/流/格式变化通知时会立即暂停引用它的分应用路由；HAL 状态稳定 1 秒后重新读取完整配置，A2DP 恢复兼容时自动恢复路由。USB、HDMI、内建和有线设备不使用这条蓝牙保护路径。跨采样率转换、多声道与 non-interleaved layout 尚未启用。
-- 默认快捷键（`⌃⌥⌘+Esc`）若与系统或其它 App 冲突可在源码中修改。
+- **区域截图**：快捷键会冻结所有显示器后打开跨屏选择层；支持窗口/辅助功能元素候选、Shift 连续增减多个区域、手动拖拽、撤销与 Delete。选择层可直接确认普通截图或滚动截图；滚动截图会锁定同一窗口并提供自动/手动模式、重试、保留当前结果和取消。完成后可用矩形、椭圆、直线、箭头、画笔、高亮、文字、马赛克和序号标记编辑，并复制或保存 PNG。自动滚动需要事件投递权限；目标窗口移动、缩放、换屏或消失时会暂停，避免拼接错误。
+- **本地 OCR**：截图编辑器可使用 PP-OCRv6 Tiny / Small / Medium；默认 Tiny，首次使用前明确显示下载大小并征得同意。模型清单带签名，模型文件使用固定 revision、长度和 SHA-256 校验，识别不上传图片。识别字符范围由所选模型自带字典决定，当前版本不单独提供语言切换；PP-StructureV3 与 PaddleOCR-VL 保留在设置中，但在独立运行时签名和硬件门槛完成前不启用。
+- 默认快捷键可在设置 → 快捷键中修改；若新组合键与系统或其他 App 冲突，当前绑定保持不变。
 
 ## 验证
 
@@ -114,4 +123,4 @@ VERSION=1.2.3 APP_PATH=build/Build/Products/Release/ToolBox.app ./scripts/packag
 - **定时亮度**：设置 → 显示器 → 开启「定时亮度」，确认当前时段写入所有可控外接屏；拖动滑杆后仅该屏被覆盖直至下个边界；改时段或重启应用后按当前本地时间重新应用。
 - **聚焦模式**：连接两台显示器，开启辅助功能权限后在不同屏幕的应用窗口间切换键盘焦点，确认非焦点屏变暗且仍可点击；撤销权限后跨屏移动鼠标，确认功能保持开启并即时切换清晰屏。还需覆盖上下排列、全屏/空间切换、热插拔、睡眠唤醒、重启恢复，以及与擦屏幕同时开启。
 - **分应用音频**：让 Zoom 或播放器持续发声，在弹窗中调整到 300% 并在设置 → 音频选择另一输出设备；确认声音切换。使用蓝牙耳机时启动和停止麦克风，确认 HFP 切换期间分应用路由暂停、应用与 ToolBox 界面保持响应，恢复 A2DP 后路由自动恢复。退出 ToolBox、拔出目标设备及拒绝权限后，确认应用原始输出立即恢复。
-- **擦屏幕**：开关 ON→所有屏幕全黑 + 每屏同步倒计时；长按 `⌃⌥⌘+Esc` 收起；到 0 自动收起。
+- **擦屏幕**：开关 ON→所有屏幕全黑 + 每屏同步倒计时；按下 `⌃⌥⌘+Esc` 收起；到 0 自动收起。

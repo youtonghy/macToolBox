@@ -6,6 +6,11 @@ options:
   createIntermediateGroups: true
   groupSortPosition: top
 
+packages:
+  Yams:
+    url: https://github.com/jpsim/Yams.git
+    exactVersion: 5.0.6
+
 settings:
   base:
     CODE_SIGN_IDENTITY: "-"
@@ -23,7 +28,13 @@ targets:
     sources:
       - Sources/ToolBox
       - Resources/Assets.xcassets
+      - path: Resources/OCRModels
+        buildPhase: resources
     dependencies:
+      - package: Yams
+      - framework: .build/ocr-runtime/lib/libonnxruntime.1.24.3.dylib
+        embed: true
+        codeSign: true
       - sdk: CoreDisplay.framework
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
@@ -51,10 +62,20 @@ targets:
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
         SWIFT_OBJC_BRIDGING_HEADER: Sources/ToolBox/DisplayControl/Darwin/DisplayControlBridgingHeader.h
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        HEADER_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/.build/ocr-runtime/include"
+          - "$(PROJECT_DIR)/Sources/ToolBox/OCR/Runtime"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/.build/ocr-runtime/lib"
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
         FRAMEWORK_SEARCH_PATHS:
           - "$(inherited)"
           - /System/Library/Frameworks
-
   ToolBoxTests:
     type: bundle.unit-test
     platform: macOS

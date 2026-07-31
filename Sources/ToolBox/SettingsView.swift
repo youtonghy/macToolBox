@@ -7,6 +7,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case wifi
     case display
     case audio
+    case screenshot
+    case shortcuts
     case general
 
     var id: String { rawValue }
@@ -23,6 +25,10 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "显示器"
         case .audio:
             return "音频"
+        case .screenshot:
+            return "截图"
+        case .shortcuts:
+            return "快捷键"
         case .general:
             return "通用"
         }
@@ -40,6 +46,10 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "display"
         case .audio:
             return "speaker.wave.2"
+        case .screenshot:
+            return "camera.viewfinder"
+        case .shortcuts:
+            return "keyboard"
         case .general:
             return "switch.2"
         }
@@ -57,6 +67,10 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemTeal)
         case .audio:
             return Color(nsColor: .systemGreen)
+        case .screenshot:
+            return Color(nsColor: .systemOrange)
+        case .shortcuts:
+            return Color(nsColor: .systemBlue)
         case .general:
             return Color(nsColor: .systemOrange)
         }
@@ -71,6 +85,7 @@ struct SettingsView: View {
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
+    @ObservedObject var shortcutSettings: ShortcutSettingsModel
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
@@ -132,6 +147,10 @@ struct SettingsView: View {
                     )
                 case .audio:
                     AudioRoutingSettingsView(service: audioRouting)
+                case .screenshot:
+                    ScreenshotSettingsView()
+                case .shortcuts:
+                    ShortcutSettingsView(model: shortcutSettings)
                 case .general:
                     GeneralSettingsView(launchAtLogin: launchAtLogin, mediaKeys: mediaKeys)
                 }

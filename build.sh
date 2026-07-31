@@ -10,6 +10,9 @@ VERSION="${VERSION:-DEV0.0.0}"
 BUILD_NUMBER="${BUILD_NUMBER:-0}"
 OPEN="${OPEN:-1}"
 
+echo "==> bootstrap verified ONNX Runtime"
+./scripts/bootstrap_ocr_runtime.sh
+
 echo "==> xcodegen generate"
 xcodegen generate
 

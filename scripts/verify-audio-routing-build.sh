@@ -6,6 +6,9 @@ cd "$(dirname "$0")/.."
 VERIFY_ROOT="${VERIFY_ROOT:-/tmp/mactoolbox-audio-verification}"
 TEST_DATA="$VERIFY_ROOT/tests"
 
+echo "==> Bootstrap verified ONNX Runtime"
+./scripts/bootstrap_ocr_runtime.sh
+
 echo "==> Generate Xcode project"
 xcodegen generate
 
