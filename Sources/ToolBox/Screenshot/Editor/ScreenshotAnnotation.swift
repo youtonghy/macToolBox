@@ -58,6 +58,7 @@ struct ScreenshotAnnotation: Equatable, Identifiable, Sendable {
 
 enum AnnotationError: Error, Equatable {
     case unknownAnnotation
+    case duplicateAnnotation
     case invalidGeometry
     case invalidStyle
     case invalidText

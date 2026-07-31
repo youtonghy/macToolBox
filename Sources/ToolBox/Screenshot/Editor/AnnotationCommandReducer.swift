@@ -18,6 +18,9 @@ enum AnnotationCommandReducer {
             switch command {
             case let .add(item):
                 try validate(item, in: state.document)
+                guard !state.document.annotations.contains(where: { $0.id == item.id }) else {
+                    throw AnnotationError.duplicateAnnotation
+                }
                 state.document.annotations.append(item)
             case let .update(item):
                 try validate(item, in: state.document)
@@ -50,7 +53,11 @@ enum AnnotationCommandReducer {
 
     private static func validate(_ item: ScreenshotAnnotation, in document: ScreenshotDocument) throws {
         try validate(item.style)
-        guard item.transform.isFinite, abs(item.transform.determinant) > .ulpOfOne else {
+        let determinant = item.transform.determinant
+        guard item.transform.isFinite,
+              determinant.isFinite,
+              abs(determinant) > .ulpOfOne
+        else {
             throw AnnotationError.invalidGeometry
         }
 
@@ -58,13 +65,30 @@ enum AnnotationCommandReducer {
         switch item.payload {
         case let .rectangle(rect), let .ellipse(rect):
             try validate(rect: rect, in: bounds)
+            try validate(rect: rect.applying(item.transform), in: bounds)
         case let .line(start, end):
             try validate(points: [start, end], in: bounds, minimumCount: 2)
+            try validate(
+                points: [start, end].map { $0.applying(item.transform) },
+                in: bounds,
+                minimumCount: 2
+            )
         case let .arrow(start, end, headLength):
-            guard headLength.isFinite, headLength > 0 else { throw AnnotationError.invalidGeometry }
+            guard headLength.isFinite,
+                  headLength > 0,
+                  hypot(end.x - start.x, end.y - start.y) > .ulpOfOne
+            else {
+                throw AnnotationError.invalidGeometry
+            }
             try validate(points: [start, end], in: bounds, minimumCount: 2)
+            try validate(
+                points: [start, end].map { $0.applying(item.transform) },
+                in: bounds,
+                minimumCount: 2
+            )
         case let .stroke(points, _):
             try validate(points: points, in: bounds, minimumCount: 1)
+            try validate(points: points.map { $0.applying(item.transform) }, in: bounds, minimumCount: 1)
         case let .text(text):
             guard !text.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   !text.fontName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -74,12 +98,15 @@ enum AnnotationCommandReducer {
                 throw AnnotationError.invalidText
             }
             try validate(points: [text.origin], in: bounds, minimumCount: 1)
+            try validate(points: [text.origin.applying(item.transform)], in: bounds, minimumCount: 1)
         case let .mosaic(rect, blockSize):
             guard blockSize > 0 else { throw AnnotationError.invalidGeometry }
             try validate(rect: rect, in: bounds)
+            try validate(rect: rect.applying(item.transform), in: bounds)
         case let .numberedMarker(center, number):
             guard number > 0 else { throw AnnotationError.invalidGeometry }
             try validate(points: [center], in: bounds, minimumCount: 1)
+            try validate(points: [center.applying(item.transform)], in: bounds, minimumCount: 1)
         }
     }
 

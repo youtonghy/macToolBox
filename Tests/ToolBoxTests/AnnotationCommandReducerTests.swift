@@ -55,6 +55,10 @@ final class AnnotationCommandReducerTests: XCTestCase {
                 payload: .arrow(start: .zero, end: CGPoint(x: 20, y: 20), headLength: 0),
                 style: .default
             ),
+            ScreenshotAnnotation(
+                payload: .arrow(start: CGPoint(x: 20, y: 20), end: CGPoint(x: 20, y: 20), headLength: 10),
+                style: .default
+            ),
             ScreenshotAnnotation(payload: .stroke(points: [], isHighlighter: false), style: .default),
             ScreenshotAnnotation(
                 payload: .mosaic(rect: CGRect(x: 0, y: 0, width: 20, height: 20), blockSize: 0),
@@ -88,6 +92,36 @@ final class AnnotationCommandReducerTests: XCTestCase {
         XCTAssertThrowsError(try AnnotationCommandReducer.reduce(state: &state, command: .add(invalidTransform))) {
             XCTAssertEqual($0 as? AnnotationError, .invalidGeometry)
         }
+
+        var overflowingTransform = rectangle(id: UUID(), rect: CGRect(x: 1, y: 1, width: 10, height: 10))
+        overflowingTransform.transform = CGAffineTransform(
+            a: .greatestFiniteMagnitude,
+            b: 0,
+            c: 0,
+            d: .greatestFiniteMagnitude,
+            tx: 0,
+            ty: 0
+        )
+        XCTAssertThrowsError(try AnnotationCommandReducer.reduce(state: &state, command: .add(overflowingTransform))) {
+            XCTAssertEqual($0 as? AnnotationError, .invalidGeometry)
+        }
+
+        var translatedOutOfBounds = rectangle(id: UUID(), rect: CGRect(x: 0, y: 0, width: 10, height: 10))
+        translatedOutOfBounds.transform = CGAffineTransform(translationX: 500, y: 0)
+        XCTAssertThrowsError(try AnnotationCommandReducer.reduce(state: &state, command: .add(translatedOutOfBounds))) {
+            XCTAssertEqual($0 as? AnnotationError, .invalidGeometry)
+        }
+    }
+
+    func testRejectsDuplicateAnnotationID() throws {
+        let annotation = rectangle(id: UUID(), rect: CGRect(x: 0, y: 0, width: 10, height: 10))
+        var state = AnnotationEditorState(document: ScreenshotDocument(baseImage: try makeSource()))
+        try AnnotationCommandReducer.reduce(state: &state, command: .add(annotation))
+
+        XCTAssertThrowsError(try AnnotationCommandReducer.reduce(state: &state, command: .add(annotation))) {
+            XCTAssertEqual($0 as? AnnotationError, .duplicateAnnotation)
+        }
+        XCTAssertEqual(state.document.annotations, [annotation])
     }
 
     func testInvalidEditDoesNotCreateHistoryOrInvalidateRedo() throws {
