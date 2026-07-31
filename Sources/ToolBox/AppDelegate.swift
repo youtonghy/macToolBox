@@ -196,7 +196,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopNonAudioServices() {
         screenWipe.stop()
-        shortcutRegistry.stop()
+        if let status = shortcutRegistry.stop() {
+            logger.error("Shortcut registry cleanup incomplete: \(status, privacy: .public)")
+        }
         awake.stop()
         focusMode.stop()
         hardware.stop()

@@ -179,8 +179,9 @@ final class ShortcutRegistry {
         }
     }
 
-    func stop() {
-        _ = cleanup()
+    @discardableResult
+    func stop() -> OSStatus? {
+        cleanup()
     }
 
     private func cleanup() -> OSStatus? {
@@ -388,7 +389,10 @@ final class ShortcutRegistry {
     }
 
     func isRegistered(_ action: ShortcutActionID) -> Bool {
-        registrations[action] != nil
+        guard isStarted, let registration = registrations[action] else {
+            return false
+        }
+        return idToAction[registration.carbonID] == action
     }
 
     private func validate(rules: [ShortcutRule]) throws {
@@ -460,6 +464,9 @@ final class ShortcutRegistry {
     }
 
     private func handle(event: EventRef?) -> OSStatus {
+        guard isStarted else {
+            return OSStatus(eventNotHandledErr)
+        }
         guard let event else {
             return OSStatus(eventNotHandledErr)
         }

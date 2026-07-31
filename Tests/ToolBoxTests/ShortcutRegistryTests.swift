@@ -260,6 +260,44 @@ final class ShortcutRegistryTests: XCTestCase {
         }
     }
 
+    func testApplyRuleSetRestoreFailureDoesNotDispatchPartiallyRestoredAction() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        var actions: [ShortcutActionID] = []
+        registry.onAction = { actions.append($0) }
+        try registry.start(rules: ShortcutRule.defaults)
+        let proposed = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutBinding(keyCode: 1, modifiers: [.command]),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutBinding(keyCode: 2, modifiers: [.command]),
+                isEnabled: true
+            ),
+        ]
+        recorder.registerStatusQueue = [
+            OSStatus(eventHotKeyExistsErr),
+            noErr,
+            OSStatus(eventHotKeyExistsErr),
+        ]
+
+        XCTAssertThrowsError(try registry.apply(rules: proposed)) {
+            XCTAssertEqual(
+                $0 as? ShortcutRegistryError,
+                .rollbackFailed(OSStatus(eventHotKeyExistsErr))
+            )
+        }
+
+        XCTAssertEqual(
+            recorder.fire(id: ShortcutActionID.captureRegion.carbonID),
+            OSStatus(eventNotHandledErr)
+        )
+        XCTAssertTrue(actions.isEmpty)
+    }
+
     func testSuccessfulRebindRoutesTemporaryIDToOriginalAction() throws {
         let recorder = ShortcutCarbonSystemRecorder()
         let registry = ShortcutRegistry(system: recorder.system)
@@ -284,8 +322,8 @@ final class ShortcutRegistryTests: XCTestCase {
         let registry = ShortcutRegistry(system: recorder.system)
         try registry.start(rules: ShortcutRule.defaults)
 
-        registry.stop()
-        registry.stop()
+        XCTAssertNil(registry.stop())
+        XCTAssertNil(registry.stop())
 
         XCTAssertEqual(recorder.unregisterCalls.count, 2)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
@@ -312,15 +350,16 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
         recorder.nextRemoveHandlerStatus = OSStatus(eventInternalErr)
 
-        registry.stop()
+        XCTAssertEqual(registry.stop(), OSStatus(eventInternalErr))
         XCTAssertThrowsError(try registry.start(rules: ShortcutRule.defaults)) {
             XCTAssertEqual($0 as? ShortcutRegistryError, .cleanupRequired)
         }
+        XCTAssertFalse(registry.isRegistered(.captureRegion))
 
         XCTAssertEqual(recorder.installHandlerCalls, 1)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
 
-        registry.stop()
+        XCTAssertNil(registry.stop())
         try registry.start(rules: ShortcutRule.defaults)
 
         XCTAssertEqual(recorder.removeHandlerCalls, 2)
@@ -370,7 +409,7 @@ final class ShortcutRegistryTests: XCTestCase {
                 .rollbackFailed(OSStatus(eventInternalErr))
             )
         }
-        XCTAssertTrue(registry.isRegistered(.captureRegion))
+        XCTAssertFalse(registry.isRegistered(.captureRegion))
         XCTAssertThrowsError(try registry.start(rules: ShortcutRule.defaults)) {
             XCTAssertEqual($0 as? ShortcutRegistryError, .cleanupRequired)
         }
