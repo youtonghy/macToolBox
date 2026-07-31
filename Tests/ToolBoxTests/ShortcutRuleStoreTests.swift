@@ -136,6 +136,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
         }
     }
 
+    func testSaveRejectsMissingCaptureRule() {
+        let rules = store.load().rules.filter { $0.id != .captureRegion }
+
+        XCTAssertThrowsError(try store.save(rules)) {
+            XCTAssertEqual($0 as? ShortcutRuleStoreError, .incompleteActionSet)
+        }
+    }
+
     func testUnknownSchemaReturnsDefaultsWithoutOverwriting() throws {
         let data = try JSONSerialization.data(withJSONObject: [
             "schemaVersion": 99,
@@ -148,6 +156,23 @@ final class ShortcutRuleStoreTests: XCTestCase {
             ShortcutRuleLoadResult(
                 rules: approvedDefaults,
                 issue: .unknownSchema(99)
+            )
+        )
+        XCTAssertEqual(defaults.data(forKey: suiteName), data)
+    }
+
+    func testUnknownSchemaIsDetectedBeforeDecodingVersionSpecificFields() throws {
+        let data = try JSONSerialization.data(withJSONObject: [
+            "schemaVersion": 2,
+            "futureRules": ["format": "different"],
+        ])
+        defaults.set(data, forKey: suiteName)
+
+        XCTAssertEqual(
+            store.load(),
+            ShortcutRuleLoadResult(
+                rules: approvedDefaults,
+                issue: .unknownSchema(2)
             )
         )
         XCTAssertEqual(defaults.data(forKey: suiteName), data)

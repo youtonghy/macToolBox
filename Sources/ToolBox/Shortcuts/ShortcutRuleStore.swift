@@ -29,14 +29,15 @@ struct ShortcutRuleStore {
         }
 
         do {
-            let document = try decoder.decode(ShortcutRuleDocumentV1.self, from: data)
-            guard document.schemaVersion == 1 else {
-                logger.error("Unknown shortcut rule schema \(document.schemaVersion, privacy: .public)")
+            let envelope = try decoder.decode(ShortcutRuleVersionEnvelope.self, from: data)
+            guard envelope.schemaVersion == 1 else {
+                logger.error("Unknown shortcut rule schema \(envelope.schemaVersion, privacy: .public)")
                 return ShortcutRuleLoadResult(
                     rules: ShortcutRule.defaults,
-                    issue: .unknownSchema(document.schemaVersion)
+                    issue: .unknownSchema(envelope.schemaVersion)
                 )
             }
+            let document = try decoder.decode(ShortcutRuleDocumentV1.self, from: data)
             guard Self.validationError(for: document.rules) == nil else {
                 logger.error("Shortcut rules do not satisfy the registry invariants")
                 return ShortcutRuleLoadResult(rules: ShortcutRule.defaults, issue: .corruptData)
@@ -79,9 +80,16 @@ struct ShortcutRuleStore {
         guard protectedRule.isEnabled else {
             return .protectedRuleDisabled
         }
+        guard actionIDs == Set(ShortcutActionID.allCases) else {
+            return .incompleteActionSet
+        }
 
         return nil
     }
+}
+
+private struct ShortcutRuleVersionEnvelope: Decodable {
+    let schemaVersion: Int
 }
 
 private struct ShortcutRuleDocumentV1: Codable {
@@ -100,4 +108,5 @@ enum ShortcutRuleStoreError: Error, Equatable {
     case duplicateBinding
     case protectedRuleMissing
     case protectedRuleDisabled
+    case incompleteActionSet
 }

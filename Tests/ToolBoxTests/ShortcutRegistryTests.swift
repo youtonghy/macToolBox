@@ -125,6 +125,141 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
     }
 
+    func testStartRejectsIncompleteActionSet() {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        let rules = ShortcutRule.defaults.filter { $0.id != .captureRegion }
+
+        XCTAssertThrowsError(try registry.start(rules: rules)) {
+            XCTAssertEqual($0 as? ShortcutRegistryError, .incompleteActionSet)
+        }
+        XCTAssertEqual(recorder.installHandlerCalls, 0)
+    }
+
+    func testSingleRuleApplyRejectsBindingOwnedByAnotherAction() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        try registry.start(rules: ShortcutRule.defaults)
+        let capture = ShortcutRule(
+            id: .captureRegion,
+            binding: ShortcutRule.defaults[1].binding,
+            isEnabled: true
+        )
+
+        XCTAssertThrowsError(try registry.apply(rule: capture)) {
+            XCTAssertEqual($0 as? ShortcutRegistryError, .duplicateBinding)
+        }
+        XCTAssertEqual(recorder.registerCalls.count, 2)
+    }
+
+    func testApplyRuleSetCanSwapBindingsAndKeepsStableIDs() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        try registry.start(rules: ShortcutRule.defaults)
+        let swapped = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutRule.defaults[1].binding,
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutRule.defaults[0].binding,
+                isEnabled: true
+            ),
+        ]
+
+        try registry.apply(rules: swapped)
+
+        XCTAssertEqual(
+            recorder.activeBinding(id: ShortcutActionID.captureRegion.carbonID),
+            swapped[0].binding
+        )
+        XCTAssertEqual(
+            recorder.activeBinding(id: ShortcutActionID.screenWipeExit.carbonID),
+            swapped[1].binding
+        )
+        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+    }
+
+    func testApplyRuleSetRegistrationFailureRestoresPreviousRules() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        try registry.start(rules: ShortcutRule.defaults)
+        let proposed = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutBinding(keyCode: 1, modifiers: [.command]),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutBinding(keyCode: 2, modifiers: [.command]),
+                isEnabled: true
+            ),
+        ]
+        recorder.registerStatusQueue = [noErr, OSStatus(eventHotKeyExistsErr)]
+
+        XCTAssertThrowsError(try registry.apply(rules: proposed)) {
+            XCTAssertEqual(
+                $0 as? ShortcutRegistryError,
+                .registrationFailed(OSStatus(eventHotKeyExistsErr))
+            )
+        }
+
+        XCTAssertEqual(
+            recorder.activeBinding(id: ShortcutActionID.captureRegion.carbonID),
+            ShortcutRule.defaults[0].binding
+        )
+        XCTAssertEqual(
+            recorder.activeBinding(id: ShortcutActionID.screenWipeExit.carbonID),
+            ShortcutRule.defaults[1].binding
+        )
+        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+    }
+
+    func testApplyRuleSetCleanupFailureDoesNotDispatchProposedAction() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        var actions: [ShortcutActionID] = []
+        registry.onAction = { actions.append($0) }
+        try registry.start(rules: ShortcutRule.defaults)
+        let proposed = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutBinding(keyCode: 1, modifiers: [.command]),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutBinding(keyCode: 2, modifiers: [.command]),
+                isEnabled: true
+            ),
+        ]
+        recorder.registerStatusQueue = [noErr, OSStatus(eventHotKeyExistsErr)]
+        recorder.unregisterStatusQueue = [
+            noErr,
+            noErr,
+            OSStatus(eventInternalErr),
+        ]
+
+        XCTAssertThrowsError(try registry.apply(rules: proposed)) {
+            XCTAssertEqual(
+                $0 as? ShortcutRegistryError,
+                .rollbackFailed(OSStatus(eventInternalErr))
+            )
+        }
+
+        XCTAssertEqual(
+            recorder.fire(id: ShortcutActionID.captureRegion.carbonID),
+            OSStatus(eventNotHandledErr)
+        )
+        XCTAssertTrue(actions.isEmpty)
+        XCTAssertThrowsError(try registry.apply(rules: ShortcutRule.defaults)) {
+            XCTAssertEqual($0 as? ShortcutRegistryError, .cleanupRequired)
+        }
+    }
+
     func testSuccessfulRebindRoutesTemporaryIDToOriginalAction() throws {
         let recorder = ShortcutCarbonSystemRecorder()
         let registry = ShortcutRegistry(system: recorder.system)
@@ -375,13 +510,18 @@ private final class ShortcutCarbonSystemRecorder {
             nextRegisterStatus = noErr
             guard status == noErr else { return status }
 
+            let binding = ShortcutBinding(
+                keyCode: keyCode,
+                modifiers: ShortcutModifiers(rawValue: modifiers)
+            )
+            guard !active.values.contains(where: { $0.binding == binding }) else {
+                return OSStatus(eventHotKeyExistsErr)
+            }
+
             let ref = EventHotKeyRef(bitPattern: nextRefValue)!
             nextRefValue += 1
             let call = RegisterCall(
-                binding: ShortcutBinding(
-                    keyCode: keyCode,
-                    modifiers: ShortcutModifiers(rawValue: modifiers)
-                ),
+                binding: binding,
                 signature: hotKeyID.signature,
                 id: hotKeyID.id,
                 ref: ref

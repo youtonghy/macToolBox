@@ -2,10 +2,12 @@ import Carbon.HIToolbox
 import OSLog
 
 final class ShortcutRegistryCallbackContext {
-    var onEvent: ((EventRef?) -> OSStatus)?
+    var onEvent: (@MainActor (EventRef?) -> OSStatus)?
 
     func handle(event: EventRef?) -> OSStatus {
-        onEvent?(event) ?? OSStatus(eventNotHandledErr)
+        MainActor.assumeIsolated {
+            onEvent?(event) ?? OSStatus(eventNotHandledErr)
+        }
     }
 }
 
@@ -87,6 +89,7 @@ enum ShortcutRegistryError: Error, Equatable {
     case duplicateBinding
     case protectedRuleMissing
     case protectedRuleDisabled
+    case incompleteActionSet
     case handlerInstallFailed(OSStatus)
     case registrationFailed(OSStatus)
     case unregistrationFailed(OSStatus)
@@ -119,6 +122,7 @@ final class ShortcutRegistry {
     private var retainedCallbackContext: Unmanaged<ShortcutRegistryCallbackContext>?
     private var handlerRef: EventHandlerRef?
     private var isStarted = false
+    private var configuredRules: [ShortcutActionID: ShortcutRule] = [:]
     private var registrations: [ShortcutActionID: Registration] = [:]
     private var rollbackRegistrations: [Registration] = []
     private var idToAction: [UInt32: ShortcutActionID] = [:]
@@ -165,6 +169,7 @@ final class ShortcutRegistry {
                 registrations[rule.id] = registration
                 idToAction[registration.carbonID] = rule.id
             }
+            configuredRules = Self.ruleMap(rules)
             isStarted = true
         } catch {
             if let cleanupStatus = cleanup() {
@@ -188,6 +193,7 @@ final class ShortcutRegistry {
                 registrations.removeValue(forKey: action)
                 idToAction.removeValue(forKey: registration.carbonID)
             } else {
+                idToAction.removeValue(forKey: registration.carbonID)
                 firstFailure = firstFailure ?? status
                 logger.error("Failed to unregister shortcut \(action.rawValue, privacy: .public)")
             }
@@ -213,24 +219,49 @@ final class ShortcutRegistry {
 
         callbackContext.onEvent = nil
         self.handlerRef = nil
+        configuredRules = [:]
         retainedCallbackContext?.release()
         retainedCallbackContext = nil
         return nil
     }
 
     func apply(rule: ShortcutRule) throws {
-        guard isStarted else {
-            throw handlerRef == nil
-                ? ShortcutRegistryError.notStarted
-                : ShortcutRegistryError.cleanupRequired
+        try requireStarted()
+        guard configuredRules[rule.id] != nil else {
+            throw ShortcutRegistryError.incompleteActionSet
         }
-        if rule.binding.modifiers.isEmpty {
-            throw ShortcutRegistryError.emptyModifiers
+        var proposed = ShortcutActionID.allCases.compactMap { configuredRules[$0] }
+        guard let index = proposed.firstIndex(where: { $0.id == rule.id }) else {
+            throw ShortcutRegistryError.incompleteActionSet
         }
-        if rule.id == .screenWipeExit, !rule.isEnabled {
-            throw ShortcutRegistryError.protectedRuleDisabled
+        proposed[index] = rule
+        try validate(rules: proposed)
+        try applyValidated(rule: rule)
+        configuredRules[rule.id] = rule
+    }
+
+    func apply(rules: [ShortcutRule]) throws {
+        try requireStarted()
+        try validate(rules: rules)
+
+        let proposedRules = Self.ruleMap(rules)
+        guard proposedRules != configuredRules else { return }
+        let changedActions = ShortcutActionID.allCases.filter {
+            proposedRules[$0] != configuredRules[$0]
         }
 
+        if changedActions.count == 1,
+           let action = changedActions.first,
+           let rule = proposedRules[action] {
+            try applyValidated(rule: rule)
+            configuredRules = proposedRules
+            return
+        }
+
+        try replaceAllRegistrations(with: rules, proposedRules: proposedRules)
+    }
+
+    private func applyValidated(rule: ShortcutRule) throws {
         guard rule.isEnabled else {
             try unregister(action: rule.id)
             return
@@ -261,6 +292,7 @@ final class ShortcutRegistry {
             let rollbackStatus = system.unregisterHotKey(replacement.ref)
             if rollbackStatus != noErr {
                 rollbackRegistrations.append(replacement)
+                isStarted = false
                 throw ShortcutRegistryError.rollbackFailed(rollbackStatus)
             }
             throw ShortcutRegistryError.unregistrationFailed(unregisterStatus)
@@ -269,6 +301,90 @@ final class ShortcutRegistry {
         idToAction.removeValue(forKey: current.carbonID)
         registrations[rule.id] = replacement
         idToAction[replacement.carbonID] = rule.id
+    }
+
+    private func replaceAllRegistrations(
+        with rules: [ShortcutRule],
+        proposedRules: [ShortcutActionID: ShortcutRule]
+    ) throws {
+        let previousRules = configuredRules
+        let previousRegistrations = ShortcutActionID.allCases.compactMap { registrations[$0] }
+        var removedRegistrations: [Registration] = []
+
+        for registration in previousRegistrations {
+            let status = system.unregisterHotKey(registration.ref)
+            guard status == noErr else {
+                if let rollbackStatus = restore(registrations: removedRegistrations) {
+                    isStarted = false
+                    throw ShortcutRegistryError.rollbackFailed(rollbackStatus)
+                }
+                throw ShortcutRegistryError.unregistrationFailed(status)
+            }
+            registrations.removeValue(forKey: registration.action)
+            idToAction.removeValue(forKey: registration.carbonID)
+            removedRegistrations.append(registration)
+        }
+
+        do {
+            for rule in rules where rule.isEnabled {
+                let registration = try register(
+                    action: rule.id,
+                    binding: rule.binding,
+                    carbonID: rule.id.carbonID
+                )
+                registrations[rule.id] = registration
+                idToAction[registration.carbonID] = rule.id
+            }
+            configuredRules = proposedRules
+        } catch {
+            if let cleanupStatus = unregisterCurrentRegistrations() {
+                configuredRules = previousRules
+                isStarted = false
+                throw ShortcutRegistryError.rollbackFailed(cleanupStatus)
+            }
+            if let rollbackStatus = restore(registrations: previousRegistrations) {
+                configuredRules = previousRules
+                isStarted = false
+                throw ShortcutRegistryError.rollbackFailed(rollbackStatus)
+            }
+            configuredRules = previousRules
+            throw error
+        }
+    }
+
+    private func restore(registrations snapshots: [Registration]) -> OSStatus? {
+        for snapshot in snapshots {
+            do {
+                let registration = try register(
+                    action: snapshot.action,
+                    binding: snapshot.binding,
+                    carbonID: snapshot.carbonID
+                )
+                registrations[snapshot.action] = registration
+                idToAction[registration.carbonID] = registration.action
+            } catch ShortcutRegistryError.registrationFailed(let status) {
+                return status
+            } catch {
+                return OSStatus(eventInternalErr)
+            }
+        }
+        return nil
+    }
+
+    private func unregisterCurrentRegistrations() -> OSStatus? {
+        var firstFailure: OSStatus?
+        for action in ShortcutActionID.allCases {
+            guard let registration = registrations[action] else { continue }
+            let status = system.unregisterHotKey(registration.ref)
+            if status == noErr {
+                registrations.removeValue(forKey: action)
+                idToAction.removeValue(forKey: registration.carbonID)
+            } else {
+                idToAction.removeValue(forKey: registration.carbonID)
+                firstFailure = firstFailure ?? status
+            }
+        }
+        return firstFailure
     }
 
     func isRegistered(_ action: ShortcutActionID) -> Bool {
@@ -288,6 +404,16 @@ final class ShortcutRegistry {
             throw ShortcutRegistryError.protectedRuleMissing
         case .protectedRuleDisabled:
             throw ShortcutRegistryError.protectedRuleDisabled
+        case .incompleteActionSet:
+            throw ShortcutRegistryError.incompleteActionSet
+        }
+    }
+
+    private func requireStarted() throws {
+        guard isStarted else {
+            throw handlerRef == nil
+                ? ShortcutRegistryError.notStarted
+                : ShortcutRegistryError.cleanupRequired
         }
     }
 
@@ -348,6 +474,12 @@ final class ShortcutRegistry {
     }
 
     private static let signature: OSType = 0x5442_5343 // 'TBSC'
+
+    private static func ruleMap(
+        _ rules: [ShortcutRule]
+    ) -> [ShortcutActionID: ShortcutRule] {
+        Dictionary(uniqueKeysWithValues: rules.map { ($0.id, $0) })
+    }
 
     deinit {
         onAction = nil

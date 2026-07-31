@@ -23,7 +23,7 @@ final class ShortcutSettingsModelTests: XCTestCase {
         harness.model.setBinding(wipeBinding, for: .captureRegion)
 
         XCTAssertEqual(harness.model.issue, .duplicateBinding)
-        XCTAssertTrue(harness.appliedRules.isEmpty)
+        XCTAssertTrue(harness.appliedRuleSets.isEmpty)
         XCTAssertTrue(harness.savedRuleSets.isEmpty)
         XCTAssertEqual(harness.model.rules, ShortcutRule.defaults)
     }
@@ -48,7 +48,14 @@ final class ShortcutSettingsModelTests: XCTestCase {
 
         harness.model.setBinding(replacement, for: .captureRegion)
 
-        XCTAssertEqual(harness.appliedRules.count, 1)
+        XCTAssertEqual(harness.appliedRuleSets, [[
+            ShortcutRule(
+                id: .captureRegion,
+                binding: replacement,
+                isEnabled: true
+            ),
+            ShortcutRule.defaults[1],
+        ]])
         XCTAssertEqual(harness.savedRuleSets.count, 1)
         XCTAssertEqual(harness.model.rule(for: .captureRegion)?.binding, replacement)
         XCTAssertNil(harness.model.issue)
@@ -63,9 +70,9 @@ final class ShortcutSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(harness.model.issue, .persistenceFailure)
         XCTAssertEqual(harness.model.rules, ShortcutRule.defaults)
-        XCTAssertEqual(harness.appliedRules.count, 2)
-        XCTAssertEqual(harness.appliedRules[0].binding, replacement)
-        XCTAssertEqual(harness.appliedRules[1], ShortcutRule.defaults[0])
+        XCTAssertEqual(harness.appliedRuleSets.count, 2)
+        XCTAssertEqual(harness.appliedRuleSets[0][0].binding, replacement)
+        XCTAssertEqual(harness.appliedRuleSets[1], ShortcutRule.defaults)
     }
 
     func testCaptureCanBeDisabled() {
@@ -74,7 +81,7 @@ final class ShortcutSettingsModelTests: XCTestCase {
         harness.model.setEnabled(false, for: .captureRegion)
 
         XCTAssertEqual(harness.model.rule(for: .captureRegion)?.isEnabled, false)
-        XCTAssertEqual(harness.appliedRules.last?.isEnabled, false)
+        XCTAssertEqual(harness.appliedRuleSets.last?.first?.isEnabled, false)
         XCTAssertEqual(harness.savedRuleSets.count, 1)
     }
 
@@ -85,7 +92,7 @@ final class ShortcutSettingsModelTests: XCTestCase {
 
         XCTAssertEqual(harness.model.issue, .protectedShortcut)
         XCTAssertEqual(harness.model.rule(for: .screenWipeExit)?.isEnabled, true)
-        XCTAssertTrue(harness.appliedRules.isEmpty)
+        XCTAssertTrue(harness.appliedRuleSets.isEmpty)
         XCTAssertTrue(harness.savedRuleSets.isEmpty)
     }
 
@@ -103,7 +110,7 @@ final class ShortcutSettingsModelTests: XCTestCase {
         harness.model.restoreDefaults()
 
         XCTAssertEqual(harness.model.rules, ShortcutRule.defaults)
-        XCTAssertEqual(harness.appliedRules, [ShortcutRule.defaults[0]])
+        XCTAssertEqual(harness.appliedRuleSets, [ShortcutRule.defaults])
         XCTAssertEqual(harness.savedRuleSets, [ShortcutRule.defaults])
     }
 
@@ -121,14 +128,70 @@ final class ShortcutSettingsModelTests: XCTestCase {
         harness.model.restoreDefault(for: .captureRegion)
 
         XCTAssertEqual(harness.model.rules, ShortcutRule.defaults)
-        XCTAssertEqual(harness.appliedRules, [ShortcutRule.defaults[0]])
+        XCTAssertEqual(harness.appliedRuleSets, [ShortcutRule.defaults])
         XCTAssertEqual(harness.savedRuleSets, [ShortcutRule.defaults])
+    }
+
+    func testRestoreDefaultsRepairsCorruptPersistedConfiguration() {
+        let harness = ShortcutSettingsHarness(
+            loadResult: ShortcutRuleLoadResult(
+                rules: ShortcutRule.defaults,
+                issue: .corruptData
+            )
+        )
+
+        harness.model.restoreDefaults()
+
+        XCTAssertEqual(harness.savedRuleSets, [ShortcutRule.defaults])
+        XCTAssertTrue(harness.appliedRuleSets.isEmpty)
+        XCTAssertNil(harness.model.loadIssue)
+        XCTAssertNil(harness.model.issue)
+    }
+
+    func testRestoreDefaultsKeepsLoadIssueWhenRepairCannotBePersisted() {
+        let harness = ShortcutSettingsHarness(
+            loadResult: ShortcutRuleLoadResult(
+                rules: ShortcutRule.defaults,
+                issue: .unknownSchema(2)
+            )
+        )
+        harness.saveError = NSError(domain: "ShortcutSettingsModelTests", code: 2)
+
+        harness.model.restoreDefaults()
+
+        XCTAssertEqual(harness.model.issue, .persistenceFailure)
+        XCTAssertEqual(harness.model.loadIssue, .unknownSchema(2))
+        XCTAssertTrue(harness.appliedRuleSets.isEmpty)
+    }
+
+    func testRestoreDefaultsAppliesSwappedBindingsAsOneRuleSet() {
+        let swapped = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutRule.defaults[1].binding,
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutRule.defaults[0].binding,
+                isEnabled: true
+            ),
+        ]
+        let harness = ShortcutSettingsHarness(
+            loadResult: ShortcutRuleLoadResult(rules: swapped, issue: nil)
+        )
+
+        harness.model.restoreDefaults()
+
+        XCTAssertEqual(harness.appliedRuleSets, [ShortcutRule.defaults])
+        XCTAssertEqual(harness.savedRuleSets, [ShortcutRule.defaults])
+        XCTAssertEqual(harness.model.rules, ShortcutRule.defaults)
     }
 }
 
 @MainActor
 private final class ShortcutSettingsHarness {
-    var appliedRules: [ShortcutRule] = []
+    var appliedRuleSets: [[ShortcutRule]] = []
     var savedRuleSets: [[ShortcutRule]] = []
     var applyError: Error?
     var saveError: Error?
@@ -138,9 +201,9 @@ private final class ShortcutSettingsHarness {
             if let saveError { throw saveError }
             savedRuleSets.append(rules)
         },
-        apply: { [unowned self] rule in
+        applyRules: { [unowned self] rules in
             if let applyError { throw applyError }
-            appliedRules.append(rule)
+            appliedRuleSets.append(rules)
         }
     )
 

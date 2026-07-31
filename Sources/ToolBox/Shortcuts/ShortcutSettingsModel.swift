@@ -16,7 +16,7 @@ enum ShortcutSettingsIssue: Equatable {
 final class ShortcutSettingsModel: ObservableObject {
     typealias Load = () -> ShortcutRuleLoadResult
     typealias Save = ([ShortcutRule]) throws -> Void
-    typealias Apply = (ShortcutRule) throws -> Void
+    typealias ApplyRules = ([ShortcutRule]) throws -> Void
 
     @Published private(set) var rules: [ShortcutRule]
     @Published private(set) var loadIssue: ShortcutRuleStoreIssue?
@@ -24,18 +24,18 @@ final class ShortcutSettingsModel: ObservableObject {
     @Published private(set) var issueAction: ShortcutActionID?
 
     private let save: Save
-    private let apply: Apply
+    private let applyRules: ApplyRules
 
     init(
         load: Load,
         save: @escaping Save,
-        apply: @escaping Apply
+        applyRules: @escaping ApplyRules
     ) {
         let result = load()
         rules = result.rules
         loadIssue = result.issue
         self.save = save
-        self.apply = apply
+        self.applyRules = applyRules
     }
 
     convenience init(
@@ -45,7 +45,7 @@ final class ShortcutSettingsModel: ObservableObject {
         self.init(
             load: { store.load() },
             save: { try store.save($0) },
-            apply: { try registry.apply(rule: $0) }
+            applyRules: { try registry.apply(rules: $0) }
         )
     }
 
@@ -79,7 +79,10 @@ final class ShortcutSettingsModel: ObservableObject {
     }
 
     func restoreDefaults() {
-        commit(ShortcutRule.defaults)
+        commit(
+            ShortcutRule.defaults,
+            forcePersistence: loadIssue != nil
+        )
     }
 
     func restoreDefault(for action: ShortcutActionID) {
@@ -108,9 +111,11 @@ final class ShortcutSettingsModel: ObservableObject {
 
     private func commit(
         _ proposed: [ShortcutRule],
-        relatedAction: ShortcutActionID? = nil
+        relatedAction: ShortcutActionID? = nil,
+        forcePersistence: Bool = false
     ) {
-        guard proposed != rules else {
+        let rulesChanged = proposed != rules
+        guard rulesChanged || forcePersistence else {
             issue = nil
             issueAction = nil
             return
@@ -122,32 +127,20 @@ final class ShortcutSettingsModel: ObservableObject {
         }
 
         let previous = rules
-        let changed = proposed.compactMap { proposedRule -> (old: ShortcutRule, new: ShortcutRule)? in
-            guard let oldRule = previous.first(where: { $0.id == proposedRule.id }),
-                  oldRule != proposedRule else {
-                return nil
+        if rulesChanged {
+            do {
+                try applyRules(proposed)
+            } catch {
+                issue = settingsIssue(for: error)
+                issueAction = relatedAction
+                return
             }
-            return (oldRule, proposedRule)
-        }
-        var appliedOldRules: [ShortcutRule] = []
-
-        do {
-            for change in changed {
-                try apply(change.new)
-                appliedOldRules.append(change.old)
-            }
-        } catch {
-            issue = rollback(appliedOldRules)
-                ? settingsIssue(for: error)
-                : .rollbackFailure
-            issueAction = relatedAction
-            return
         }
 
         do {
             try save(proposed)
         } catch {
-            issue = rollback(appliedOldRules)
+            issue = !rulesChanged || rollback(to: previous)
                 ? .persistenceFailure
                 : .rollbackFailure
             issueAction = relatedAction
@@ -160,16 +153,13 @@ final class ShortcutSettingsModel: ObservableObject {
         loadIssue = nil
     }
 
-    private func rollback(_ oldRules: [ShortcutRule]) -> Bool {
-        var succeeded = true
-        for oldRule in oldRules.reversed() {
-            do {
-                try apply(oldRule)
-            } catch {
-                succeeded = false
-            }
+    private func rollback(to oldRules: [ShortcutRule]) -> Bool {
+        do {
+            try applyRules(oldRules)
+            return true
+        } catch {
+            return false
         }
-        return succeeded
     }
 
     private func settingsIssue(for error: Error) -> ShortcutSettingsIssue {
@@ -188,7 +178,7 @@ final class ShortcutSettingsModel: ObservableObject {
             return .duplicateBinding
         case .protectedRuleMissing, .protectedRuleDisabled:
             return .protectedShortcut
-        case .emptyModifiers, .duplicateActionID:
+        case .emptyModifiers, .duplicateActionID, .incompleteActionSet:
             return .invalidShortcut
         case .handlerInstallFailed, .registrationFailed, .unregistrationFailed:
             return .systemConflict
@@ -203,7 +193,7 @@ final class ShortcutSettingsModel: ObservableObject {
             return .duplicateBinding
         case .protectedRuleMissing, .protectedRuleDisabled:
             return .protectedShortcut
-        case .emptyModifiers, .duplicateActionID:
+        case .emptyModifiers, .duplicateActionID, .incompleteActionSet:
             return .invalidShortcut
         }
     }
