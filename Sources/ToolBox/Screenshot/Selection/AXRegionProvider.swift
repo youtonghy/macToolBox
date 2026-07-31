@@ -35,14 +35,14 @@ final class AXRegionProvider {
 
     private let ownPID: pid_t
     private let primaryScreenTop: () -> CGFloat
-    private let currentGeneration: () -> UInt64
+    private let currentGeneration: (() -> UInt64)?
     private let lookup: Lookup
     private let queue = DispatchQueue(label: "ToolBox.AXRegionProvider")
 
     init(
         ownPID: pid_t = ProcessInfo.processInfo.processIdentifier,
         primaryScreenTop: @escaping () -> CGFloat = { NSScreen.main?.frame.maxY ?? 0 },
-        currentGeneration: @escaping () -> UInt64,
+        currentGeneration: (() -> UInt64)? = nil,
         lookup: Lookup? = nil
     ) {
         self.ownPID = ownPID
@@ -62,7 +62,7 @@ final class AXRegionProvider {
             }
         }
 
-        guard generation == currentGeneration() else {
+        if let currentGeneration, generation != currentGeneration() {
             throw AXRegionError.staleGeneration
         }
         let records: [AXRegionRecord]

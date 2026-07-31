@@ -68,6 +68,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let wifiSignal = WiFiSignalModel()
     private let shortcutRegistry = ShortcutRegistry()
     private lazy var shortcutSettings = ShortcutSettingsModel(registry: shortcutRegistry)
+    private let screenshotWindowProvider = WindowRegionProvider()
+    private lazy var screenshotAXProvider = AXRegionProvider()
+    private let screenshotPreview = ScreenshotPreviewController()
+    private lazy var screenshotCoordinator = ScreenshotCoordinator(
+        permission: ScreenCapturePermission(),
+        captureProvider: ScreenCaptureProvider(),
+        overlay: ScreenshotSelectionOverlayManager(),
+        candidateResolver: { [weak self] point, generation in
+            guard let self else { return nil }
+            let defaults = UserDefaults.standard
+            let key = "screenshot.smartElementCandidates"
+            let smartCandidates = defaults.object(forKey: key) as? Bool ?? true
+            if smartCandidates,
+               let candidate = try? await self.screenshotAXProvider
+                   .regions(at: point, generation: generation).first {
+                return candidate
+            }
+            return try? await self.screenshotWindowProvider.region(at: point, generation: generation)
+        },
+        bringEditorForward: { [weak self] in self?.screenshotPreview.bringForward() },
+        editorHandoff: { [weak self] image in self?.screenshotPreview.show(image: image) }
+    )
     private let logger = Logger(subsystem: "ToolBox", category: "AppDelegate")
     private lazy var displayControlKeys = DisplayControlMediaKeyController(
         service: displayControl,
@@ -103,6 +125,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Belt-and-suspenders with Info.plist LSUIElement.
         NSApp.setActivationPolicy(.accessory)
+        screenshotPreview.onClose = { [weak self] in
+            self?.screenshotCoordinator.previewClosed()
+        }
 
         // Menu-bar status item.
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -196,6 +221,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func stopNonAudioServices() {
         screenWipe.stop()
+        screenshotCoordinator.cancel()
+        screenshotPreview.close()
         if let status = shortcutRegistry.stop() {
             logger.error("Shortcut registry cleanup incomplete: \(status, privacy: .public)")
         }
@@ -380,7 +407,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleShortcutAction(_ action: ShortcutActionID) {
         switch action {
         case .captureRegion:
-            logger.notice("Capture region shortcut invoked; screenshot coordinator is not installed")
+            Task { [weak self] in await self?.screenshotCoordinator.startRegionCapture() }
         case .screenWipeExit:
             state.wipeOn = false
             screenWipe.stop()

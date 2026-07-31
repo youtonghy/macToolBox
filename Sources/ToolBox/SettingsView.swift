@@ -7,6 +7,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case wifi
     case display
     case audio
+    case screenshot
     case shortcuts
     case general
 
@@ -24,6 +25,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "显示器"
         case .audio:
             return "音频"
+        case .screenshot:
+            return "截图"
         case .shortcuts:
             return "快捷键"
         case .general:
@@ -43,6 +46,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "display"
         case .audio:
             return "speaker.wave.2"
+        case .screenshot:
+            return "camera.viewfinder"
         case .shortcuts:
             return "keyboard"
         case .general:
@@ -62,6 +67,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemTeal)
         case .audio:
             return Color(nsColor: .systemGreen)
+        case .screenshot:
+            return Color(nsColor: .systemOrange)
         case .shortcuts:
             return Color(nsColor: .systemBlue)
         case .general:
@@ -140,6 +147,8 @@ struct SettingsView: View {
                     )
                 case .audio:
                     AudioRoutingSettingsView(service: audioRouting)
+                case .screenshot:
+                    ScreenshotSettingsView()
                 case .shortcuts:
                     ShortcutSettingsView(model: shortcutSettings)
                 case .general:

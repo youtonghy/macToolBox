@@ -12,7 +12,21 @@ final class ScreenshotSelectionPanel: NSPanel {
 }
 
 @MainActor
-final class ScreenshotSelectionOverlayManager {
+protocol ScreenshotSelectionOverlayManaging: AnyObject {
+    func show(
+        frames: [DisplayCaptureFrame],
+        state: SelectionSessionState,
+        onAction: @escaping (SelectionAction) -> Void,
+        onHover: @escaping (CGPoint) -> Void,
+        onCancel: @escaping () -> Void
+    ) throws
+    func beginInteraction(on displayID: CGDirectDisplayID)
+    func update(state: SelectionSessionState)
+    func close(cancelled: Bool)
+}
+
+@MainActor
+final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManaging {
     private let activateApplication: Bool
     private let restorePreviousApplication: () -> Void
     private var panels: [CGDirectDisplayID: ScreenshotSelectionPanel] = [:]
