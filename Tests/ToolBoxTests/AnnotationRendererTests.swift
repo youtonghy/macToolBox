@@ -80,7 +80,7 @@ final class AnnotationRendererTests: XCTestCase {
             pixelRect: CGRect(x: 0, y: 5_000, width: 100, height: 100)
         )
 
-        XCTAssertEqual(source.requestCount, 101)
+        XCTAssertEqual(source.requestCount, 2)
     }
 
     func testPNGExporterWritesDimensionsAndAlpha() throws {
@@ -115,6 +115,22 @@ final class AnnotationRendererTests: XCTestCase {
 
         XCTAssertLessThanOrEqual(source.maximumRequestedBytes, 16 * 1_024 * 1_024)
         XCTAssertGreaterThan(source.requestCount, 1)
+    }
+
+    func testExporterRejectsInvalidDimensionsAndConfiguredTotalCap() throws {
+        let invalid = ScreenshotDocument(baseImage: InvalidSizeImageSource())
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("annotation-invalid-export-\(UUID().uuidString).png")
+        XCTAssertThrowsError(try ScreenshotPNGExporter().export(document: invalid, to: url)) {
+            XCTAssertEqual($0 as? AnnotationRenderError, .invalidDimensions)
+        }
+
+        let tooLarge = ScreenshotDocument(baseImage: RecordingImageSource(width: 100, height: 100))
+        XCTAssertThrowsError(
+            try ScreenshotPNGExporter(maximumExportBytes: 1_000).export(document: tooLarge, to: url)
+        ) {
+            XCTAssertEqual($0 as? AnnotationRenderError, .exportTooLarge)
+        }
     }
 
     private func makeImage(
@@ -218,5 +234,14 @@ private final class RecordingImageSource: ScreenshotImageSource {
             throw AnnotationError.invalidGeometry
         }
         return image
+    }
+}
+
+private final class InvalidSizeImageSource: ScreenshotImageSource {
+    let id = UUID()
+    let pixelSize = CGSize(width: CGFloat.infinity, height: 10)
+
+    func copyPixels(in rect: CGRect) throws -> CGImage {
+        throw AnnotationError.invalidGeometry
     }
 }

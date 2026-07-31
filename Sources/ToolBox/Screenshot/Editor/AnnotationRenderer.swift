@@ -9,7 +9,43 @@ enum AnnotationRenderError: Error, Equatable {
     case contextCreationFailed
     case imageCreationFailed
     case exportFailed
+    case exportTooLarge
     case fileMappingFailed
+}
+
+struct ScreenshotPixelDimensions: Equatable, Sendable {
+    let width: Int
+    let height: Int
+    let bytesPerRow: Int
+    let byteCount: Int
+
+    init(size: CGSize) throws {
+        guard size.width.isFinite,
+              size.height.isFinite,
+              size.width > 0,
+              size.height > 0,
+              size.width.rounded(.towardZero) == size.width,
+              size.height.rounded(.towardZero) == size.height,
+              size.width <= CGFloat(Int.max),
+              size.height <= CGFloat(Int.max)
+        else {
+            throw AnnotationRenderError.invalidDimensions
+        }
+        width = Int(size.width)
+        height = Int(size.height)
+        guard let rowBytes = Self.checkedProduct(width, 4),
+              let totalBytes = Self.checkedProduct(rowBytes, height)
+        else {
+            throw AnnotationRenderError.invalidDimensions
+        }
+        bytesPerRow = rowBytes
+        byteCount = totalBytes
+    }
+
+    private static func checkedProduct(_ lhs: Int, _ rhs: Int) -> Int? {
+        let result = lhs.multipliedReportingOverflow(by: rhs)
+        return result.overflow ? nil : result.partialValue
+    }
 }
 
 struct AnnotationRenderer {
@@ -73,19 +109,8 @@ struct AnnotationRenderer {
     }
 
     private func documentBounds(_ document: ScreenshotDocument) throws -> CGRect {
-        let size = document.baseImage.pixelSize
-        guard size.width.isFinite,
-              size.height.isFinite,
-              size.width > 0,
-              size.height > 0,
-              size.width.rounded(.towardZero) == size.width,
-              size.height.rounded(.towardZero) == size.height,
-              size.width <= CGFloat(Int.max),
-              size.height <= CGFloat(Int.max)
-        else {
-            throw AnnotationRenderError.invalidDimensions
-        }
-        return CGRect(origin: .zero, size: size)
+        let dimensions = try ScreenshotPixelDimensions(size: document.baseImage.pixelSize)
+        return CGRect(x: 0, y: 0, width: dimensions.width, height: dimensions.height)
     }
 
     private func configureTopLeftCoordinates(_ context: CGContext, height: Int, pixelRect: CGRect) {
@@ -231,24 +256,33 @@ struct AnnotationRenderer {
         guard !visible.isNull, !visible.isEmpty else { return }
         let firstColumn = floor((visible.minX - rect.minX) / step)
         let firstRow = floor((visible.minY - rect.minY) / step)
-        var y = rect.minY + firstRow * step
-        while y < visible.maxY {
-            var x = rect.minX + firstColumn * step
-            while x < visible.maxX {
-                let block = CGRect(
-                    x: x,
-                    y: y,
-                    width: min(step, rect.maxX - x),
-                    height: min(step, rect.maxY - y)
-                )
-                let sampleX = min(source.pixelSize.width - 1, max(0, floor(block.midX)))
-                let sampleY = min(source.pixelSize.height - 1, max(0, floor(block.midY)))
-                let sample = try source.copyPixels(in: CGRect(x: sampleX, y: sampleY, width: 1, height: 1))
-                context.draw(sample, in: block)
-                x += step
-            }
-            y += step
+        let lastColumn = ceil((visible.maxX - rect.minX) / step)
+        let lastRow = ceil((visible.maxY - rect.minY) / step)
+        let columnCount = max(1, Int(lastColumn - firstColumn))
+        let rowCount = max(1, Int(lastRow - firstRow))
+        guard let thumbnailBytes = multipliedWithoutOverflow(columnCount, rowCount, 4),
+              thumbnailBytes <= maximumBandBytes,
+              let thumbnailContext = makeContext(width: columnCount, height: rowCount)
+        else {
+            throw AnnotationRenderError.bandTooLarge
         }
+
+        let gridRect = CGRect(
+            x: rect.minX + firstColumn * step,
+            y: rect.minY + firstRow * step,
+            width: min(rect.maxX, rect.minX + lastColumn * step) - (rect.minX + firstColumn * step),
+            height: min(rect.maxY, rect.minY + lastRow * step) - (rect.minY + firstRow * step)
+        )
+        let basePixels = try source.copyPixels(in: gridRect)
+        thumbnailContext.interpolationQuality = .medium
+        thumbnailContext.draw(
+            basePixels,
+            in: CGRect(x: 0, y: 0, width: columnCount, height: rowCount)
+        )
+        guard let thumbnail = thumbnailContext.makeImage() else {
+            throw AnnotationRenderError.imageCreationFailed
+        }
+        context.draw(thumbnail, in: gridRect)
     }
 
     private func drawMarker(

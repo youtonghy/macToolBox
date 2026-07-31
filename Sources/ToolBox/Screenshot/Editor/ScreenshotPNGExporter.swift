@@ -5,22 +5,28 @@ import ImageIO
 import UniformTypeIdentifiers
 
 struct ScreenshotPNGExporter {
-    let renderer: AnnotationRenderer
+    static let defaultMaximumExportBytes = 512 * 1_024 * 1_024
 
-    init(renderer: AnnotationRenderer = AnnotationRenderer()) {
+    let renderer: AnnotationRenderer
+    let maximumExportBytes: Int
+
+    init(
+        renderer: AnnotationRenderer = AnnotationRenderer(),
+        maximumExportBytes: Int = defaultMaximumExportBytes
+    ) {
         self.renderer = renderer
+        self.maximumExportBytes = max(4, maximumExportBytes)
     }
 
     func export(document: ScreenshotDocument, to url: URL) throws {
-        let width = Int(document.baseImage.pixelSize.width)
-        let height = Int(document.baseImage.pixelSize.height)
-        guard width > 0,
-              height > 0,
-              let bytesPerRow = checkedProduct(width, 4),
-              let byteCount = checkedProduct(bytesPerRow, height)
-        else {
-            throw AnnotationRenderError.invalidDimensions
+        let dimensions = try ScreenshotPixelDimensions(size: document.baseImage.pixelSize)
+        guard dimensions.byteCount <= maximumExportBytes else {
+            throw AnnotationRenderError.exportTooLarge
         }
+        let width = dimensions.width
+        let height = dimensions.height
+        let bytesPerRow = dimensions.bytesPerRow
+        let byteCount = dimensions.byteCount
 
         let rawURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("toolbox-screenshot-\(UUID().uuidString).rgba")
@@ -103,10 +109,5 @@ struct ScreenshotPNGExporter {
             try? FileManager.default.removeItem(at: url)
             throw AnnotationRenderError.exportFailed
         }
-    }
-
-    private func checkedProduct(_ lhs: Int, _ rhs: Int) -> Int? {
-        let result = lhs.multipliedReportingOverflow(by: rhs)
-        return result.overflow ? nil : result.partialValue
     }
 }
