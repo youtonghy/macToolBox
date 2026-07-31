@@ -80,6 +80,8 @@ struct ShortcutCarbonSystem {
 }
 
 enum ShortcutRegistryError: Error, Equatable {
+    case notStarted
+    case cleanupRequired
     case emptyModifiers
     case duplicateActionID
     case duplicateBinding
@@ -116,6 +118,7 @@ final class ShortcutRegistry {
     private let callbackContext = ShortcutRegistryCallbackContext()
     private var retainedCallbackContext: Unmanaged<ShortcutRegistryCallbackContext>?
     private var handlerRef: EventHandlerRef?
+    private var isStarted = false
     private var registrations: [ShortcutActionID: Registration] = [:]
     private var rollbackRegistrations: [Registration] = []
     private var idToAction: [UInt32: ShortcutActionID] = [:]
@@ -128,7 +131,10 @@ final class ShortcutRegistry {
     }
 
     func start(rules: [ShortcutRule]) throws {
-        guard handlerRef == nil else { return }
+        guard !isStarted else { return }
+        guard handlerRef == nil else {
+            throw ShortcutRegistryError.cleanupRequired
+        }
         try validate(rules: rules)
 
         callbackContext.onEvent = { [unowned self] event in
@@ -159,49 +165,65 @@ final class ShortcutRegistry {
                 registrations[rule.id] = registration
                 idToAction[registration.carbonID] = rule.id
             }
+            isStarted = true
         } catch {
-            stop()
+            if let cleanupStatus = cleanup() {
+                throw ShortcutRegistryError.rollbackFailed(cleanupStatus)
+            }
             throw error
         }
     }
 
     func stop() {
-        var couldRemoveHandler = true
+        _ = cleanup()
+    }
+
+    private func cleanup() -> OSStatus? {
+        isStarted = false
+        var firstFailure: OSStatus?
 
         for (action, registration) in Array(registrations) {
-            if system.unregisterHotKey(registration.ref) == noErr {
+            let status = system.unregisterHotKey(registration.ref)
+            if status == noErr {
                 registrations.removeValue(forKey: action)
                 idToAction.removeValue(forKey: registration.carbonID)
             } else {
-                couldRemoveHandler = false
+                firstFailure = firstFailure ?? status
                 logger.error("Failed to unregister shortcut \(action.rawValue, privacy: .public)")
             }
         }
 
         for registration in Array(rollbackRegistrations) {
-            if system.unregisterHotKey(registration.ref) == noErr {
+            let status = system.unregisterHotKey(registration.ref)
+            if status == noErr {
                 rollbackRegistrations.removeAll { $0.ref == registration.ref }
                 idToAction.removeValue(forKey: registration.carbonID)
             } else {
-                couldRemoveHandler = false
+                firstFailure = firstFailure ?? status
                 logger.error("Failed to unregister rollback shortcut")
             }
         }
 
-        guard couldRemoveHandler, let handlerRef else { return }
+        guard firstFailure == nil, let handlerRef else { return firstFailure }
         let status = system.removeHandler(handlerRef)
         guard status == noErr else {
             logger.error("Failed to remove shortcut event handler")
-            return
+            return status
         }
 
         callbackContext.onEvent = nil
         self.handlerRef = nil
         retainedCallbackContext?.release()
         retainedCallbackContext = nil
+        return nil
     }
 
     func apply(rule: ShortcutRule) throws {
+        guard isStarted else {
+            throw handlerRef == nil
+                ? ShortcutRegistryError.notStarted
+                : ShortcutRegistryError.cleanupRequired
+        }
         if rule.binding.modifiers.isEmpty {
             throw ShortcutRegistryError.emptyModifiers
         }
@@ -331,15 +353,23 @@ final class ShortcutRegistry {
         onAction = nil
         callbackContext.onEvent = nil
         for registration in registrations.values {
-            _ = system.unregisterHotKey(registration.ref)
+            if system.unregisterHotKey(registration.ref) != noErr {
+                logger.error(
+                    "Failed to unregister shortcut during deinitialization: \(registration.action.rawValue, privacy: .public)"
+                )
+            }
         }
         for registration in rollbackRegistrations {
-            _ = system.unregisterHotKey(registration.ref)
+            if system.unregisterHotKey(registration.ref) != noErr {
+                logger.error("Failed to unregister rollback shortcut during deinitialization")
+            }
         }
         if let handlerRef {
             let status = system.removeHandler(handlerRef)
             if status == noErr {
                 retainedCallbackContext?.release()
+            } else {
+                logger.error("Failed to remove shortcut event handler during deinitialization")
             }
         }
         retainedCallbackContext = nil

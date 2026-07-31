@@ -4,6 +4,17 @@ import XCTest
 
 @MainActor
 final class ShortcutRegistryTests: XCTestCase {
+    func testApplyBeforeStartDoesNotRegisterHotKey() {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+
+        XCTAssertThrowsError(try registry.apply(rule: ShortcutRule.defaults[0])) {
+            XCTAssertEqual($0 as? ShortcutRegistryError, .notStarted)
+        }
+        XCTAssertEqual(recorder.activeRegistrationCount, 0)
+        XCTAssertTrue(recorder.registerCalls.isEmpty)
+    }
+
     func testEventIDDispatchesOnlyMatchingAction() throws {
         let recorder = ShortcutCarbonSystemRecorder()
         let registry = ShortcutRegistry(system: recorder.system)
@@ -57,6 +68,33 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
 
         XCTAssertEqual(recorder.fire(id: 9_999), OSStatus(eventNotHandledErr))
+        XCTAssertTrue(actions.isEmpty)
+    }
+
+    func testEventParameterFailureIsNotHandled() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        try registry.start(rules: ShortcutRule.defaults)
+        recorder.nextEventStatus = OSStatus(eventInternalErr)
+
+        XCTAssertEqual(
+            recorder.fire(id: ShortcutActionID.captureRegion.carbonID),
+            OSStatus(eventNotHandledErr)
+        )
+    }
+
+    func testForeignEventSignatureIsNotHandled() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        var actions: [ShortcutActionID] = []
+        registry.onAction = { actions.append($0) }
+        try registry.start(rules: ShortcutRule.defaults)
+        recorder.eventSignatureOverride = 0x464F_524E // 'FORN'
+
+        XCTAssertEqual(
+            recorder.fire(id: ShortcutActionID.captureRegion.carbonID),
+            OSStatus(eventNotHandledErr)
+        )
         XCTAssertTrue(actions.isEmpty)
     }
 
@@ -140,7 +178,9 @@ final class ShortcutRegistryTests: XCTestCase {
         recorder.nextRemoveHandlerStatus = OSStatus(eventInternalErr)
 
         registry.stop()
-        try registry.start(rules: ShortcutRule.defaults)
+        XCTAssertThrowsError(try registry.start(rules: ShortcutRule.defaults)) {
+            XCTAssertEqual($0 as? ShortcutRegistryError, .cleanupRequired)
+        }
 
         XCTAssertEqual(recorder.installHandlerCalls, 1)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
@@ -181,6 +221,30 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
         XCTAssertEqual(recorder.activeRegistrationCount, 2)
         XCTAssertEqual(recorder.installHandlerCalls, 2)
+    }
+
+    func testPartialStartRollbackFailureRequiresCleanupBeforeRestart() throws {
+        let recorder = ShortcutCarbonSystemRecorder()
+        let registry = ShortcutRegistry(system: recorder.system)
+        recorder.registerStatusQueue = [noErr, OSStatus(eventHotKeyExistsErr)]
+        recorder.unregisterStatusQueue = [OSStatus(eventInternalErr)]
+
+        XCTAssertThrowsError(try registry.start(rules: ShortcutRule.defaults)) {
+            XCTAssertEqual(
+                $0 as? ShortcutRegistryError,
+                .rollbackFailed(OSStatus(eventInternalErr))
+            )
+        }
+        XCTAssertTrue(registry.isRegistered(.captureRegion))
+        XCTAssertThrowsError(try registry.start(rules: ShortcutRule.defaults)) {
+            XCTAssertEqual($0 as? ShortcutRegistryError, .cleanupRequired)
+        }
+
+        registry.stop()
+        try registry.start(rules: ShortcutRule.defaults)
+        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertTrue(registry.isRegistered(.captureRegion))
+        XCTAssertTrue(registry.isRegistered(.screenWipeExit))
     }
 
     func testOldUnregistrationFailureKeepsOldBinding() throws {
@@ -273,6 +337,8 @@ private final class ShortcutCarbonSystemRecorder {
     var installStatusQueue: [OSStatus] = []
     var registerStatusQueue: [OSStatus] = []
     var unregisterStatusQueue: [OSStatus] = []
+    var nextEventStatus: OSStatus = noErr
+    var eventSignatureOverride: OSType?
     private(set) var installHandlerCalls = 0
     private(set) var removeHandlerCalls = 0
     private(set) var registerCalls: [RegisterCall] = []
@@ -335,7 +401,12 @@ private final class ShortcutCarbonSystemRecorder {
             return noErr
         },
         eventHotKeyID: { [unowned self] _, output in
-            let signature = registerCalls.first?.signature ?? 0
+            let status = nextEventStatus
+            nextEventStatus = noErr
+            guard status == noErr else { return status }
+            let signature = eventSignatureOverride
+                ?? registerCalls.first?.signature
+                ?? 0
             output.pointee = EventHotKeyID(signature: signature, id: nextEventID)
             return noErr
         }
