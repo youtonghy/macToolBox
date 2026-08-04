@@ -11,6 +11,19 @@ struct PaddleOCRRecognizedLine: Equatable, Sendable {
     let text: String
     let confidence: Double
     let bounds: CGRect
+    let polygon: [CGPoint]
+
+    init(text: String, confidence: Double, bounds: CGRect, polygon: [CGPoint]? = nil) {
+        self.text = text
+        self.confidence = confidence
+        self.bounds = bounds
+        self.polygon = polygon ?? [
+            CGPoint(x: bounds.minX, y: bounds.minY),
+            CGPoint(x: bounds.maxX, y: bounds.minY),
+            CGPoint(x: bounds.maxX, y: bounds.maxY),
+            CGPoint(x: bounds.minX, y: bounds.maxY),
+        ]
+    }
 }
 
 enum PaddleOCRRecognitionMerger {
@@ -19,10 +32,11 @@ enum PaddleOCRRecognitionMerger {
         imageSize: CGSize
     ) -> TextOCRDocument {
         var accepted: [PaddleOCRRecognizedLine] = []
-        for candidate in candidates.sorted(by: { $0.confidence > $1.confidence }) {
-            let duplicate = accepted.contains {
-                $0.text == candidate.text && intersectionOverUnion($0.bounds, candidate.bounds) >= 0.35
-            }
+        for candidate in candidates.sorted(by: {
+            if $0.text.count != $1.text.count { return $0.text.count > $1.text.count }
+            return $0.confidence > $1.confidence
+        }) {
+            let duplicate = accepted.contains { isDuplicate($0, candidate) }
             if !duplicate { accepted.append(candidate) }
         }
         let width = max(1, imageSize.width)
@@ -30,12 +44,12 @@ enum PaddleOCRRecognitionMerger {
         let lines = accepted.compactMap { line -> OCRTextLine? in
             let bounds = line.bounds.intersection(CGRect(origin: .zero, size: imageSize))
             guard !bounds.isNull, bounds.width > 0, bounds.height > 0 else { return nil }
-            let polygon = [
-                CGPoint(x: bounds.minX / width, y: bounds.minY / height),
-                CGPoint(x: bounds.maxX / width, y: bounds.minY / height),
-                CGPoint(x: bounds.maxX / width, y: bounds.maxY / height),
-                CGPoint(x: bounds.minX / width, y: bounds.maxY / height),
-            ]
+            let polygon = line.polygon.map {
+                CGPoint(
+                    x: min(1, max(0, $0.x / width)),
+                    y: min(1, max(0, $0.y / height))
+                )
+            }
             return try? OCRTextLine(
                 text: line.text,
                 confidence: line.confidence,
@@ -51,6 +65,26 @@ enum PaddleOCRRecognitionMerger {
         let area = intersection.width * intersection.height
         let union = lhs.width * lhs.height + rhs.width * rhs.height - area
         return union > 0 ? area / union : 0
+    }
+
+    private static func isDuplicate(
+        _ accepted: PaddleOCRRecognizedLine,
+        _ candidate: PaddleOCRRecognizedLine
+    ) -> Bool {
+        let iou = intersectionOverUnion(accepted.bounds, candidate.bounds)
+        if accepted.text == candidate.text { return iou >= 0.35 }
+        guard accepted.text.contains(candidate.text) || candidate.text.contains(accepted.text) else {
+            return false
+        }
+        let intersection = accepted.bounds.intersection(candidate.bounds)
+        guard !intersection.isNull else { return false }
+        let smallerArea = min(
+            accepted.bounds.width * accepted.bounds.height,
+            candidate.bounds.width * candidate.bounds.height
+        )
+        let covered = smallerArea > 0 ? intersection.width * intersection.height / smallerArea : 0
+        let rowOverlap = intersection.height / max(1, CGFloat(min(accepted.bounds.height, candidate.bounds.height)))
+        return covered >= 0.55 && rowOverlap >= 0.7
     }
 }
 
@@ -120,6 +154,7 @@ actor LocalPaddleOCREngine {
             height: Int(rawHeight),
             originalSize: input.originalSize
         )
+        guard !detections.isEmpty else { return [] }
         guard configuration.recognitionImageShape.count == 3,
               configuration.recognitionImageShape[0] == 3
         else {
@@ -128,10 +163,13 @@ actor LocalPaddleOCREngine {
             )
         }
         let decoder = PaddleCTCDecoder(characters: configuration.characters)
+        let rasterizedImage = try PaddleOCRImagePreprocessor.rasterizedImage(image: image)
         return try detections.compactMap { detection in
             try Task.checkCancellation()
-            let cropRect = paddedCrop(detection.bounds, image: image)
-            guard let crop = image.cropping(to: cropRect) else { return nil }
+            let crop = try PaddleOCRImagePreprocessor.perspectiveCrop(
+                source: rasterizedImage,
+                quadrilateral: detection.polygon
+            )
             let tensor = try PaddleOCRImagePreprocessor.recognitionTensor(
                 image: crop,
                 imageHeight: configuration.recognitionImageShape[1],
@@ -149,15 +187,11 @@ actor LocalPaddleOCREngine {
             return PaddleOCRRecognizedLine(
                 text: text,
                 confidence: Double(recognition.confidence),
-                bounds: cropRect.offsetBy(dx: offset.x, dy: offset.y)
+                bounds: detection.bounds.offsetBy(dx: offset.x, dy: offset.y),
+                polygon: detection.polygon.map {
+                    CGPoint(x: $0.x + offset.x, y: $0.y + offset.y)
+                }
             )
         }
-    }
-
-    private func paddedCrop(_ bounds: CGRect, image: CGImage) -> CGRect {
-        let padding = max(2, min(bounds.width, bounds.height) * 0.04)
-        return bounds.insetBy(dx: -padding, dy: -padding)
-            .intersection(CGRect(x: 0, y: 0, width: image.width, height: image.height))
-            .integral
     }
 }

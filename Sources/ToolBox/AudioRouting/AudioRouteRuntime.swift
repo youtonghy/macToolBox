@@ -32,6 +32,13 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
             if desiredIntent == intent, realizedKeysByRouteID == candidateKeys {
                 return .unchanged
             }
+            if !realizedKeysByRouteID.isEmpty,
+               realizedKeysByRouteID == candidateKeys {
+                try hal.updateParameters(intent)
+                desiredIntent = intent
+                lastFailure = nil
+                return .applied
+            }
             if desiredIntent == nil, intent.plansByID.isEmpty, realizedKeysByRouteID.isEmpty {
                 desiredIntent = intent
                 return .unchanged
@@ -68,7 +75,7 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
     }
 
     func snapshot() -> [AudioRouteDiagnosticsSnapshot] {
-        []
+        hal.diagnostics()
     }
 
     func performMaintenance() -> Bool {

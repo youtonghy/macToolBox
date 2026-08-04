@@ -166,13 +166,26 @@ final class MenuBarPanelController<Content: View>: NSObject {
 
     private func targetPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect? {
         guard let buttonFrame = screenRect(for: button) else { return nil }
-        let screens = NSScreen.screens.map {
-            MenuPanelScreenGeometry(frame: $0.frame, visibleFrame: $0.visibleFrame)
+
+        // The status-item window owns the authoritative screen assignment. A
+        // center-point lookup across NSScreen.screens can select an adjacent
+        // display while the menu bar is moving or its button is being laid out.
+        let anchorPoint = NSPoint(x: buttonFrame.midX, y: buttonFrame.midY)
+        guard let visibleFrame = button.window?.screen?.visibleFrame
+            ?? NSScreen.screens
+                .first(where: { $0.frame.contains(anchorPoint) })?
+                .visibleFrame
+            ?? NSScreen.screens
+                .first(where: { $0.frame.intersects(buttonFrame) })?
+                .visibleFrame,
+            !visibleFrame.isEmpty else {
+            return nil
         }
+
         return MenuPanelLayout.panelFrame(
             preferredSize: preferredPanelSize,
             anchorFrame: buttonFrame,
-            screens: screens
+            visibleFrame: visibleFrame
         )
     }
 

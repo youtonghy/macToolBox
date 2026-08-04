@@ -12,7 +12,7 @@ final class PaddleOCRInferenceSession: @unchecked Sendable {
     init(modelURL: URL, provider: OCRExecutionProvider) throws {
         var rawError: UnsafeMutablePointer<CChar>?
         handle = modelURL.path.withCString {
-            TBOXORTCreateSession($0, provider == .coreML, &rawError)
+            TBOXORTCreateSession($0, provider.runtimeProvider == .coreML, &rawError)
         }
         guard handle != nil else {
             throw PaddleOCRInferenceError.sessionCreationFailed(Self.consume(&rawError))

@@ -2,17 +2,83 @@ import Foundation
 import OSLog
 
 struct OCRSettings: Codable, Equatable, Sendable {
-    var pipeline: OCRPipelineID
-    var profile: PPOCRv6Profile
+    var selection: OCRModelSelection
     var executionProvider: OCRExecutionProvider
     var localOnly: Bool
 
+    var pipeline: OCRPipelineID {
+        get { selection.pipeline }
+        set { selection = OCRModelSelection(pipeline: newValue) }
+    }
+
+    var profile: PPOCRv6Profile {
+        get { PPOCRv6Profile(rawValue: selection.variantID) ?? .tiny }
+        set {
+            selection = OCRModelSelection(
+                pipeline: .ppOCRv6,
+                variantID: newValue.rawValue
+            )
+        }
+    }
+
+    var normalizedForRuntime: OCRSettings {
+        var normalized = self
+        normalized.executionProvider = executionProvider.runtimeProvider
+        return normalized
+    }
+
     static let `defaults` = OCRSettings(
-        pipeline: .ppOCRv6,
-        profile: .tiny,
+        selection: OCRModelSelection(pipeline: .ppOCRv6, variantID: "tiny"),
         executionProvider: .cpu,
         localOnly: true
     )
+
+    init(
+        selection: OCRModelSelection,
+        executionProvider: OCRExecutionProvider,
+        localOnly: Bool
+    ) {
+        self.selection = selection
+        self.executionProvider = executionProvider
+        self.localOnly = localOnly
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case selection
+        case pipeline
+        case profile
+        case executionProvider
+        case localOnly
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        if let selection = try container.decodeIfPresent(
+            OCRModelSelection.self,
+            forKey: .selection
+        ) {
+            self.selection = selection
+        } else {
+            let pipeline = try container.decode(OCRPipelineID.self, forKey: .pipeline)
+            let profile = try container.decode(PPOCRv6Profile.self, forKey: .profile)
+            self.selection = OCRModelSelection(
+                pipeline: pipeline,
+                variantID: profile.rawValue
+            )
+        }
+        executionProvider = try container.decode(
+            OCRExecutionProvider.self,
+            forKey: .executionProvider
+        )
+        localOnly = try container.decode(Bool.self, forKey: .localOnly)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(selection, forKey: .selection)
+        try container.encode(executionProvider, forKey: .executionProvider)
+        try container.encode(localOnly, forKey: .localOnly)
+    }
 }
 
 struct OCRSettingsLoadResult: Equatable, Sendable {
@@ -28,6 +94,7 @@ enum OCRSettingsStoreIssue: Equatable, Sendable {
 enum OCRSettingsError: Error, Equatable {
     case cloudFallbackForbidden
     case unavailablePipeline
+    case unavailableVariant
 }
 
 struct OCRSettingsStore {
@@ -64,7 +131,7 @@ struct OCRSettingsStore {
         }
         do {
             let envelope = try decoder.decode(OCRSettingsVersionEnvelope.self, from: data)
-            guard envelope.schemaVersion == 1 else {
+            guard envelope.schemaVersion == 1 || envelope.schemaVersion == 2 else {
                 logger.error("Unknown OCR settings schema \(envelope.schemaVersion, privacy: .public)")
                 return OCRSettingsLoadResult(
                     settings: .defaults,
@@ -72,8 +139,9 @@ struct OCRSettingsStore {
                 )
             }
             let document = try decoder.decode(OCRSettingsDocumentV1.self, from: data)
-            try validate(document.settings)
-            return OCRSettingsLoadResult(settings: document.settings, issue: nil)
+            let settings = document.settings.normalizedForRuntime
+            try validate(settings)
+            return OCRSettingsLoadResult(settings: settings, issue: nil)
         } catch {
             logger.error("Corrupt OCR settings")
             return OCRSettingsLoadResult(settings: .defaults, issue: .corruptData)
@@ -81,9 +149,10 @@ struct OCRSettingsStore {
     }
 
     func save(_ settings: OCRSettings) throws {
+        let settings = settings.normalizedForRuntime
         try validate(settings)
         defaults.set(
-            try encoder.encode(OCRSettingsDocumentV1(schemaVersion: 1, settings: settings)),
+            try encoder.encode(OCRSettingsDocumentV1(schemaVersion: 2, settings: settings)),
             forKey: key
         )
     }
@@ -95,6 +164,9 @@ struct OCRSettingsStore {
             deviceClass: deviceClass
         )
         guard available.contains(settings.pipeline) else { throw OCRSettingsError.unavailablePipeline }
+        guard settings.selection.isKnownVariant else {
+            throw OCRSettingsError.unavailableVariant
+        }
     }
 }
 

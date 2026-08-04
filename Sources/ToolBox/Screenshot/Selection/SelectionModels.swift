@@ -7,6 +7,11 @@ enum SelectionSource: String, Equatable, Sendable {
     case display
 }
 
+enum SelectionCaptureMode: Equatable, Sendable {
+    case staticCapture
+    case scrollCapture
+}
+
 struct SelectionCandidate: Equatable, Sendable {
     let providerIdentity: String
     let source: SelectionSource
@@ -62,6 +67,7 @@ struct SelectedRegionSnapshot: Equatable, Identifiable, Sendable {
 
 struct SelectionSessionState: Equatable, Sendable {
     var hoveredCandidate: SelectionCandidate?
+    private(set) var captureMode: SelectionCaptureMode
     private(set) var selectedRegions: [SelectedRegionSnapshot]
     private(set) var manualRegion: CGRect?
     private(set) var captureBounds: CGRect?
@@ -69,6 +75,7 @@ struct SelectionSessionState: Equatable, Sendable {
 
     static let empty = SelectionSessionState(
         hoveredCandidate: nil,
+        captureMode: .staticCapture,
         selectedRegions: [],
         manualRegion: nil,
         captureBounds: nil,
@@ -77,6 +84,7 @@ struct SelectionSessionState: Equatable, Sendable {
 
     static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.hoveredCandidate == rhs.hoveredCandidate
+            && lhs.captureMode == rhs.captureMode
             && lhs.selectedRegions == rhs.selectedRegions
             && lhs.manualRegion == rhs.manualRegion
             && lhs.captureBounds == rhs.captureBounds
@@ -87,6 +95,10 @@ struct SelectionSessionState: Equatable, Sendable {
         selectedRegions = regions
         self.manualRegion = manualRegion
         recomputeBounds()
+    }
+
+    mutating func setCaptureMode(_ mode: SelectionCaptureMode) {
+        captureMode = mode
     }
 
     mutating func restoreUndo() {
@@ -120,14 +132,17 @@ struct SelectionSessionState: Equatable, Sendable {
 
 enum SelectionAction: Equatable, Sendable {
     case click(SelectionCandidate, additive: Bool)
+    case cycleCandidate(Int)
+    case setCaptureMode(SelectionCaptureMode)
     case deleteLast
     case undo
     case manualDrag(CGRect)
+    case adjustRegion(CGRect)
     case confirm
-    case confirmScroll
 }
 
 enum SelectionError: Error, Equatable {
     case invalidRegion
     case emptySelection
+    case disconnectedRegion
 }

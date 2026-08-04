@@ -3,6 +3,16 @@ import SwiftUI
 struct WiFiSignalPopoverView: View {
     @ObservedObject var model: WiFiSignalModel
 
+    private enum Layout {
+        static let qualityWidth: CGFloat = 70
+        static let qualityMetricsSpacing: CGFloat = 26
+        static let metricColumnSpacing: CGFloat = 20
+        static let metricTextSpacing: CGFloat = 6
+        static let metricTitleWidth: CGFloat = 30
+        static let leftValueWidth: CGFloat = 84
+        static let rightValueWidth: CGFloat = 98
+    }
+
     var body: some View {
         Group {
             switch model.snapshot.state {
@@ -32,7 +42,7 @@ struct WiFiSignalPopoverView: View {
     }
 
     private var connectedContent: some View {
-        HStack(spacing: 14) {
+        HStack(spacing: Layout.qualityMetricsSpacing) {
             VStack(alignment: .leading, spacing: 5) {
                 Image(systemName: model.snapshot.quality?.symbolName ?? "wifi.exclamationmark")
                     .font(.system(size: 22, weight: .semibold))
@@ -43,7 +53,7 @@ struct WiFiSignalPopoverView: View {
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(qualityColor)
             }
-            .frame(width: 90, alignment: .leading)
+            .frame(width: Layout.qualityWidth, alignment: .leading)
 
             VStack(spacing: 7) {
                 metricRow(
@@ -66,6 +76,8 @@ struct WiFiSignalPopoverView: View {
                 )
             }
         }
+        .frame(width: MenuPanelLayout.wifiConnectedContentWidth)
+        .frame(maxWidth: .infinity, alignment: .center)
     }
 
     private func metricRow(
@@ -74,23 +86,23 @@ struct WiFiSignalPopoverView: View {
         rightTitle: String,
         rightValue: String
     ) -> some View {
-        HStack(spacing: 12) {
-            metric(title: leftTitle, value: leftValue)
-            metric(title: rightTitle, value: rightValue)
+        HStack(spacing: Layout.metricColumnSpacing) {
+            metric(title: leftTitle, value: leftValue, valueWidth: Layout.leftValueWidth)
+            metric(title: rightTitle, value: rightValue, valueWidth: Layout.rightValueWidth)
         }
     }
 
-    private func metric(title: String, value: String) -> some View {
-        HStack(spacing: 5) {
+    private func metric(title: String, value: String, valueWidth: CGFloat) -> some View {
+        HStack(spacing: Layout.metricTextSpacing) {
             Text(title)
                 .foregroundStyle(.secondary)
-            Spacer(minLength: 4)
+                .frame(width: Layout.metricTitleWidth, alignment: .leading)
             Text(value)
                 .fontDesign(.monospaced)
                 .lineLimit(1)
+                .frame(width: valueWidth, alignment: .trailing)
         }
         .font(.system(size: 11, weight: .medium))
-        .frame(maxWidth: .infinity)
     }
 
     private func unavailableContent(symbol: String, title: String, detail: String) -> some View {

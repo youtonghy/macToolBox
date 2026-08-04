@@ -3,22 +3,32 @@ import XCTest
 @testable import ToolBox
 
 final class SelectionReducerTests: XCTestCase {
-    func testShiftClickAddsAndExpandsToUnionWithGap() throws {
+    func testCaptureModeDefaultsToStaticAndCanSwitchToScroll() throws {
+        var state = SelectionSessionState.empty
+        XCTAssertEqual(state.captureMode, .staticCapture)
+
+        try SelectionReducer.reduce(state: &state, action: .setCaptureMode(.scrollCapture))
+
+        XCTAssertEqual(state.captureMode, .scrollCapture)
+        XCTAssertNil(state.captureBounds)
+    }
+
+    func testShiftClickAddsConnectedRegionAndExpandsBounds() throws {
         var state = SelectionSessionState.empty
         let left = candidate(id: "left", rect: CGRect(x: 10, y: 10, width: 40, height: 20))
-        let right = candidate(id: "right", rect: CGRect(x: 90, y: 20, width: 30, height: 20))
+        let right = candidate(id: "right", rect: CGRect(x: 50, y: 20, width: 30, height: 20))
 
         try SelectionReducer.reduce(state: &state, action: .click(left, additive: false))
         try SelectionReducer.reduce(state: &state, action: .click(right, additive: true))
 
         XCTAssertEqual(state.selectedRegions.map(\.candidateKey), [left.candidateKey, right.candidateKey])
-        XCTAssertEqual(state.captureBounds, CGRect(x: 10, y: 10, width: 110, height: 30))
+        XCTAssertEqual(state.captureBounds, CGRect(x: 10, y: 10, width: 70, height: 30))
     }
 
     func testShiftClickSelectedCandidateRemovesIt() throws {
         var state = SelectionSessionState.empty
         let left = candidate(id: "left")
-        let right = candidate(id: "right", rect: CGRect(x: 40, y: 0, width: 20, height: 20))
+        let right = candidate(id: "right", rect: CGRect(x: 20, y: 0, width: 20, height: 20))
         try SelectionReducer.reduce(state: &state, action: .click(left, additive: false))
         try SelectionReducer.reduce(state: &state, action: .click(right, additive: true))
 
@@ -26,6 +36,29 @@ final class SelectionReducerTests: XCTestCase {
 
         XCTAssertEqual(state.selectedRegions.map(\.candidateKey), [right.candidateKey])
         XCTAssertEqual(state.captureBounds, right.globalRect)
+    }
+
+    func testShiftClickAllowsCandidateTouchingExistingSelectionEdge() throws {
+        var state = SelectionSessionState.empty
+        let left = candidate(id: "left", rect: CGRect(x: 0, y: 0, width: 20, height: 20))
+        let touching = candidate(id: "touching", rect: CGRect(x: 20, y: 4, width: 10, height: 12))
+        try SelectionReducer.reduce(state: &state, action: .click(left, additive: false))
+
+        try SelectionReducer.reduce(state: &state, action: .click(touching, additive: true))
+
+        XCTAssertEqual(state.selectedRegions.map(\.candidateKey), [left.candidateKey, touching.candidateKey])
+    }
+
+    func testShiftClickRejectsCandidateDisconnectedFromExistingSelection() throws {
+        var state = SelectionSessionState.empty
+        let left = candidate(id: "left", rect: CGRect(x: 0, y: 0, width: 20, height: 20))
+        let disconnected = candidate(id: "disconnected", rect: CGRect(x: 21, y: 0, width: 10, height: 10))
+        try SelectionReducer.reduce(state: &state, action: .click(left, additive: false))
+
+        XCTAssertThrowsError(
+            try SelectionReducer.reduce(state: &state, action: .click(disconnected, additive: true))
+        )
+        XCTAssertEqual(state.selectedRegions.map(\.candidateKey), [left.candidateKey])
     }
 
     func testNormalClickReplacesSelection() throws {
@@ -40,7 +73,7 @@ final class SelectionReducerTests: XCTestCase {
     func testDeleteLastAndUndoRestoreCompleteValueState() throws {
         var state = SelectionSessionState.empty
         let first = candidate(id: "first")
-        let second = candidate(id: "second", rect: CGRect(x: 50, y: 0, width: 20, height: 20))
+        let second = candidate(id: "second", rect: CGRect(x: 20, y: 0, width: 20, height: 20))
         try SelectionReducer.reduce(state: &state, action: .click(first, additive: false))
         try SelectionReducer.reduce(state: &state, action: .click(second, additive: true))
         let bounds = state.captureBounds
@@ -62,6 +95,21 @@ final class SelectionReducerTests: XCTestCase {
         XCTAssertEqual(state.captureBounds, CGRect(x: 100, y: 100, width: 30, height: 40))
         try SelectionReducer.reduce(state: &state, action: .undo)
         XCTAssertEqual(state.selectedRegions.map(\.candidateKey), [element.candidateKey])
+    }
+
+    func testRegionAdjustmentPreservesManualSelection() throws {
+        var state = SelectionSessionState.empty
+        try SelectionReducer.reduce(
+            state: &state,
+            action: .manualDrag(CGRect(x: 10, y: 10, width: 30, height: 40))
+        )
+
+        try SelectionReducer.reduce(
+            state: &state,
+            action: .adjustRegion(CGRect(x: 12, y: 14, width: 35, height: 45))
+        )
+
+        XCTAssertEqual(state.manualRegion, CGRect(x: 12, y: 14, width: 35, height: 45))
     }
 
     func testEmptyConfirmationAndInvalidRectsAreRejected() {

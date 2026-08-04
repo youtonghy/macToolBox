@@ -24,11 +24,13 @@ protocol AudioRouteNativeEngineControlling: AnyObject {
     func diagnostics() -> [AudioRouteDiagnosticsSnapshot]
     func performMaintenance() -> Bool
     func stopAll(reason: AudioRouteStopReason) -> AudioRouteStopReport
+    /// Maximum expected duration from `beginFadeOut` to the mute ramp completing,
+    /// accounting for the worst-case callback period and ramp frames.
+    var fadeOutDuration: Duration { get }
 }
 
 actor AudioRouteController: AudioRouteEngineControlling {
     private let nativeEngine: any AudioRouteNativeEngineControlling
-    private let fadeOutDelay: Duration
     private var appliedPlans: [AudioRoutePlan] = []
     private var generation: UInt64 = 0
     private var cleanupBlockedMessage: String?
@@ -37,11 +39,13 @@ actor AudioRouteController: AudioRouteEngineControlling {
     private var pendingFadeOperation: UInt64?
 
     init(
-        nativeEngine: any AudioRouteNativeEngineControlling,
-        fadeOutDelay: Duration = .milliseconds(12)
+        nativeEngine: any AudioRouteNativeEngineControlling
     ) {
         self.nativeEngine = nativeEngine
-        self.fadeOutDelay = fadeOutDelay
+    }
+
+    private var fadeOutDelay: Duration {
+        nativeEngine.fadeOutDuration
     }
 
     func reconcile(
@@ -202,6 +206,7 @@ actor AudioRouteController: AudioRouteEngineControlling {
                 nonFiniteSampleCount: snapshot.nonFiniteSampleCount,
                 clippedSampleCount: snapshot.clippedSampleCount,
                 callbacksInFlight: snapshot.callbacksInFlight,
+                sourceFatalCount: snapshot.sourceFatalCount,
                 fatalCallbackMismatch: snapshot.fatalCallbackMismatch
             )
         }
@@ -532,9 +537,14 @@ final class NativeAudioRouteEngineController: AudioRouteNativeEngineControlling 
                 nonFiniteSampleCount: snapshot.nonFiniteSampleCount,
                 clippedSampleCount: snapshot.clippedSampleCount,
                 callbacksInFlight: snapshot.callbacksInFlight,
+                sourceFatalCount: 0,
                 fatalCallbackMismatch: snapshot.fatalCallbackMismatch
             )
         }
+    }
+
+    var fadeOutDuration: Duration {
+        .seconds(engine.maximumFadeOutDuration())
     }
 
     func performMaintenance() -> Bool {

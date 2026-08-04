@@ -16,7 +16,85 @@ struct PaddleOCRDetectionInput: Sendable {
     let originalSize: CGSize
 }
 
+struct PaddleOCRRasterizedImage: Sendable {
+    let pixels: [UInt8]
+    let width: Int
+    let height: Int
+}
+
 enum PaddleOCRImagePreprocessor {
+    static func perspectiveCrop(
+        image: CGImage,
+        quadrilateral: [CGPoint]
+    ) throws -> CGImage {
+        try perspectiveCrop(source: rasterizedImage(image: image), quadrilateral: quadrilateral)
+    }
+
+    static func rasterizedImage(image: CGImage) throws -> PaddleOCRRasterizedImage {
+        guard image.width > 0, image.height > 0 else {
+            throw PaddleOCRImagePreprocessorError.invalidImage
+        }
+        return PaddleOCRRasterizedImage(
+            pixels: try rasterize(image: image, width: image.width, height: image.height),
+            width: image.width,
+            height: image.height
+        )
+    }
+
+    static func perspectiveCrop(
+        source: PaddleOCRRasterizedImage,
+        quadrilateral: [CGPoint]
+    ) throws -> CGImage {
+        guard source.width > 0, source.height > 0, quadrilateral.count == 4 else {
+            throw PaddleOCRImagePreprocessorError.invalidImage
+        }
+        guard isValidQuadrilateral(quadrilateral) else {
+            throw PaddleOCRImagePreprocessorError.invalidImage
+        }
+        let points = orderedQuadrilateral(quadrilateral)
+        let width = max(1, Int(round(max(distance(points[0], points[1]), distance(points[3], points[2])))))
+        let height = max(1, Int(round(max(distance(points[0], points[3]), distance(points[1], points[2])))))
+        var output = [UInt8](repeating: 255, count: width * height * 4)
+        for y in 0..<height {
+            let v = height == 1 ? 0 : CGFloat(y) / CGFloat(height - 1)
+            for x in 0..<width {
+                let u = width == 1 ? 0 : CGFloat(x) / CGFloat(width - 1)
+                let top = points[0] * (1 - u) + points[1] * u
+                let bottom = points[3] * (1 - u) + points[2] * u
+                let sourcePoint = top * (1 - v) + bottom * v
+                let targetIndex = (y * width + x) * 4
+                for channel in 0..<3 {
+                    output[targetIndex + channel] = bilinearSample(
+                        source.pixels,
+                        width: source.width,
+                        height: source.height,
+                        point: sourcePoint,
+                        channel: channel
+                    )
+                }
+                output[targetIndex + 3] = 255
+            }
+        }
+        let data = Data(output) as CFData
+        guard let provider = CGDataProvider(data: data),
+              let result = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: CGColorSpaceCreateDeviceRGB(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else {
+            throw PaddleOCRImagePreprocessorError.rasterizationFailed
+        }
+        return result
+    }
+
     static func detectionTensor(
         image: CGImage,
         maximumSide: Int = 1280
@@ -100,4 +178,82 @@ enum PaddleOCRImagePreprocessor {
     private static func roundedToStride(_ value: Int, _ stride: Int) -> Int {
         max(stride, Int((Double(value) / Double(stride)).rounded()) * stride)
     }
+
+    private static func orderedQuadrilateral(_ points: [CGPoint]) -> [CGPoint] {
+        let center = points.reduce(CGPoint.zero, +) / CGFloat(points.count)
+        let aroundCenter = points.sorted {
+            atan2($0.y - center.y, $0.x - center.x) < atan2($1.y - center.y, $1.x - center.x)
+        }
+        let topLeftIndex = aroundCenter.indices.min {
+            aroundCenter[$0].x + aroundCenter[$0].y < aroundCenter[$1].x + aroundCenter[$1].y
+        }!
+        var ordered = (0..<aroundCenter.count).map {
+            aroundCenter[(topLeftIndex + $0) % aroundCenter.count]
+        }
+        if ordered[1].x < ordered[3].x {
+            ordered = [ordered[0], ordered[3], ordered[2], ordered[1]]
+        }
+        return ordered
+    }
+
+    private static func distance(_ lhs: CGPoint, _ rhs: CGPoint) -> CGFloat {
+        hypot(lhs.x - rhs.x, lhs.y - rhs.y)
+    }
+
+    private static func isValidQuadrilateral(_ points: [CGPoint]) -> Bool {
+        guard points.allSatisfy({ $0.x.isFinite && $0.y.isFinite }) else { return false }
+        var orientation: CGFloat = 0
+        for index in points.indices {
+            let a = points[index]
+            let b = points[(index + 1) % points.count]
+            let c = points[(index + 2) % points.count]
+            let cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x)
+            if abs(cross) < 0.001 { return false }
+            if orientation == 0 { orientation = cross }
+            else if orientation * cross < 0 { return false }
+        }
+        return abs(polygonArea(points)) > 0.001
+    }
+
+    private static func polygonArea(_ points: [CGPoint]) -> CGFloat {
+        abs(points.enumerated().reduce(CGFloat.zero) { result, item in
+            let next = points[(item.offset + 1) % points.count]
+            return result + item.element.x * next.y - item.element.y * next.x
+        }) / 2
+    }
+
+    private static func bilinearSample(
+        _ pixels: [UInt8],
+        width: Int,
+        height: Int,
+        point: CGPoint,
+        channel: Int
+    ) -> UInt8 {
+        let x = min(CGFloat(width - 1), max(0, point.x))
+        let y = min(CGFloat(height - 1), max(0, point.y))
+        let x0 = Int(floor(x))
+        let y0 = Int(floor(y))
+        let x1 = min(width - 1, x0 + 1)
+        let y1 = min(height - 1, y0 + 1)
+        let xWeight = x - CGFloat(x0)
+        let yWeight = y - CGFloat(y0)
+        func value(_ sampleX: Int, _ sampleY: Int) -> CGFloat {
+            CGFloat(pixels[(sampleY * width + sampleX) * 4 + channel])
+        }
+        let top = value(x0, y0) * (1 - xWeight) + value(x1, y0) * xWeight
+        let bottom = value(x0, y1) * (1 - xWeight) + value(x1, y1) * xWeight
+        return UInt8(clamping: Int(round(top * (1 - yWeight) + bottom * yWeight)))
+    }
+}
+
+private func + (lhs: CGPoint, rhs: CGPoint) -> CGPoint {
+    CGPoint(x: lhs.x + rhs.x, y: lhs.y + rhs.y)
+}
+
+private func * (lhs: CGPoint, rhs: CGFloat) -> CGPoint {
+    CGPoint(x: lhs.x * rhs, y: lhs.y * rhs)
+}
+
+private func / (lhs: CGPoint, rhs: CGFloat) -> CGPoint {
+    CGPoint(x: lhs.x / rhs, y: lhs.y / rhs)
 }

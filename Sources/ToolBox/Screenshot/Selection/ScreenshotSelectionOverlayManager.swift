@@ -84,6 +84,8 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
             panel.isOpaque = false
             panel.backgroundColor = .clear
             panel.hasShadow = false
+            panel.animationBehavior = .none
+            panel.isReleasedWhenClosed = false
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
             let view = ScreenshotSelectionView(
                 frame: CGRect(origin: .zero, size: displayFrame.size),
@@ -127,7 +129,8 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
     func close(cancelled: Bool) {
         guard !closed else { return }
         closed = true
-        panels.values.forEach { $0.orderOut(nil); $0.close() }
+        views.values.forEach { $0.prepareForRemoval() }
+        panels.values.forEach { $0.close() }
         panels.removeAll()
         views.removeAll()
         if cancelled { restorePreviousApplication() }

@@ -10,11 +10,13 @@ final class ScreenshotCoordinator {
     private let documentHandoff: (ScreenshotDocument, @escaping () -> Void) -> Void
     private let bringEditorForward: () -> Void
     private let candidateResolver: ScreenshotCandidateResolver?
-    private let windowCandidateResolver: ScreenshotCandidateResolver?
+    private let windowCandidateResolver: ScreenshotWindowCandidateResolver?
     private let targetActivator: ScrollTargetActivating
     private let scrollControls: ScrollCaptureControlController
     private var frames: [DisplayCaptureFrame] = []
     private var selectionState = SelectionSessionState.empty
+    private var hoveredCandidates: [SelectionCandidate] = []
+    private var hoveredCandidateIndex = 0
     private var generation: UInt64 = 0
     private var hoverTask: Task<Void, Never>?
     private var scrollTask: Task<Void, Never>?
@@ -33,7 +35,7 @@ final class ScreenshotCoordinator {
             try ScreenshotImageComposer.compose(selection: $0, frames: $1)
         },
         candidateResolver: ScreenshotCandidateResolver? = nil,
-        windowCandidateResolver: ScreenshotCandidateResolver? = nil,
+        windowCandidateResolver: ScreenshotWindowCandidateResolver? = nil,
         targetActivator: ScrollTargetActivating? = nil,
         scrollControls: ScrollCaptureControlController? = nil,
         bringEditorForward: @escaping () -> Void = {},
@@ -93,6 +95,8 @@ final class ScreenshotCoordinator {
             guard generation == sessionGeneration, state == .preparing else { return }
             frames = captured
             selectionState = .empty
+            hoveredCandidates = []
+            hoveredCandidateIndex = 0
             state = .selecting
             try overlay.show(
                 frames: captured,
@@ -122,6 +126,8 @@ final class ScreenshotCoordinator {
         targetRestoration = nil
         frames.removeAll()
         selectionState = .empty
+        hoveredCandidates = []
+        hoveredCandidateIndex = 0
         if state == .selecting {
             overlay.close(cancelled: true)
         }
@@ -135,11 +141,17 @@ final class ScreenshotCoordinator {
 
     private func handle(_ action: SelectionAction) {
         guard state == .selecting else { return }
+        if case let .cycleCandidate(offset) = action {
+            cycleCandidate(by: offset)
+            return
+        }
         do {
             try SelectionReducer.reduce(state: &selectionState, action: action)
-            if action == .confirm {
-                try confirmSelection()
-            } else if action == .confirmScroll {
+            if let completionMode = completionMode(after: action) {
+                if completionMode == .staticCapture {
+                    scheduleStaticSelectionCompletion()
+                    return
+                }
                 let snapshot = selectionState
                 let sessionGeneration = generation
                 scrollTask = Task { [weak self] in
@@ -160,6 +172,41 @@ final class ScreenshotCoordinator {
             overlay.close(cancelled: false)
             state = .idle
             lastError = .overlay
+        }
+    }
+
+    private func scheduleStaticSelectionCompletion() {
+        let sessionGeneration = generation
+        Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self,
+                  self.generation == sessionGeneration,
+                  self.state == .selecting
+            else { return }
+            do {
+                try self.confirmSelection()
+            } catch let error as SelectionError {
+                self.lastError = .selection(error)
+            } catch let error as ScreenshotCaptureError {
+                self.frames.removeAll()
+                self.overlay.close(cancelled: false)
+                self.state = .idle
+                self.lastError = .composition(error)
+            } catch {
+                self.frames.removeAll()
+                self.overlay.close(cancelled: false)
+                self.state = .idle
+                self.lastError = .overlay
+            }
+        }
+    }
+
+    private func completionMode(after action: SelectionAction) -> SelectionCaptureMode? {
+        switch action {
+        case .click(_, additive: false), .manualDrag, .confirm:
+            return selectionState.captureMode
+        case .click(_, additive: true), .cycleCandidate, .setCaptureMode, .deleteLast, .undo, .adjustRegion:
+            return nil
         }
     }
 
@@ -278,16 +325,27 @@ final class ScreenshotCoordinator {
         hoverTask?.cancel()
         hoverTask = Task { [weak self] in
             guard let self else { return }
-            var candidate = await self.candidateResolver?(point, sessionGeneration)
-            if candidate == nil {
-                candidate = self.displayCandidate(at: point, generation: sessionGeneration)
+            var candidates = await self.candidateResolver?(point, sessionGeneration) ?? []
+            if candidates.isEmpty,
+               let display = self.displayCandidate(at: point, generation: sessionGeneration) {
+                candidates = [display]
             }
             guard !Task.isCancelled,
                   self.generation == sessionGeneration,
                   self.state == .selecting else { return }
-            self.selectionState.hoveredCandidate = candidate
+            self.hoveredCandidates = candidates
+            self.hoveredCandidateIndex = 0
+            self.selectionState.hoveredCandidate = candidates.first
             self.overlay.update(state: self.selectionState)
         }
+    }
+
+    private func cycleCandidate(by offset: Int) {
+        guard !hoveredCandidates.isEmpty, offset != 0 else { return }
+        let count = hoveredCandidates.count
+        hoveredCandidateIndex = ((hoveredCandidateIndex + offset) % count + count) % count
+        selectionState.hoveredCandidate = hoveredCandidates[hoveredCandidateIndex]
+        overlay.update(state: selectionState)
     }
 
     private func displayCandidate(at point: CGPoint, generation: UInt64) -> SelectionCandidate? {

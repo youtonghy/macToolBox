@@ -3,6 +3,23 @@ import XCTest
 @testable import ToolBox
 
 final class IncrementalImageComposerTests: XCTestCase {
+    func testScrollImageSourcePreservesRasterizedPixelOrientation() throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = makeRows(
+            width: 4,
+            colors: [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+        )
+        let store = try ScrollCaptureStripStore(initialImage: original, rootDirectory: root)
+        let source = try store.makeImageSource()
+
+        let roundTrip = try source.copyPixels(in: CGRect(x: 0, y: 0, width: 4, height: 4))
+        let originalPixels = try PaddleOCRImagePreprocessor.rasterizedImage(image: original)
+        let roundTripPixels = try PaddleOCRImagePreprocessor.rasterizedImage(image: roundTrip)
+
+        XCTAssertEqual(roundTripPixels.pixels, originalPixels.pixels)
+    }
+
     func testAppendsStripsAndReadsBoundedCrossStripTile() throws {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
@@ -15,8 +32,8 @@ final class IncrementalImageComposerTests: XCTestCase {
 
         XCTAssertEqual(source.pixelSize, CGSize(width: 4, height: 4))
         let tile = try source.copyPixels(in: CGRect(x: 1, y: 1, width: 2, height: 2))
-        XCTAssertEqual(try pixel(in: tile, x: 0, y: 0), RGB(0, 255, 0))
-        XCTAssertEqual(try pixel(in: tile, x: 0, y: 1), RGB(0, 0, 255))
+        XCTAssertEqual(try pixel(in: tile, x: 0, y: 0), RGB(0, 0, 255))
+        XCTAssertEqual(try pixel(in: tile, x: 0, y: 1), RGB(0, 255, 0))
         XCTAssertEqual(source.lastReadOperationCount, 2)
     }
 
@@ -158,11 +175,13 @@ final class IncrementalImageComposerTests: XCTestCase {
     }
 
     private func pixel(in image: CGImage, x: Int, y: Int) throws -> RGB {
-        guard let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else {
-            throw TestError.image
-        }
-        let offset = y * image.bytesPerRow + x * 4
-        return RGB(bytes[offset], bytes[offset + 1], bytes[offset + 2])
+        let rasterized = try PaddleOCRImagePreprocessor.rasterizedImage(image: image)
+        let offset = (y * rasterized.width + x) * 4
+        return RGB(
+            rasterized.pixels[offset],
+            rasterized.pixels[offset + 1],
+            rasterized.pixels[offset + 2]
+        )
     }
 
     private func temporaryRoot() -> URL {
@@ -181,8 +200,6 @@ final class IncrementalImageComposerTests: XCTestCase {
             self.blue = blue
         }
     }
-
-    private enum TestError: Error { case image }
 
     private enum MetadataMutation: CaseIterable {
         case pathTraversal

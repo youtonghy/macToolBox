@@ -23,6 +23,11 @@ MIT-licensed open source projects:
   - MonitorControl OSD, software dimming, updater, and preferences stack were
     not migrated.
 
+- PaddleOCR / PaddlePaddle / PaddleX
+  - Used by the local PP-OCRv6, PP-StructureV3 and PaddleOCR-VL worker paths.
+  - Distributed under the Apache License, Version 2.0; see
+    `Resources/OCRModels/PaddleOCR-NOTICE.txt` and the release worker lock file.
+
 ## MIT License
 
 Permission is hereby granted, free of charge, to any person obtaining a copy

@@ -57,6 +57,19 @@ enum RoutePlanCompiler {
                 )
                 continue
             }
+            
+            // P0 Fix: Delay route creation for non-100% volume until the process is
+            // actively producing output. This avoids installing Tap during the fragile
+            // app audio subsystem startup window, preventing watchdog false positives.
+            if requiresGain {
+                let hasActiveOutput = matchingProcesses.contains { $0.isRunningOutput }
+                guard hasActiveOutput else {
+                    resolutions.append(
+                        AudioRuleResolution(bundleID: rule.bundleID, state: .waiting(.processNotProducingOutput))
+                    )
+                    continue
+                }
+            }
             guard let targetUID = selectedUID ?? defaultOutputUID else {
                 resolutions.append(
                     AudioRuleResolution(

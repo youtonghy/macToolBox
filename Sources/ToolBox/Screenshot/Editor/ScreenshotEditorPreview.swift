@@ -37,8 +37,7 @@ struct ScreenshotEditorPreviewBuilder: Sendable {
         ) else {
             throw AnnotationRenderError.contextCreationFailed
         }
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: scale, y: -scale)
+        context.scaleBy(x: scale, y: scale)
         context.interpolationQuality = .medium
 
         let sourceBandHeight = max(1, maximumBandBytes / dimensions.bytesPerRow)
@@ -46,9 +45,15 @@ struct ScreenshotEditorPreviewBuilder: Sendable {
         while y < dimensions.height {
             try Task.checkCancellation()
             let bandHeight = min(sourceBandHeight, dimensions.height - y)
-            let rect = CGRect(x: 0, y: y, width: dimensions.width, height: bandHeight)
-            let band = try document.baseImage.copyPixels(in: rect)
-            context.draw(band, in: rect)
+            let sourceRect = CGRect(x: 0, y: y, width: dimensions.width, height: bandHeight)
+            let destinationRect = CGRect(
+                x: 0,
+                y: dimensions.height - y - bandHeight,
+                width: dimensions.width,
+                height: bandHeight
+            )
+            let band = try document.baseImage.copyPixels(in: sourceRect)
+            context.draw(band, in: destinationRect)
             y += bandHeight
         }
         guard let image = context.makeImage() else {

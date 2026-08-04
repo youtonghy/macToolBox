@@ -36,6 +36,31 @@ final class OCRModelManifestTests: XCTestCase {
         }
     }
 
+    func testLegacyProfileAndExplicitVariantResolveToPipelineSelections() throws {
+        let legacy = try makeOCRManifest()
+        XCTAssertEqual(
+            legacy.selection,
+            OCRModelSelection(pipeline: .ppOCRv6, variantID: "tiny")
+        )
+
+        var advanced = legacy
+        advanced.pipeline = .paddleOCRVL
+        advanced.profile = nil
+        advanced.variantID = "v1.6"
+        XCTAssertEqual(
+            advanced.selection,
+            OCRModelSelection(pipeline: .paddleOCRVL, variantID: "v1.6")
+        )
+    }
+
+    func testRejectsVariantThatBelongsToAnotherPipeline() throws {
+        var manifest = try makeOCRManifest()
+        manifest.variantID = "v1.6"
+        XCTAssertThrowsError(try manifest.validate()) {
+            XCTAssertEqual($0 as? OCRModelManifestError, .invalidVariant)
+        }
+    }
+
     private enum ManifestMutation: CaseIterable {
         case pathTraversal, absolutePath, badHash, zeroLength
     }

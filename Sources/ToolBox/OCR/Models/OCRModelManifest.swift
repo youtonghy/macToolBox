@@ -11,10 +11,41 @@ struct OCRModelManifest: Codable, Equatable, Sendable {
     var id: String
     var pipeline: OCRPipelineID
     var profile: PPOCRv6Profile?
+    var variantID: String?
+    var displayName: String?
     var version: String
     var architectures: Set<OCRRuntimeArchitecture>
     var licenseResource: String
     var files: [OCRModelFileManifest]
+
+    init(
+        id: String,
+        pipeline: OCRPipelineID,
+        profile: PPOCRv6Profile? = nil,
+        variantID: String? = nil,
+        displayName: String? = nil,
+        version: String,
+        architectures: Set<OCRRuntimeArchitecture>,
+        licenseResource: String,
+        files: [OCRModelFileManifest]
+    ) {
+        self.id = id
+        self.pipeline = pipeline
+        self.profile = profile
+        self.variantID = variantID
+        self.displayName = displayName
+        self.version = version
+        self.architectures = architectures
+        self.licenseResource = licenseResource
+        self.files = files
+    }
+
+    var selection: OCRModelSelection {
+        OCRModelSelection(
+            pipeline: pipeline,
+            variantID: variantID ?? profile?.rawValue
+        )
+    }
 }
 
 struct OCRModelCatalog: Codable, Equatable, Sendable {
@@ -39,6 +70,7 @@ enum OCRModelManifestError: Error, Equatable {
     case emptyCatalog
     case duplicateModelID
     case invalidIdentifier
+    case invalidVariant
     case invalidArchitecture
     case missingLicense
     case emptyFiles
@@ -55,6 +87,12 @@ extension OCRModelManifest {
         guard Self.isSafeIdentifier(id), Self.isSafeIdentifier(version) else {
             throw OCRModelManifestError.invalidIdentifier
         }
+        if let variantID {
+            guard Self.isSafeIdentifier(variantID) else {
+                throw OCRModelManifestError.invalidIdentifier
+            }
+        }
+        guard selection.isKnownVariant else { throw OCRModelManifestError.invalidVariant }
         guard !architectures.isEmpty else { throw OCRModelManifestError.invalidArchitecture }
         guard !licenseResource.isEmpty else { throw OCRModelManifestError.missingLicense }
         guard !files.isEmpty else { throw OCRModelManifestError.emptyFiles }

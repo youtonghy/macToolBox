@@ -11,6 +11,12 @@ struct AXRegionRecord: Equatable, Sendable {
     let hierarchyIndex: Int
 }
 
+struct AXLookupRequest: Equatable, Sendable {
+    let point: CGPoint
+    let targetPID: pid_t?
+    let timeout: TimeInterval
+}
+
 enum AXLookupFailure: Equatable, Sendable {
     case timeout
     case permissionDenied
@@ -29,37 +35,89 @@ enum AXRegionError: Error, Equatable {
     case staleGeneration
 }
 
+private final class AXLookupJob: @unchecked Sendable {
+    private let request: AXLookupRequest
+    private let lookup: AXRegionProvider.Lookup
+    private var continuation: CheckedContinuation<AXLookupResult, Never>?
+    private let lock = NSLock()
+    private var isCancelled = false
+
+    init(
+        request: AXLookupRequest,
+        lookup: @escaping AXRegionProvider.Lookup,
+        continuation: CheckedContinuation<AXLookupResult, Never>
+    ) {
+        self.request = request
+        self.lookup = lookup
+        self.continuation = continuation
+    }
+
+    func cancel() {
+        lock.lock()
+        isCancelled = true
+        lock.unlock()
+    }
+
+    func run() {
+        lock.lock()
+        let cancelled = isCancelled
+        let continuation = continuation
+        self.continuation = nil
+        lock.unlock()
+        continuation?.resume(returning: cancelled ? .failure(.unavailable) : lookup(request))
+    }
+}
+
 @MainActor
 final class AXRegionProvider {
-    typealias Lookup = @Sendable (CGPoint, TimeInterval) -> AXLookupResult
+    typealias Lookup = @Sendable (AXLookupRequest) -> AXLookupResult
 
     private let ownPID: pid_t
     private let primaryScreenTop: () -> CGFloat
+    private let visibleScreenFrames: () -> [CGRect]
     private let currentGeneration: (() -> UInt64)?
     private let lookup: Lookup
     private let queue = DispatchQueue(label: "ToolBox.AXRegionProvider")
+    private var pendingLookup: AXLookupJob?
 
     init(
         ownPID: pid_t = ProcessInfo.processInfo.processIdentifier,
-        primaryScreenTop: @escaping () -> CGFloat = { NSScreen.main?.frame.maxY ?? 0 },
+        primaryScreenTop: @escaping () -> CGFloat = {
+            NSScreen.screens.first(where: { $0.frame.origin == .zero })?.frame.maxY
+                ?? NSScreen.screens.first?.frame.maxY
+                ?? 0
+        },
+        visibleScreenFrames: @escaping () -> [CGRect] = { NSScreen.screens.map(\.frame) },
         currentGeneration: (() -> UInt64)? = nil,
         lookup: Lookup? = nil
     ) {
         self.ownPID = ownPID
         self.primaryScreenTop = primaryScreenTop
+        self.visibleScreenFrames = visibleScreenFrames
         self.currentGeneration = currentGeneration
-        self.lookup = lookup ?? { point, timeout in
-            AXRegionProvider.systemLookup(point: point, timeout: timeout)
+        self.lookup = lookup ?? { request in
+            AXRegionProvider.systemLookup(request: request)
         }
     }
 
-    func regions(at point: CGPoint, generation: UInt64) async throws -> [SelectionCandidate] {
+    func regions(
+        at point: CGPoint,
+        generation: UInt64,
+        targetWindow: SelectionCandidate? = nil
+    ) async throws -> [SelectionCandidate] {
         let screenTop = primaryScreenTop()
+        let screenFrames = visibleScreenFrames()
         let axPoint = CGPoint(x: point.x, y: screenTop - point.y)
+        let request = AXLookupRequest(
+            point: axPoint,
+            targetPID: targetWindow?.ownerPID,
+            timeout: 0.10
+        )
         let result = await withCheckedContinuation { continuation in
-            queue.async { [lookup] in
-                continuation.resume(returning: lookup(axPoint, 0.15))
-            }
+            let job = AXLookupJob(request: request, lookup: lookup, continuation: continuation)
+            pendingLookup?.cancel()
+            pendingLookup = job
+            queue.async { job.run() }
         }
 
         if let currentGeneration, generation != currentGeneration() {
@@ -73,7 +131,7 @@ final class AXRegionProvider {
         case .failure(.unavailable): throw AXRegionError.unavailable
         }
 
-        return records.compactMap { record in
+        var candidates = records.compactMap { record -> SelectionCandidate? in
             guard record.ownerPID != ownPID,
                   isFinite(record.position),
                   isFinite(record.size),
@@ -87,11 +145,14 @@ final class AXRegionProvider {
                 width: record.size.width,
                 height: record.size.height
             )
+            guard screenFrames.isEmpty || screenFrames.contains(where: { $0.intersects(rect) }) else {
+                return nil
+            }
             return SelectionCandidate(
                 providerIdentity: "ax",
                 source: .accessibility,
                 ownerPID: record.ownerPID,
-                windowID: windowID(ownerPID: record.ownerPID, axRect: CGRect(origin: record.position, size: record.size)),
+                windowID: targetWindow?.ownerPID == record.ownerPID ? targetWindow?.windowID : nil,
                 displayID: displayID(containing: rect),
                 topologyGeneration: generation,
                 role: record.role,
@@ -100,72 +161,109 @@ final class AXRegionProvider {
                 globalRect: rect
             )
         }
+
+        if let targetWindow {
+            candidates.removeAll { candidate in
+                approximatelyEqual(candidate.globalRect, targetWindow.globalRect)
+            }
+            candidates.append(targetWindow)
+        }
+        return candidates
     }
 
-    nonisolated private static func systemLookup(point: CGPoint, timeout: TimeInterval) -> AXLookupResult {
+    nonisolated private static func systemLookup(request: AXLookupRequest) -> AXLookupResult {
         guard AXIsProcessTrusted() else { return .failure(.permissionDenied) }
-        let systemWide = AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(systemWide, Float(timeout))
+        let root = request.targetPID.map(AXUIElementCreateApplication) ?? AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(root, Float(request.timeout))
         var hit: AXUIElement?
-        let hitError = AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &hit)
+        let hitError = AXUIElementCopyElementAtPosition(
+            root,
+            Float(request.point.x),
+            Float(request.point.y),
+            &hit
+        )
         guard hitError == .success, var current = hit else {
             return .failure(hitError == .cannotComplete ? .timeout : .unavailable)
         }
 
         var records: [AXRegionRecord] = []
-        for index in 0..<16 {
-            AXUIElementSetMessagingTimeout(current, Float(timeout))
-            var pid: pid_t = 0
-            guard AXUIElementGetPid(current, &pid) == .success else { break }
-            if let position = pointAttribute(current, key: kAXPositionAttribute),
-               let size = sizeAttribute(current, key: kAXSizeAttribute) {
+        for index in 0..<32 {
+            AXUIElementSetMessagingTimeout(current, Float(request.timeout))
+            let attributes = attributeSnapshot(current)
+            var pid = request.targetPID ?? 0
+            if request.targetPID == nil {
+                _ = AXUIElementGetPid(current, &pid)
+            }
+            if let position = attributes.position, let size = attributes.size {
                 records.append(AXRegionRecord(
                     ownerPID: pid,
-                    role: stringAttribute(current, key: kAXRoleAttribute),
-                    title: stringAttribute(current, key: kAXTitleAttribute),
+                    role: attributes.role,
+                    title: attributes.title,
                     position: position,
                     size: size,
                     hierarchyIndex: index
                 ))
             }
-            guard let parent = elementAttribute(current, key: kAXParentAttribute) else { break }
+            guard let parent = attributes.parent else { break }
             current = parent
         }
         return .success(records)
     }
 
-    nonisolated private static func stringAttribute(_ element: AXUIElement, key: String) -> String? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success else { return nil }
-        return value as? String
+    nonisolated private struct AttributeSnapshot {
+        let position: CGPoint?
+        let size: CGSize?
+        let role: String?
+        let title: String?
+        let parent: AXUIElement?
     }
 
-    nonisolated private static func pointAttribute(_ element: AXUIElement, key: String) -> CGPoint? {
-        var value: CFTypeRef?
+    nonisolated private static func attributeSnapshot(_ element: AXUIElement) -> AttributeSnapshot {
+        let names = [
+            kAXPositionAttribute,
+            kAXSizeAttribute,
+            kAXRoleAttribute,
+            kAXTitleAttribute,
+            kAXParentAttribute,
+        ] as CFArray
+        var values: CFArray?
+        guard AXUIElementCopyMultipleAttributeValues(element, names, [], &values) == .success,
+              let attributes = values as? [Any],
+              attributes.count == 5 else {
+            return AttributeSnapshot(position: nil, size: nil, role: nil, title: nil, parent: nil)
+        }
+        return AttributeSnapshot(
+            position: pointValue(attributes[0]),
+            size: sizeValue(attributes[1]),
+            role: attributes[2] as? String,
+            title: attributes[3] as? String,
+            parent: elementValue(attributes[4])
+        )
+    }
+
+    nonisolated private static func pointValue(_ value: Any) -> CGPoint? {
         var point = CGPoint.zero
-        guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success,
-              let rawValue = value,
+        let rawValue = value as CFTypeRef
+        guard
               CFGetTypeID(rawValue) == AXValueGetTypeID(),
               let axValue = rawValue as! AXValue?,
               AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
         return point
     }
 
-    nonisolated private static func sizeAttribute(_ element: AXUIElement, key: String) -> CGSize? {
-        var value: CFTypeRef?
+    nonisolated private static func sizeValue(_ value: Any) -> CGSize? {
         var size = CGSize.zero
-        guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success,
-              let rawValue = value,
+        let rawValue = value as CFTypeRef
+        guard
               CFGetTypeID(rawValue) == AXValueGetTypeID(),
               let axValue = rawValue as! AXValue?,
               AXValueGetValue(axValue, .cgSize, &size) else { return nil }
         return size
     }
 
-    nonisolated private static func elementAttribute(_ element: AXUIElement, key: String) -> AXUIElement? {
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, key as CFString, &value) == .success,
-              let rawValue = value,
+    nonisolated private static func elementValue(_ value: Any) -> AXUIElement? {
+        let rawValue = value as CFTypeRef
+        guard
               CFGetTypeID(rawValue) == AXUIElementGetTypeID() else { return nil }
         return (rawValue as! AXUIElement?)
     }
@@ -176,17 +274,11 @@ final class AXRegionProvider {
         return (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
     }
 
-    private func windowID(ownerPID: pid_t, axRect: CGRect) -> CGWindowID? {
-        guard let windows = CGWindowListCopyWindowInfo(
-            [.optionOnScreenOnly, .excludeDesktopElements],
-            kCGNullWindowID
-        ) as? [[CFString: Any]] else { return nil }
-        return windows.first { window in
-            guard (window[kCGWindowOwnerPID] as? NSNumber)?.int32Value == ownerPID,
-                  let boundsDictionary = window[kCGWindowBounds] as? NSDictionary,
-                  let bounds = CGRect(dictionaryRepresentation: boundsDictionary) else { return false }
-            return bounds.intersects(axRect)
-        }.flatMap { ($0[kCGWindowNumber] as? NSNumber)?.uint32Value }
+    private func approximatelyEqual(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+        abs(lhs.minX - rhs.minX) <= 1
+            && abs(lhs.minY - rhs.minY) <= 1
+            && abs(lhs.width - rhs.width) <= 1
+            && abs(lhs.height - rhs.height) <= 1
     }
 
     private func isFinite(_ point: CGPoint) -> Bool {

@@ -73,6 +73,7 @@ typedef struct {
     uint64_t clippedSampleCount;
     uint64_t rejectedGenerationCount;
     uint64_t sourceFatalCount;
+    uint64_t outputFatalCount;
 } TBAudioRealtimeSnapshot;
 
 TBAudioRealtimeKernelRef _Nullable TBAudioRealtimeKernelCreate(
@@ -82,7 +83,8 @@ TBAudioRealtimeKernelRef _Nullable TBAudioRealtimeKernelCreate(
     TBAudioRealtimeFormat outputFormat,
     uint32_t targetFrames,
     uint32_t capacityFrames,
-    uint32_t rampFrames
+    uint32_t rampFrames,
+    const float* _Nullable initialGains
 );
 void TBAudioRealtimeKernelDestroy(TBAudioRealtimeKernelRef _Nullable kernel);
 bool TBAudioRealtimeKernelPushCapture(
@@ -104,6 +106,12 @@ void TBAudioRealtimeKernelSetSourceGain(
 void TBAudioRealtimeKernelBeginSourceMute(
     TBAudioRealtimeKernelRef _Nullable kernel,
     uint32_t sourceIndex,
+    uint32_t rampFrames
+);
+void TBAudioRealtimeKernelSetSourceMuted(
+    TBAudioRealtimeKernelRef _Nullable kernel,
+    uint32_t sourceIndex,
+    bool muted,
     uint32_t rampFrames
 );
 void TBAudioRealtimeKernelDetach(TBAudioRealtimeKernelRef _Nullable kernel);

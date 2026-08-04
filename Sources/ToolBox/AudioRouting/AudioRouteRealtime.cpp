@@ -28,13 +28,16 @@ uint64_t RequiredInputFrames(
 TBAudioStereoRingBuffer::TBAudioStereoRingBuffer(
     uint32_t targetFrames,
     uint32_t capacityFrames,
-    uint32_t gainRampFrames
+    uint32_t gainRampFrames,
+    float initialGain
 ) : samples_(std::make_unique<float[]>(capacityFrames * 2)),
     targetFrames_(std::max<uint32_t>(2, std::min(targetFrames, capacityFrames / 2))),
     highWaterFramesThreshold_(std::min(capacityFrames - 2, targetFrames_ * 2)),
     capacityFrames_(capacityFrames),
     capacityMask_(capacityFrames - 1),
-    gainRampFrames_(std::max<uint32_t>(1, gainRampFrames)) {
+    gainRampFrames_(std::max<uint32_t>(1, gainRampFrames)),
+    currentGain_(initialGain),
+    targetGain_(initialGain) {
     if (!IsPowerOfTwo(capacityFrames)) throw std::invalid_argument("capacityFrames must be a power of two");
     std::fill_n(samples_.get(), capacityFrames * 2, 0.0f);
 }
@@ -199,8 +202,8 @@ uint32_t TBAudioRecommendedTargetFrames(
 
 struct TBAudioRealtimeTestState {
     TBAudioStereoRingBuffer ring;
-    TBAudioRealtimeTestState(uint32_t target, uint32_t capacity, uint32_t ramp)
-        : ring(target, capacity, ramp) {}
+    TBAudioRealtimeTestState(uint32_t target, uint32_t capacity, uint32_t ramp, float initialGain = 1.0f)
+        : ring(target, capacity, ramp, initialGain) {}
 };
 
 TBAudioRealtimeTestState* TBAudioRealtimeTestCreate(
@@ -210,6 +213,19 @@ TBAudioRealtimeTestState* TBAudioRealtimeTestCreate(
 ) {
     try {
         return new TBAudioRealtimeTestState(targetFrames, capacityFrames, gainRampFrames);
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+TBAudioRealtimeTestState* TBAudioRealtimeTestCreateWithInitialGain(
+    uint32_t targetFrames,
+    uint32_t capacityFrames,
+    uint32_t gainRampFrames,
+    float initialGain
+) {
+    try {
+        return new TBAudioRealtimeTestState(targetFrames, capacityFrames, gainRampFrames, initialGain);
     } catch (...) {
         return nullptr;
     }

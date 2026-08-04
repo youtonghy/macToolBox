@@ -3,6 +3,28 @@ import XCTest
 @testable import ToolBox
 
 final class ScreenshotImageComposerTests: XCTestCase {
+    func testSingleFramePreservesRasterizedPixelOrientation() throws {
+        let original = try rowImage(
+            width: 4,
+            colors: [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0)]
+        )
+        let imageSize = CGSize(width: original.width, height: original.height)
+        let geometry = DisplayCaptureGeometry(
+            displayID: 1,
+            globalFramePoints: CGRect(origin: .zero, size: imageSize),
+            pixelSize: imageSize
+        )
+
+        let composed = try ScreenshotImageComposer.compose(
+            selection: geometry.globalFramePoints,
+            frames: [DisplayCaptureFrame(geometry: geometry, image: original)]
+        )
+        let originalPixels = try PaddleOCRImagePreprocessor.rasterizedImage(image: original)
+        let composedPixels = try PaddleOCRImagePreprocessor.rasterizedImage(image: composed)
+
+        XCTAssertEqual(composedPixels.pixels, originalPixels.pixels)
+    }
+
     func testMixedScaleFramesComposeAtMaximumScaleAndPreserveGap() throws {
         let red = try solidImage(width: 200, height: 200, red: 255, green: 0, blue: 0)
         let blue = try solidImage(width: 100, height: 100, red: 0, green: 0, blue: 255)
@@ -78,6 +100,37 @@ final class ScreenshotImageComposerTests: XCTestCase {
         context.setFillColor(red: CGFloat(red) / 255, green: CGFloat(green) / 255, blue: CGFloat(blue) / 255, alpha: 1)
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         guard let image = context.makeImage() else { throw TestImageError.creationFailed }
+        return image
+    }
+
+    private func rowImage(
+        width: Int,
+        colors: [(UInt8, UInt8, UInt8)]
+    ) throws -> CGImage {
+        var pixels: [UInt8] = []
+        pixels.reserveCapacity(width * colors.count * 4)
+        for (red, green, blue) in colors {
+            for _ in 0..<width {
+                pixels.append(contentsOf: [red, green, blue, 255])
+            }
+        }
+        let data = Data(pixels) as CFData
+        guard let provider = CGDataProvider(data: data),
+              let image = CGImage(
+                  width: width,
+                  height: colors.count,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 32,
+                  bytesPerRow: width * 4,
+                  space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else {
+            throw TestImageError.creationFailed
+        }
         return image
     }
 

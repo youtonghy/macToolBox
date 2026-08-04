@@ -1,9 +1,11 @@
-PP-OCRv6 model files are provided by PaddlePaddle/PaddleOCR.
+PP-OCRv6, PP-StructureV3 and PaddleOCR-VL model/runtime files are provided by
+PaddlePaddle/PaddleOCR and their documented dependencies.
 
 Copyright (c) 2020 PaddlePaddle Authors.
 Licensed under the Apache License, Version 2.0.
 Project: https://github.com/PaddlePaddle/PaddleOCR
 License: https://www.apache.org/licenses/LICENSE-2.0
 
-Models are downloaded only after explicit user consent from immutable revisions
-of the official PaddlePaddle repositories on Hugging Face.
+Models are used only from a signed local bundle or after explicit user consent
+from immutable revisions of the official PaddlePaddle repositories on Hugging
+Face. The ToolBox OCR Worker disables remote model resolution at runtime.

@@ -4,6 +4,16 @@ import XCTest
 
 @MainActor
 final class CaptureGeometryTests: XCTestCase {
+    func testNativeCaptureSizeUsesScreenCaptureKitPointPixelScale() {
+        XCTAssertEqual(
+            ScreenCaptureProvider.pixelSize(
+                for: CGSize(width: 1_512, height: 982),
+                pointPixelScale: 2
+            ),
+            CGSize(width: 3_024, height: 1_964)
+        )
+    }
+
     func testScreenCapturePermissionMapsInjectedPreflightToState() {
         let granted = ScreenCapturePermission(preflight: { true })
         let denied = ScreenCapturePermission(preflight: { false })

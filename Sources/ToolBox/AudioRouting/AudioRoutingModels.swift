@@ -193,6 +193,7 @@ enum AudioRuleResolutionState: Equatable, Sendable {
 
 enum AudioRouteWaitingReason: Equatable, Sendable {
     case processNotRunning
+    case processNotProducingOutput
 }
 
 enum AudioRouteRejectionReason: Equatable, Sendable {
@@ -235,6 +236,7 @@ struct AudioRouteDiagnosticsSnapshot: Equatable, Sendable {
     let nonFiniteSampleCount: UInt64
     let clippedSampleCount: UInt64
     let callbacksInFlight: UInt64
+    let sourceFatalCount: UInt64
     let fatalCallbackMismatch: Bool
 
     init(
@@ -256,6 +258,7 @@ struct AudioRouteDiagnosticsSnapshot: Equatable, Sendable {
         nonFiniteSampleCount: UInt64 = 0,
         clippedSampleCount: UInt64 = 0,
         callbacksInFlight: UInt64 = 0,
+        sourceFatalCount: UInt64 = 0,
         fatalCallbackMismatch: Bool = false
     ) {
         self.routeID = routeID
@@ -276,12 +279,14 @@ struct AudioRouteDiagnosticsSnapshot: Equatable, Sendable {
         self.nonFiniteSampleCount = nonFiniteSampleCount
         self.clippedSampleCount = clippedSampleCount
         self.callbacksInFlight = callbacksInFlight
+        self.sourceFatalCount = sourceFatalCount
         self.fatalCallbackMismatch = fatalCallbackMismatch
     }
 }
 
 enum AudioRouteDiagnosticsFatalReason: Equatable, Sendable {
     case callbackFormatMismatch
+    case captureFatal
 }
 
 enum AudioRouteDiagnosticsHealth: Equatable, Sendable {
@@ -309,15 +314,24 @@ enum AudioRouteDiagnosticsEvaluator {
         guard let snapshot else {
             return startupPollCount >= startupGracePollCount ? .awaitingAudio : .starting
         }
-        // Only the output path can mark a route fatal. Per-source capture mismatches
-        // are expected when one of several apps on a shared route is unreadable
-        // (e.g. iOS-on-Mac shells); those sources simply contribute silence.
+        // Output-side fatal: the IOProc cannot render, the route is dead.
         if snapshot.fatalCallbackMismatch {
             return .fatal(.callbackFormatMismatch)
         }
 
         let hasCapture = snapshot.captureFrameCount > 0
         let hasOutput = snapshot.outputFrameCount > 0
+
+        // Capture-side fatal: the tap or aggregate is not producing frames.
+        // When the source is confirmed producing output (`piro`) but capture
+        // consistently fails, the route cannot deliver audio. Treat this as
+        // fatal so the watchdog tears down and rebuilds, which re-runs
+        // `observe()` with a settled device topology.
+        if !hasCapture, hasOutput, sourceIsProducingOutput {
+            if snapshot.sourceFatalCount > 0, consecutiveStalledPollCount >= stallPollCount {
+                return .fatal(.captureFatal)
+            }
+        }
         guard hasCapture && hasOutput else {
             return startupPollCount >= startupGracePollCount ? .awaitingAudio : .starting
         }

@@ -150,6 +150,8 @@ struct RouteContext {
     std::atomic<bool> active{true};
     uint32_t muteRampFrames = 0;
     uint64_t retirementEpoch = 0;
+    uint32_t outputBufferFrames = 512;
+    Float64 outputSampleRate = 48000;
 };
 
 struct IOProcBridgeContext {
@@ -722,6 +724,7 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
 @property(nonatomic, readwrite) uint64_t nonFiniteSampleCount;
 @property(nonatomic, readwrite) uint64_t clippedSampleCount;
 @property(nonatomic, readwrite) uint64_t callbacksInFlight;
+@property(nonatomic, readwrite) uint64_t sourceFatalCount;
 @property(nonatomic, readwrite) BOOL fatalCallbackMismatch;
 @end
 
@@ -902,9 +905,11 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
     uint32_t targetFrames = 0;
     uint32_t gainRampFrames = 0;
     if (status == noErr) {
+        route->outputSampleRate = outputSampleRate;
         const uint32_t outputBufferFrames = GetDeviceUInt32Property(
             route->outputDeviceID, kAudioDevicePropertyBufferFrameSize, kAudioObjectPropertyScopeGlobal
         );
+        route->outputBufferFrames = outputBufferFrames > 0 ? outputBufferFrames : 512;
         const uint32_t outputLatencyFrames = GetDeviceUInt32Property(
             route->outputDeviceID, kAudioDevicePropertyLatency, kAudioDevicePropertyScopeOutput
         );
@@ -1059,6 +1064,13 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
             sourceFormats.push_back(source->realtimeFormat);
         }
         route->generation = nextKernelGeneration.fetch_add(1, std::memory_order_relaxed);
+        // Build an initial gains array for the kernel. Null/NaN gains are
+        // sanitized by TBAudioRealtimeKernelCreate (defaults to 1.0).
+        std::vector<float> initialGains;
+        initialGains.reserve(gains.count);
+        for (NSNumber* gain in gains) {
+            initialGains.push_back(gain.floatValue);
+        }
         route->kernel = TBAudioRealtimeKernelCreate(
             route->generation,
             sourceFormats.data(),
@@ -1066,7 +1078,8 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
             realtimeFormat,
             targetFrames,
             kRingCapacityFrames,
-            gainRampFrames
+            gainRampFrames,
+            initialGains.data()
         );
         if (route->kernel == nullptr) {
             failedOperation = @"Allocate realtime audio kernel";
@@ -1077,9 +1090,6 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
                 source->kernel = route->kernel;
                 source->generation = route->generation;
                 source->sourceIndex = index;
-                TBAudioRealtimeKernelSetSourceGain(
-                    route->kernel, index, gains[index].floatValue
-                );
             }
         }
     }
@@ -1187,6 +1197,7 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
             snapshot.forcedResyncCount = realtimeSnapshot.forcedResyncCount;
             snapshot.nonFiniteSampleCount = realtimeSnapshot.nonFiniteSampleCount;
             snapshot.clippedSampleCount = realtimeSnapshot.clippedSampleCount;
+            snapshot.sourceFatalCount = realtimeSnapshot.sourceFatalCount;
         }
 
         for (const auto& source : route->sources) {
@@ -1214,6 +1225,22 @@ extern "C" uint32_t TBAudioCallbackLeasePermanentInUse() {
 
 - (BOOL)hasPendingCleanup {
     return self.quarantinedRoutes.count > 0;
+}
+
+- (NSTimeInterval)maximumFadeOutDuration {
+    NSTimeInterval maxDuration = 0;
+    for (NSValue* value in self.routes.allValues) {
+        RouteContext* route = static_cast<RouteContext*>(value.pointerValue);
+        if (route == nullptr || route->outputSampleRate <= 0) continue;
+        // Worst-case: one full callback period for the mute flag to be read by the
+        // render thread, plus the ramp duration for gain to reach zero.
+        const NSTimeInterval callbackPeriod = route->outputBufferFrames / route->outputSampleRate;
+        const NSTimeInterval rampDuration = route->muteRampFrames / route->outputSampleRate;
+        const NSTimeInterval routeDuration = callbackPeriod + rampDuration;
+        if (routeDuration > maxDuration) maxDuration = routeDuration;
+    }
+    // Minimum safety floor: even with no routes, don't return zero.
+    return maxDuration > 0 ? maxDuration : 0.05;
 }
 
 - (void)resetAfterAudioServerRestart {

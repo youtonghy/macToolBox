@@ -4,6 +4,7 @@ import Foundation
 protocol ScreenshotImageSource: AnyObject, Sendable {
     var id: UUID { get }
     var pixelSize: CGSize { get }
+    /// Returns an upright CGImage whose provider rows run from the visual top to bottom.
     func copyPixels(in rect: CGRect) throws -> CGImage
 }
 

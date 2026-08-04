@@ -1,0 +1,65 @@
+{
+  "nextId": 6,
+  "tasks": [
+    {
+      "id": "1",
+      "subject": "P0: 修复 12ms fadeOut 不足",
+      "description": "GLM 5.2 发现 fadeOut 等待 12ms 在 44.1kHz/1024 buffer 下不足（回调周期 23.2ms）。修复方案：从引擎获取实际 buffer 配置，计算安全等待时间。涉及文件：AudioRouteEngine.h/mm、AudioRouteNativeEngineControlling、AudioRouteController.swift",
+      "status": "completed",
+      "activeForm": "修复 fadeOut 时序",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785506125278,
+      "updatedAt": 1785506694783
+    },
+    {
+      "id": "2",
+      "subject": "P1: 修复 applyRuntimeGainIfPossible 返回值",
+      "description": "AudioRoutingService.swift:1065 中 generation != desiredGeneration 时返回 true，掩盖 reconcile 回退。改为返回 false。",
+      "status": "completed",
+      "activeForm": "修复返回值",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785506125280,
+      "updatedAt": 1785506717124
+    },
+    {
+      "id": "3",
+      "subject": "P2: Phase 1 初始化 gain 注入",
+      "description": "修改 TBAudioRealtimeKernelCreate 接受初始化 gains 数组，同时初始化 gainBits、currentGain_、targetGain_。涉及 AudioRouteRealtimeKernel.h/.cpp、AudioRouteRealtime.hpp/.cpp、AudioRouteEngine.mm、CoreAudioHAL.swift",
+      "status": "completed",
+      "activeForm": "实现 gain 注入",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785506125281,
+      "updatedAt": 1785507022804
+    },
+    {
+      "id": "4",
+      "subject": "P3: Phase 2 64-bit 原子 gain 命令",
+      "description": "将 gainBits 和 rampFrames 打包到单个 64-bit atomic 中，消除 split-atomic 竞态。涉及 AudioRouteRealtimeKernel.h/.cpp、AudioRouteEngine.h/.mm、CoreAudioHAL.swift",
+      "status": "pending",
+      "activeForm": "实现原子命令",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785506125283,
+      "updatedAt": 1785507022805
+    },
+    {
+      "id": "5",
+      "subject": "修复 capture-side 诊断盲区，使 watchdog 能检测到静音",
+      "description": "sourceFatalCount 在 C++ kernel 中已追踪但被 Swift 层丢弃，导致 capture 失败时 watchdog 不重建路由。修复：1) AudioRouteDiagnosticsSnapshot 增加 sourceFatalCount 2) CoreAudioHAL 映射它 3) 评估器中对 capture 侧 fatal 触发重建",
+      "status": "completed",
+      "activeForm": "修复诊断盲区",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1785548616358,
+      "updatedAt": 1785548965782
+    }
+  ]
+}

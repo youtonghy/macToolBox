@@ -76,16 +76,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         captureProvider: ScreenCaptureProvider(),
         overlay: ScreenshotSelectionOverlayManager(),
         candidateResolver: { [weak self] point, generation in
-            guard let self else { return nil }
+            guard let self else { return [] }
             let defaults = UserDefaults.standard
             let key = "screenshot.smartElementCandidates"
             let smartCandidates = defaults.object(forKey: key) as? Bool ?? true
-            if smartCandidates,
-               let candidate = try? await self.screenshotAXProvider
-                   .regions(at: point, generation: generation).first {
-                return candidate
+            let window = try? await self.screenshotWindowProvider.region(
+                at: point,
+                generation: generation
+            )
+            if smartCandidates, let window,
+               let candidates = try? await self.screenshotAXProvider.regions(
+                   at: point,
+                   generation: generation,
+                   targetWindow: window
+               ) {
+                return candidates
             }
-            return try? await self.screenshotWindowProvider.region(at: point, generation: generation)
+            return window.map { [$0] } ?? []
         },
         windowCandidateResolver: { [weak self] point, generation in
             try? await self?.screenshotWindowProvider.region(at: point, generation: generation)
@@ -99,7 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let logger = Logger(subsystem: "ToolBox", category: "AppDelegate")
     private lazy var displayControlKeys = DisplayControlMediaKeyController(
         service: displayControl,
-        menuModel: displayControlMenu
+        menuModel: displayControlMenu,
+        shortcutRegistry: shortcutRegistry
     )
     private lazy var brightnessSchedule = BrightnessScheduleCoordinator(
         service: displayControl
@@ -120,7 +128,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             cableItemCount: hardware.cableItems.count,
             showsDisplayControl: displayControlMenu.hasExternalDisplay,
             showsAudioSection: !audioRouting.menuRows.isEmpty,
-            showsColorPreset: displayControlMenu.presetAvailable
+            showsColorPreset: displayControlMenu.presetAvailable,
+            audioRowCount: audioRouting.menuRows.count
         )
     }
 
@@ -158,8 +167,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] on in self?.applyAwake(on) }
             .store(in: &cancellables)
 
-        shortcutRegistry.onAction = { [weak self] action in
-            self?.handleShortcutAction(action)
+        shortcutRegistry.onRoutedAction = { [weak self] action in
+            self?.handleShortcutAction(action) ?? false
         }
         do {
             try shortcutRegistry.start(rules: shortcutSettings.rules)
@@ -185,9 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Publishers.CombineLatest4(
             hardware.$cableItems.map(\.count).removeDuplicates(),
             displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
-            audioRouting.$rows.map { rows in
-                rows.contains(where: \.isCurrentlyPlaying)
-            }.removeDuplicates(),
+            audioRouting.$menuRows.map(\.count).removeDuplicates(),
             displayControlMenu.$presetAvailable.removeDuplicates()
         )
             .receive(on: RunLoop.main)
@@ -221,6 +228,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        DevRuntimeLogCapture.shared.stop()
         guard !isTerminating else { return }
         stopNonAudioServices()
         audioRouting.stop()
@@ -230,6 +238,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         screenWipe.stop()
         screenshotCoordinator.cancel()
         screenshotPreview.close()
+        displayControlKeys.stop()
         if let status = shortcutRegistry.stop() {
             logger.error("Shortcut registry cleanup incomplete: \(status, privacy: .public)")
         }
@@ -237,7 +246,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focusMode.stop()
         hardware.stop()
         wifiSignal.stop()
-        displayControlKeys.stop()
         displayControlMenu.stop()
         brightnessSchedule.stop()
         displayControl.stop()
@@ -355,7 +363,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             rootView: SettingsView(
                 hardware: hardware,
                 displayControl: displayControlMenu,
-                mediaKeys: displayControlKeys,
+                shortcutRegistry: shortcutRegistry,
                 brightnessSchedule: brightnessSchedule,
                 audioRouting: audioRouting,
                 focusMode: focusMode,
@@ -411,13 +419,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if on { awake.start() } else { awake.stop() }
     }
 
-    private func handleShortcutAction(_ action: ShortcutActionID) {
+    private func handleShortcutAction(_ action: ShortcutAction) -> Bool {
         switch action {
-        case .captureRegion:
+        case .hotKey(.captureRegion):
             Task { [weak self] in await self?.screenshotCoordinator.startRegionCapture() }
-        case .screenWipeExit:
+            return true
+        case .hotKey(.screenWipeExit):
             state.wipeOn = false
             screenWipe.stop()
+            return true
+        case .mediaKey(let event):
+            return displayControlKeys.handle(event: event)
         }
     }
 }

@@ -1,8 +1,14 @@
 # 音频引擎动态格式与运行时恢复重构设计
 
 日期：2026-07-29  
-状态：设计已最终批准，尚未进入实施  
+状态：生产入口已切换到 Swift runtime；旧 Objective-C++ 生命周期仅保留为兼容实现与测试边界
 范围：重构 `AudioRouteEngine.mm` 及其 C++ 实时模块，控制面尽可能迁移到 Swift
+
+2026-07-30 实施说明：`AudioRoutingService` 默认构造
+`SwiftAudioRouteEngineAdapter -> AudioRouteRuntime -> SystemCoreAudioHAL`。HAL 在创建
+Process Tap 与聚合设备后读取真实捕获格式，再创建 C++ 实时内核；如果 macOS 正在展示
+系统音频录制授权而聚合设备暂时没有输入流，则以 Tap 格式继续创建 IOProc，并通过首次
+`AudioDeviceStart` 触发系统授权流程。麦克风权限不是 Process Tap 的授权入口。
 
 ## 1. 目标
 

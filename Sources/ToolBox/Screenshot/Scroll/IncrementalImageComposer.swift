@@ -78,7 +78,9 @@ final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable
                 block.withUnsafeBytes { sourceBytes in
                     guard let source = sourceBytes.baseAddress else { return }
                     for row in 0..<intersectingRows {
-                        destination.advanced(by: (lower - y + row) * bytesPerRow).copyMemory(
+                        // Strip files are top-down; CGImage providers expose rows bottom-up when drawn.
+                        let destinationRow = height - 1 - (lower - y + row)
+                        destination.advanced(by: destinationRow * bytesPerRow).copyMemory(
                             from: source.advanced(by: row * sourceBytesPerRow),
                             byteCount: bytesPerRow
                         )

@@ -4,11 +4,14 @@ import Foundation
 protocol CoreAudioHALPort: AnyObject {
     func observe(_ request: HALObservationRequest) throws -> HALObservationSnapshot
     func execute(_ transaction: HALTransaction) throws -> HALTransactionReceipt
+    func updateParameters(_ intent: AudioRuntimeIntent) throws
     func changes(for observations: Set<HALObservation>) -> AsyncStream<HALChange>
+    func diagnostics() -> [AudioRouteDiagnosticsSnapshot]
     func performMaintenance() -> HALRollbackResult
 }
 
 extension CoreAudioHALPort {
+    func diagnostics() -> [AudioRouteDiagnosticsSnapshot] { [] }
     func performMaintenance() -> HALRollbackResult { .succeeded }
 }
 
@@ -233,6 +236,14 @@ protocol CoreAudioResourceAccess: AnyObject {
         kernel: HALKernelResource,
         generation: UInt64
     ) throws -> HALIOProcResource
+    func setSourceGain(_ gain: Float, index: UInt32, kernel: HALKernelResource)
+    func setSourceMuted(
+        _ muted: Bool,
+        index: UInt32,
+        rampFrames: UInt32,
+        kernel: HALKernelResource
+    )
+    func snapshot(_ kernel: HALKernelResource) -> TBAudioRealtimeSnapshot?
     func start(_ ioProc: HALIOProcResource) -> OSStatus
     func detach(_ ioProc: HALIOProcResource)
     func stop(_ ioProc: HALIOProcResource) -> OSStatus
@@ -268,16 +279,19 @@ final class SystemCoreAudioResourceAccess: CoreAudioResourceAccess {
         guard !sourceRealtimeFormats.isEmpty else {
             throw AudioRuntimeFailure.invalidIntent("An audio route needs at least one source.")
         }
-        let pointer = sourceRealtimeFormats.withUnsafeBufferPointer { buffer in
-            TBAudioRealtimeKernelCreate(
-                generation,
-                buffer.baseAddress!,
-                UInt32(buffer.count),
-                Self.realtimeFormat(outputFormat),
-                targetFrames,
-                1 << 16,
-                rampFrames
-            )
+        let pointer = gains.withUnsafeBufferPointer { gainsBuffer in
+            sourceRealtimeFormats.withUnsafeBufferPointer { buffer in
+                TBAudioRealtimeKernelCreate(
+                    generation,
+                    buffer.baseAddress!,
+                    UInt32(buffer.count),
+                    Self.realtimeFormat(outputFormat),
+                    targetFrames,
+                    1 << 16,
+                    rampFrames,
+                    gainsBuffer.baseAddress
+                )
+            }
         }
         guard let pointer else {
             throw AudioRuntimeFailure.prepareFailed(
@@ -285,9 +299,6 @@ final class SystemCoreAudioResourceAccess: CoreAudioResourceAccess {
                 stage: .prepareKernel,
                 status: kAudioHardwareUnspecifiedError
             )
-        }
-        for (index, gain) in gains.enumerated() {
-            TBAudioRealtimeKernelSetSourceGain(pointer, UInt32(index), gain)
         }
         return HALKernelResource(pointer: pointer)
     }
@@ -441,6 +452,24 @@ final class SystemCoreAudioResourceAccess: CoreAudioResourceAccess {
         return HALIOProcResource(deviceID: deviceID, ioProcID: ioProcID, lease: lease)
     }
 
+    func snapshot(_ kernel: HALKernelResource) -> TBAudioRealtimeSnapshot? {
+        var value = TBAudioRealtimeSnapshot()
+        return TBAudioRealtimeKernelCopySnapshot(kernel.pointer, &value) ? value : nil
+    }
+
+    func setSourceGain(_ gain: Float, index: UInt32, kernel: HALKernelResource) {
+        TBAudioRealtimeKernelSetSourceGain(kernel.pointer, index, gain)
+    }
+
+    func setSourceMuted(
+        _ muted: Bool,
+        index: UInt32,
+        rampFrames: UInt32,
+        kernel: HALKernelResource
+    ) {
+        TBAudioRealtimeKernelSetSourceMuted(kernel.pointer, index, muted, rampFrames)
+    }
+
     func start(_ ioProc: HALIOProcResource) -> OSStatus {
         guard let ioProcID = ioProc.ioProcID else { return kAudioHardwareBadObjectError }
         return AudioDeviceStart(ioProc.deviceID, ioProcID)
@@ -497,17 +526,32 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         var tap: HALTapResource?
         var aggregateID: AudioObjectID?
         var captureIOProc: HALIOProcResource?
+        var processObjectID: UInt32 = 0
+        var captureDeviceUID: String? = nil
+    }
+
+    /// Identity of a process tap: a tap is reusable across output-device switches
+    /// only when both the captured process and its capture device binding match.
+    /// In the common REDIRECT case `selectCaptureDevice` binds the tap to the app's
+    /// original output device, which is independent of the route's target output,
+    /// so the binding is identical across switches and the tap can be reused.
+    private struct TapKey: Hashable {
+        let processObjectID: UInt32
+        let captureDeviceUID: String?
     }
 
     private final class RouteResources: @unchecked Sendable {
         let lock = NSLock()
         let routeID: String
+        var generation: UInt64
+        var rampFrames: UInt32 = 1
         var kernel: HALKernelResource?
         var outputIOProc: HALIOProcResource?
         var sources: [SourceResources] = []
 
-        init(routeID: String) {
+        init(routeID: String, generation: UInt64) {
             self.routeID = routeID
+            self.generation = generation
         }
     }
 
@@ -608,9 +652,9 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                             selector: kAudioTapPropertyFormat,
                             initial: AudioStreamBasicDescription()
                         )
-                        let aggregateFormat = try firstStreamFormat(
-                            deviceID: aggregateID,
-                            scope: kAudioObjectPropertyScopeInput
+                        let aggregateFormat = try captureFormat(
+                            aggregateID: aggregateID,
+                            fallback: tapFormat
                         )
                         tapFormats[source.processObjectID] = AudioFormatFingerprint(tapFormat)
                         aggregateFormats[source.processObjectID] =
@@ -667,20 +711,61 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
             )
         }
 
+        let realizedKeys = try realizationKeys(
+            intent: transaction.intent,
+            observation: transaction.observation
+        )
         realizationLock.lock()
-        let hasActiveRoutes = !activeRoutes.isEmpty
+        let currentRouteIDs = Set(activeRoutes.keys)
         realizationLock.unlock()
-        guard !hasActiveRoutes else {
-            throw AudioRuntimeFailure.prepareFailed(
-                routeID: transaction.routeID,
-                stage: .commit,
-                status: kAudioHardwareUnsupportedOperationError
-            )
+        let desiredRouteIDs = Set(transaction.intent.plansByID.keys)
+        let replacingRouteIDs = desiredRouteIDs.filter { routeID in
+            transaction.replacingKeysByRouteID[routeID] != realizedKeys[routeID]
+                || !currentRouteIDs.contains(routeID)
+        }
+        let removedRouteIDs = currentRouteIDs.subtracting(desiredRouteIDs)
+        let replacedRoutes = takeActiveRoutes(
+            routeIDs: replacingRouteIDs.union(removedRouteIDs)
+        )
+        // Harvest reusable process taps from the routes we are about to tear down.
+        // A tap survives the output-device switch (its process + capture device are
+        // unchanged) so it can be claimed by the replacing route instead of being
+        // destroyed and recreated — skipping the slow create/destroy and the
+        // unmute glitch from `mutedWhenTapped` toggling.
+        var harvested: [TapKey: HALTapResource] = [:]
+        var spared: Set<AudioObjectID> = []
+        for route in replacedRoutes.values {
+            for source in route.sources {
+                guard let tap = source.tap else { continue }
+                let key = TapKey(
+                    processObjectID: source.processObjectID,
+                    captureDeviceUID: source.captureDeviceUID
+                )
+                harvested[key] = tap
+                spared.insert(tap.objectID)
+            }
+        }
+        if !replacedRoutes.isEmpty {
+            let result = cleanup(routes: Array(replacedRoutes.values), sparingTaps: spared)
+            if case .deferred(let failures) = result {
+                retainPendingCleanup(replacedRoutes)
+                // The spared taps were detached from their routes (source.tap = nil)
+                // above but never destroyed, and no replacing route will claim them
+                // now that the transaction is aborting — destroy them here or they
+                // leak as live Core Audio process taps.
+                for (_, tap) in harvested {
+                    _ = resourceAccess.destroyProcessTap(tap)
+                }
+                throw AudioRuntimeFailure.cleanupDeferred(
+                    routeID: transaction.routeID,
+                    failures: failures
+                )
+            }
         }
 
         var candidates: [String: RouteResources] = [:]
         do {
-            for routeID in transaction.intent.plansByID.keys.sorted() {
+            for routeID in replacingRouteIDs.sorted() {
                 guard let plan = transaction.intent.plansByID[routeID],
                     let observation = transaction.observation.routesByID[routeID]
                 else {
@@ -692,29 +777,46 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                     routeID: routeID,
                     plan: plan,
                     observation: observation,
-                    generation: transaction.intent.generation
+                    generation: transaction.intent.generation,
+                    muted: transaction.intent.mutedRouteIDs.contains(routeID),
+                    reusableTaps: &harvested
                 )
             }
+            try updateParameters(
+                transaction.intent,
+                routeIDs: desiredRouteIDs.subtracting(replacingRouteIDs)
+            )
         } catch {
             let result = cleanup(routes: Array(candidates.values))
             if case .deferred = result {
                 retainPendingCleanup(candidates)
             }
+            // Destroy any harvested taps that no replacing route claimed before
+            // propagating the failure. A reused tap is removed from `harvested`
+            // when consumed, so candidate cleanup (which now owns it) destroys it —
+            // there is no double-destroy.
+            for (_, tap) in harvested {
+                _ = resourceAccess.destroyProcessTap(tap)
+            }
             throw error
+        }
+        // All replacing routes succeeded: any tap still in `harvested` was not
+        // claimed (e.g. its process moved to a different capture device), so
+        // destroy it now.
+        for (_, tap) in harvested {
+            _ = resourceAccess.destroyProcessTap(tap)
         }
 
         realizationLock.lock()
-        activeRoutes = candidates
+        activeRoutes.merge(candidates) { _, candidate in candidate }
+        let committedRoutes = activeRoutes
         realizationLock.unlock()
-        let realizedKeys = transaction.intent.plansByID.keys.reduce(
-            into: [String: RealizationKey]()
-        ) { result, routeID in
-            result[routeID] = RealizationKey(
-                routeID: routeID,
-                intent: transaction.intent,
-                observation: transaction.observation
-            )
+        for route in committedRoutes.values {
+            route.lock.lock()
+            route.generation = transaction.intent.generation
+            route.lock.unlock()
         }
+        let candidateRouteIDs = Set(candidates.keys)
         return HALTransactionReceipt(
             realizedKeysByRouteID: realizedKeys,
             activeOutputUIDs: Set(
@@ -732,7 +834,7 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                         )
                     ])
                 }
-                let routes = self.takeActiveRoutes()
+                let routes = self.takeActiveRoutes(routeIDs: candidateRouteIDs)
                 let result = self.cleanup(routes: Array(routes.values))
                 if case .deferred = result {
                     self.retainPendingCleanup(routes)
@@ -740,6 +842,67 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                 return result
             }
         )
+    }
+
+    private func realizationKeys(
+        intent: AudioRuntimeIntent,
+        observation: HALObservationSnapshot
+    ) throws -> [String: RealizationKey] {
+        try intent.plansByID.keys.reduce(into: [String: RealizationKey]()) { result, routeID in
+            guard let key = RealizationKey(
+                routeID: routeID,
+                intent: intent,
+                observation: observation
+            ) else {
+                throw AudioRuntimeFailure.invalidIntent(
+                    "HAL observation is incomplete for route \(routeID)."
+                )
+            }
+            result[routeID] = key
+        }
+    }
+
+    func updateParameters(_ intent: AudioRuntimeIntent) throws {
+        try updateParameters(intent, routeIDs: Set(intent.plansByID.keys))
+    }
+
+    private func updateParameters(
+        _ intent: AudioRuntimeIntent,
+        routeIDs: Set<String>
+    ) throws {
+        realizationLock.lock()
+        let routes = activeRoutes
+        realizationLock.unlock()
+
+        for routeID in routeIDs.sorted() {
+            guard let plan = intent.plansByID[routeID],
+                  let route = routes[routeID] else {
+                throw AudioRuntimeFailure.invalidIntent(
+                    "Missing active route \(routeID) for parameter update."
+                )
+            }
+            route.lock.lock()
+            defer { route.lock.unlock() }
+            guard let kernel = route.kernel,
+                  route.sources.count == plan.sources.count else {
+                throw AudioRuntimeFailure.invalidIntent(
+                    "Active route \(routeID) no longer matches its parameter layout."
+                )
+            }
+            for (index, source) in plan.sources.enumerated() {
+                resourceAccess.setSourceGain(
+                    source.linearGain,
+                    index: UInt32(index),
+                    kernel: kernel
+                )
+                resourceAccess.setSourceMuted(
+                    intent.mutedRouteIDs.contains(routeID),
+                    index: UInt32(index),
+                    rampFrames: route.rampFrames,
+                    kernel: kernel
+                )
+            }
+        }
     }
 
     func changes(for observations: Set<HALObservation>) -> AsyncStream<HALChange> {
@@ -766,6 +929,51 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                 continuation.finish()
             }
             continuation.onTermination = { _ in bag.cancel() }
+        }
+    }
+
+    func diagnostics() -> [AudioRouteDiagnosticsSnapshot] {
+        realizationLock.lock()
+        let routes = activeRoutes.values.sorted { $0.routeID < $1.routeID }
+        realizationLock.unlock()
+
+        return routes.compactMap { route in
+            route.lock.lock()
+            defer { route.lock.unlock() }
+            guard let kernel = route.kernel,
+                  let snapshot = resourceAccess.snapshot(kernel) else {
+                return nil
+            }
+            let callbacksInFlight =
+                route.sources.reduce(
+                    route.outputIOProc.map {
+                        UInt64(TBAudioIOProcLeaseInFlight($0.lease))
+                    } ?? 0
+                ) { count, source in
+                    count + (source.captureIOProc.map {
+                        UInt64(TBAudioIOProcLeaseInFlight($0.lease))
+                    } ?? 0)
+                }
+            return AudioRouteDiagnosticsSnapshot(
+                routeID: route.routeID,
+                generation: route.generation,
+                captureCallbackCount: snapshot.captureCallbackCount,
+                captureFrameCount: snapshot.captureFrameCount,
+                outputCallbackCount: snapshot.outputCallbackCount,
+                outputFrameCount: snapshot.outputFrameCount,
+                ringOccupancyFrames: snapshot.ringOccupancyFrames,
+                ringHighWaterFrames: snapshot.ringHighWaterFrames,
+                warmupFrameCount: snapshot.warmupFrameCount,
+                underrunFrameCount: snapshot.underrunFrameCount,
+                overrunFrameCount: snapshot.overrunFrameCount,
+                forcedResyncCount: snapshot.forcedResyncCount,
+                formatMismatchCount: snapshot.formatMismatchCount,
+                nonFiniteSampleCount: snapshot.nonFiniteSampleCount,
+                clippedSampleCount: snapshot.clippedSampleCount,
+                callbacksInFlight: callbacksInFlight,
+                sourceFatalCount: snapshot.sourceFatalCount,
+                fatalCallbackMismatch: snapshot.outputFatalCount > 0
+            )
         }
     }
 
@@ -798,6 +1006,26 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         )
     }
 
+    private func captureFormat(
+        aggregateID: AudioObjectID,
+        fallback tapFormat: AudioStreamBasicDescription
+    ) throws -> AudioStreamBasicDescription {
+        do {
+            return try firstStreamFormat(
+                deviceID: aggregateID,
+                scope: kAudioObjectPropertyScopeInput
+            )
+        } catch CoreAudioHALError.missingValue(let objectID, let selector)
+            where objectID == aggregateID && selector == kAudioDevicePropertyStreams
+        {
+            // A newly-created Process Tap aggregate can temporarily expose no input
+            // streams while macOS is presenting system-audio capture consent. The
+            // Tap format is authoritative enough to create the kernel and IOProc so
+            // AudioDeviceStart can trigger that consent flow.
+            return tapFormat
+        }
+    }
+
     private func selectCaptureDevice(
         processObjectID: UInt32,
         outputDeviceID: AudioObjectID,
@@ -812,9 +1040,11 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         routeID: String,
         plan: AudioRoutePlan,
         observation: HALRouteObservation,
-        generation: UInt64
+        generation: UInt64,
+        muted: Bool,
+        reusableTaps: inout [TapKey: HALTapResource]
     ) throws -> RouteResources {
-        let resources = RouteResources(routeID: routeID)
+        let resources = RouteResources(routeID: routeID, generation: generation)
         var prepared = false
         defer {
             if !prepared {
@@ -825,15 +1055,6 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
             }
         }
         do {
-            let sourceFormats = try plan.sources.map { source -> AudioFormatFingerprint in
-                guard let format = observation.tapFormatsByProcessObjectID[source.processObjectID]
-                else {
-                    throw AudioRuntimeFailure.invalidIntent(
-                        "Missing source format for process \(source.processObjectID)."
-                    )
-                }
-                return format
-            }
             let verifiedOutputFormat = try firstStreamFormat(
                 deviceID: observation.outputDeviceID,
                 scope: kAudioObjectPropertyScopeOutput
@@ -873,6 +1094,57 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                 UInt32(1),
                 UInt32(observation.outputFormat.sampleRate * 0.010)
             )
+            resources.rampFrames = rampFrames
+            var sourceFormats: [AudioFormatFingerprint] = []
+            sourceFormats.reserveCapacity(plan.sources.count)
+            for source in plan.sources {
+                let sourceResources = SourceResources()
+                resources.sources.append(sourceResources)
+                let processDevices =
+                    observation.processDeviceIDsByObjectID[
+                        source.processObjectID
+                    ] ?? []
+                let selectedDevice = selectCaptureDevice(
+                    processObjectID: source.processObjectID,
+                    outputDeviceID: observation.outputDeviceID,
+                    processDeviceIDs: processDevices
+                )
+                let deviceUID = try selectedDevice.map(propertyAccess.deviceUID(forID:))
+                sourceResources.processObjectID = source.processObjectID
+                sourceResources.captureDeviceUID = deviceUID
+                let tapKey = TapKey(
+                    processObjectID: source.processObjectID,
+                    captureDeviceUID: deviceUID
+                )
+                let tap: HALTapResource
+                if let reused = reusableTaps.removeValue(forKey: tapKey) {
+                    tap = reused
+                } else {
+                    tap = try resourceAccess.createProcessTap(
+                        routeID: routeID,
+                        processObjectID: source.processObjectID,
+                        deviceUID: deviceUID
+                    )
+                }
+                sourceResources.tap = tap
+                let aggregateID = try resourceAccess.createAggregate(
+                    routeID: routeID,
+                    outputDeviceUID: plan.outputDeviceUID,
+                    tapUID: tap.uid
+                )
+                sourceResources.aggregateID = aggregateID
+
+                let tapFormat: AudioStreamBasicDescription = try value(
+                    objectID: tap.objectID,
+                    selector: kAudioTapPropertyFormat,
+                    initial: AudioStreamBasicDescription()
+                )
+                let aggregateFormat = try captureFormat(
+                    aggregateID: aggregateID,
+                    fallback: tapFormat
+                )
+                sourceFormats.append(AudioFormatFingerprint(aggregateFormat))
+            }
             do {
                 resources.kernel = try resourceAccess.createKernel(
                     generation: generation,
@@ -889,48 +1161,18 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
             guard let kernel = resources.kernel else {
                 preconditionFailure("Kernel receipt missing")
             }
-            for (index, source) in plan.sources.enumerated() {
-                let sourceResources = SourceResources()
-                resources.sources.append(sourceResources)
-                let processDevices =
-                    observation.processDeviceIDsByObjectID[
-                        source.processObjectID
-                    ] ?? []
-                let selectedDevice = selectCaptureDevice(
-                    processObjectID: source.processObjectID,
-                    outputDeviceID: observation.outputDeviceID,
-                    processDeviceIDs: processDevices
+            for index in plan.sources.indices {
+                resourceAccess.setSourceMuted(
+                    muted,
+                    index: UInt32(index),
+                    rampFrames: rampFrames,
+                    kernel: kernel
                 )
-                let deviceUID = try selectedDevice.map(propertyAccess.deviceUID(forID:))
-                let tap = try resourceAccess.createProcessTap(
-                    routeID: routeID,
-                    processObjectID: source.processObjectID,
-                    deviceUID: deviceUID
-                )
-                sourceResources.tap = tap
-                let aggregateID = try resourceAccess.createAggregate(
-                    routeID: routeID,
-                    outputDeviceUID: plan.outputDeviceUID,
-                    tapUID: tap.uid
-                )
-                sourceResources.aggregateID = aggregateID
-
-                let tapFormat: AudioStreamBasicDescription = try value(
-                    objectID: tap.objectID,
-                    selector: kAudioTapPropertyFormat,
-                    initial: AudioStreamBasicDescription()
-                )
-                let aggregateFormat = try firstStreamFormat(
-                    deviceID: aggregateID,
-                    scope: kAudioObjectPropertyScopeInput
-                )
-                let expected = sourceFormats[index]
-                guard AudioFormatFingerprint(tapFormat) == expected,
-                    AudioFormatFingerprint(aggregateFormat) == expected
-                else {
-                    throw AudioRuntimeFailure.unsupportedFormat(
-                        routeID: routeID,
-                        observed: AudioFormatFingerprint(aggregateFormat)
+            }
+            for (index, sourceResources) in resources.sources.enumerated() {
+                guard let aggregateID = sourceResources.aggregateID else {
+                    throw AudioRuntimeFailure.invalidIntent(
+                        "Missing capture aggregate for source \(index)."
                     )
                 }
                 do {
@@ -982,7 +1224,10 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         }
     }
 
-    private func cleanup(routes: [RouteResources]) -> HALRollbackResult {
+    private func cleanup(
+        routes: [RouteResources],
+        sparingTaps spared: Set<AudioObjectID> = []
+    ) -> HALRollbackResult {
         var failures: [HALCleanupFailure] = []
         for route in routes.reversed() {
             route.lock.lock()
@@ -1087,18 +1332,25 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                     source.aggregateID == nil,
                     let tap = source.tap
                 {
-                    let status = resourceAccess.destroyProcessTap(tap)
-                    if TBAudioObjectDestructionComplete(status) {
+                    if spared.contains(tap.objectID) {
+                        // The tap is being migrated to a replacing route; release
+                        // it from this source without destroying it so it can be
+                        // claimed (and stays muted) during the switch.
                         source.tap = nil
                     } else {
-                        failures.append(
-                            HALCleanupFailure(
-                                routeID: route.routeID,
-                                resource: .processTap,
-                                objectID: tap.objectID,
-                                stage: .destroyTap,
-                                status: status
-                            ))
+                        let status = resourceAccess.destroyProcessTap(tap)
+                        if TBAudioObjectDestructionComplete(status) {
+                            source.tap = nil
+                        } else {
+                            failures.append(
+                                HALCleanupFailure(
+                                    routeID: route.routeID,
+                                    resource: .processTap,
+                                    objectID: tap.objectID,
+                                    stage: .destroyTap,
+                                    status: status
+                                ))
+                        }
                     }
                 }
             }
@@ -1173,6 +1425,18 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         realizationLock.lock()
         let routes = activeRoutes
         activeRoutes = [:]
+        realizationLock.unlock()
+        return routes
+    }
+
+    private func takeActiveRoutes(
+        routeIDs: Set<String>
+    ) -> [String: RouteResources] {
+        realizationLock.lock()
+        var routes: [String: RouteResources] = [:]
+        for routeID in routeIDs {
+            routes[routeID] = activeRoutes.removeValue(forKey: routeID)
+        }
         realizationLock.unlock()
         return routes
     }

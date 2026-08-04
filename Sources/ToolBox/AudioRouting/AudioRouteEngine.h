@@ -57,6 +57,7 @@ API_AVAILABLE(macos(14.2))
 @property(nonatomic, readonly) uint64_t nonFiniteSampleCount;
 @property(nonatomic, readonly) uint64_t clippedSampleCount;
 @property(nonatomic, readonly) uint64_t callbacksInFlight;
+@property(nonatomic, readonly) uint64_t sourceFatalCount;
 @property(nonatomic, readonly) BOOL fatalCallbackMismatch;
 
 @end
@@ -80,6 +81,7 @@ API_AVAILABLE(macos(14.2))
 - (BOOL)performMaintenance;
 - (BOOL)hasPendingCleanup;
 - (void)resetAfterAudioServerRestart;
+- (NSTimeInterval)maximumFadeOutDuration;
 
 @end
 

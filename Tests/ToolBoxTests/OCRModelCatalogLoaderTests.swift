@@ -23,11 +23,19 @@ final class OCRModelCatalogLoaderTests: XCTestCase {
         }
     }
 
-    func testBundledCatalogContainsAllPPOCRv6ProfilesAndLicense() throws {
+    func testBundledCatalogContainsEverySelectablePipelineAndLicense() throws {
         let catalog = try OCRModelCatalogLoader.shipped.loadBundledCatalog()
 
-        XCTAssertEqual(catalog.models.map(\.profile), [.tiny, .small, .medium])
-        XCTAssertTrue(catalog.models.allSatisfy { $0.files.count == 4 })
+        XCTAssertEqual(catalog.models.count, 7)
+        XCTAssertEqual(
+            Set(catalog.models.map(\.selection)),
+            Set(OCRPipelineID.allCases.flatMap { pipeline in
+                pipeline.knownVariantIDs.map {
+                    OCRModelSelection(pipeline: pipeline, variantID: $0)
+                }
+            })
+        )
+        XCTAssertTrue(catalog.models.allSatisfy { !$0.files.isEmpty })
         XCTAssertNotNil(Bundle.main.url(forResource: "PaddleOCR-NOTICE", withExtension: "txt"))
     }
 }
