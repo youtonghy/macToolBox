@@ -82,6 +82,67 @@ final class AudioRouteRuntimeModelsTests: XCTestCase {
         XCTAssertNotEqual(first.parameterFingerprint, second.parameterFingerprint)
     }
 
+    func testRealizationKeyIgnoresUnrelatedRouteTopologyChanges() throws {
+        let routeA = AudioRoutePlan(
+            outputDeviceUID: "output-A",
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player-a",
+                    processObjectID: 42,
+                    linearGain: 1
+                )
+            ]
+        )
+        let originalRouteB = AudioRoutePlan(
+            outputDeviceUID: "output-B",
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player-b",
+                    processObjectID: 43,
+                    linearGain: 1
+                )
+            ]
+        )
+        let changedRouteB = AudioRoutePlan(
+            outputDeviceUID: "output-B",
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player-c",
+                    processObjectID: 44,
+                    linearGain: 1
+                )
+            ]
+        )
+        let observation = AudioRouteTestFixtures.observation()
+        let originalIntent = AudioRuntimeIntent(
+            generation: 1,
+            plansByID: [routeA.id: routeA, originalRouteB.id: originalRouteB],
+            mutedRouteIDs: []
+        )
+        let changedIntent = AudioRuntimeIntent(
+            generation: 2,
+            plansByID: [routeA.id: routeA, changedRouteB.id: changedRouteB],
+            mutedRouteIDs: []
+        )
+
+        XCTAssertEqual(
+            try XCTUnwrap(
+                RealizationKey(
+                    routeID: routeA.id,
+                    intent: originalIntent,
+                    observation: observation
+                )
+            ),
+            try XCTUnwrap(
+                RealizationKey(
+                    routeID: routeA.id,
+                    intent: changedIntent,
+                    observation: observation
+                )
+            )
+        )
+    }
+
     func testAudioServerGenerationParticipatesInRealizationIdentity() {
         XCTAssertNotEqual(
             RealizationKey(

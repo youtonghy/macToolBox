@@ -12,6 +12,7 @@ struct AudioRouteHealthPolicy: Equatable, Sendable {
 struct AudioRouteHealthSample: Equatable, Sendable {
     let captureFrameCount: UInt64
     let outputFrameCount: UInt64
+    let sourceFatalCount: UInt64
     let underrunFrameCount: UInt64
     let overrunFrameCount: UInt64
     let forcedResyncCount: UInt64
@@ -48,6 +49,10 @@ enum AudioRouteHealthEvaluator {
         policy: AudioRouteHealthPolicy = .init()
     ) -> AudioRouteHealthDecision {
         if delta(current.formatMismatchCount, previous.formatMismatchCount) > 0 {
+            return .rebuild(.formatContractViolation)
+        }
+
+        if delta(current.sourceFatalCount, previous.sourceFatalCount) > 0 {
             return .rebuild(.formatContractViolation)
         }
 

@@ -43,11 +43,135 @@ final class ScreenshotCoordinatorTests: XCTestCase {
             editorHandoff: { handedOff = $0 }
         )
         await coordinator.startRegionCapture()
-        overlay.send(.manualDrag(CGRect(x: 0, y: 0, width: 20, height: 20)))
+        overlay.send(.adjustRegion(CGRect(x: 0, y: 0, width: 20, height: 20)))
         overlay.send(.confirm)
+        await waitForPreview(coordinator)
         XCTAssertEqual(coordinator.state, .previewing)
         XCTAssertEqual(coordinator.frozenFrameCount, 0)
         XCTAssertNotNil(handedOff)
+    }
+
+    func testNormalCandidateClickAutomaticallyHandsOffToEditor() async throws {
+        let overlay = FakeOverlay()
+        var handedOff: CGImage?
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay,
+            editorHandoff: { handedOff = $0 }
+        )
+        await coordinator.startRegionCapture()
+
+        overlay.send(.click(candidate(), additive: false))
+        await waitForPreview(coordinator)
+
+        XCTAssertEqual(coordinator.state, .previewing)
+        XCTAssertNotNil(handedOff)
+    }
+
+    func testCandidateClickDefersOverlayTeardownUntilActionReturns() async throws {
+        let overlay = FakeOverlay()
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay
+        )
+        await coordinator.startRegionCapture()
+
+        overlay.send(.click(candidate(), additive: false))
+
+        XCTAssertFalse(overlay.closedDuringAction)
+        XCTAssertEqual(overlay.closeCount, 0)
+        XCTAssertEqual(coordinator.state, .selecting)
+        await waitForPreview(coordinator)
+        XCTAssertEqual(overlay.closeCount, 1)
+        XCTAssertEqual(coordinator.state, .previewing)
+    }
+
+    func testCompletedManualDragAutomaticallyHandsOffToEditor() async throws {
+        let overlay = FakeOverlay()
+        var handedOff: CGImage?
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay,
+            editorHandoff: { handedOff = $0 }
+        )
+        await coordinator.startRegionCapture()
+
+        overlay.send(.manualDrag(CGRect(x: 0, y: 0, width: 20, height: 20)))
+        await waitForPreview(coordinator)
+
+        XCTAssertEqual(coordinator.state, .previewing)
+        XCTAssertNotNil(handedOff)
+    }
+
+    func testRegionAdjustmentDoesNotLeaveSelectionStage() async throws {
+        let overlay = FakeOverlay()
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay
+        )
+        await coordinator.startRegionCapture()
+
+        overlay.send(.adjustRegion(CGRect(x: 0, y: 0, width: 20, height: 20)))
+
+        XCTAssertEqual(coordinator.state, .selecting)
+        XCTAssertEqual(overlay.updatedStates.last?.captureBounds, CGRect(x: 0, y: 0, width: 20, height: 20))
+    }
+
+    func testHoverCandidateCyclesThroughResolvedHierarchyAndWraps() async throws {
+        let overlay = FakeOverlay()
+        let child = candidate(
+            hierarchyIndex: 0,
+            rect: CGRect(x: 4, y: 4, width: 8, height: 8)
+        )
+        let parent = candidate(
+            hierarchyIndex: 1,
+            rect: CGRect(x: 0, y: 0, width: 20, height: 20)
+        )
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay,
+            candidateResolver: { _, _ in [child, parent] }
+        )
+        await coordinator.startRegionCapture()
+
+        overlay.sendHover(CGPoint(x: 8, y: 8))
+        await waitForHoveredCandidate(overlay)
+        XCTAssertEqual(overlay.updatedStates.last?.hoveredCandidate, child)
+
+        overlay.send(.cycleCandidate(1))
+        XCTAssertEqual(overlay.updatedStates.last?.hoveredCandidate, parent)
+        overlay.send(.cycleCandidate(1))
+        XCTAssertEqual(overlay.updatedStates.last?.hoveredCandidate, child)
+        overlay.send(.cycleCandidate(-1))
+        XCTAssertEqual(overlay.updatedStates.last?.hoveredCandidate, parent)
+    }
+
+    func testScrollModeSelectionStartsLongCaptureInsteadOfEditorHandoff() async throws {
+        let overlay = FakeOverlay()
+        var handedOff: CGImage?
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay,
+            editorHandoff: { handedOff = $0 }
+        )
+        await coordinator.startRegionCapture()
+
+        overlay.send(.setCaptureMode(.scrollCapture))
+        XCTAssertEqual(overlay.updatedStates.last?.captureMode, .scrollCapture)
+        overlay.send(.manualDrag(CGRect(x: 0, y: 0, width: 20, height: 20)))
+        for _ in 0..<10 where coordinator.state == .selecting {
+            await Task.yield()
+        }
+
+        XCTAssertNil(handedOff)
+        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertEqual(coordinator.lastError, .longCaptureFailed)
     }
 
     func testCaptureFailureAndCancelCleanUpIdempotently() async throws {
@@ -82,6 +206,36 @@ final class ScreenshotCoordinatorTests: XCTestCase {
         )
     }
 
+    private func candidate(
+        hierarchyIndex: Int = 0,
+        rect: CGRect = CGRect(x: 0, y: 0, width: 20, height: 20)
+    ) -> SelectionCandidate {
+        SelectionCandidate(
+            providerIdentity: "test",
+            source: .accessibility,
+            ownerPID: 42,
+            windowID: 7,
+            displayID: 1,
+            topologyGeneration: 1,
+            role: "AXButton",
+            title: "test",
+            hierarchyIndex: hierarchyIndex,
+            globalRect: rect
+        )
+    }
+
+    private func waitForPreview(_ coordinator: ScreenshotCoordinator) async {
+        for _ in 0..<10 where coordinator.state == .selecting {
+            await Task.yield()
+        }
+    }
+
+    private func waitForHoveredCandidate(_ overlay: FakeOverlay) async {
+        for _ in 0..<10 where overlay.updatedStates.last?.hoveredCandidate == nil {
+            await Task.yield()
+        }
+    }
+
     private enum TestError: Error { case image }
 }
 
@@ -105,10 +259,26 @@ final class ScreenshotCoordinatorTests: XCTestCase {
     var showCount = 0
     var closeCount = 0
     var bringForwardCount = 0
+    var updatedStates: [SelectionSessionState] = []
     var action: ((SelectionAction) -> Void)?
-    func show(frames: [DisplayCaptureFrame], state: SelectionSessionState, onAction: @escaping (SelectionAction) -> Void, onHover: @escaping (CGPoint) -> Void, onCancel: @escaping () -> Void) throws { showCount += 1; action = onAction }
+    var hover: ((CGPoint) -> Void)?
+    private var isSendingAction = false
+    private(set) var closedDuringAction = false
+    func show(frames: [DisplayCaptureFrame], state: SelectionSessionState, onAction: @escaping (SelectionAction) -> Void, onHover: @escaping (CGPoint) -> Void, onCancel: @escaping () -> Void) throws {
+        showCount += 1
+        action = onAction
+        hover = onHover
+    }
     func beginInteraction(on displayID: CGDirectDisplayID) { bringForwardCount += 1 }
-    func update(state: SelectionSessionState) {}
-    func close(cancelled: Bool) { closeCount += 1 }
-    func send(_ value: SelectionAction) { action?(value) }
+    func update(state: SelectionSessionState) { updatedStates.append(state) }
+    func close(cancelled: Bool) {
+        closeCount += 1
+        closedDuringAction = closedDuringAction || isSendingAction
+    }
+    func send(_ value: SelectionAction) {
+        isSendingAction = true
+        action?(value)
+        isSendingAction = false
+    }
+    func sendHover(_ point: CGPoint) { hover?(point) }
 }

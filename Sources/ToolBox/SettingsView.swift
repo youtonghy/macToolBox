@@ -80,7 +80,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
 struct SettingsView: View {
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
-    @ObservedObject var mediaKeys: DisplayControlMediaKeyController
+    let shortcutRegistry: ShortcutRegistry
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
@@ -143,16 +143,17 @@ struct SettingsView: View {
                         model: displayControl,
                         brightnessSchedule: brightnessSchedule,
                         launchAtLogin: launchAtLogin,
-                        focusMode: focusMode
+                        focusMode: focusMode,
+                        permissions: shortcutRegistry.permissions
                     )
                 case .audio:
                     AudioRoutingSettingsView(service: audioRouting)
                 case .screenshot:
-                    ScreenshotSettingsView()
+                    ScreenshotSettingsView(permissions: shortcutRegistry.permissions)
                 case .shortcuts:
                     ShortcutSettingsView(model: shortcutSettings)
                 case .general:
-                    GeneralSettingsView(launchAtLogin: launchAtLogin, mediaKeys: mediaKeys)
+                    GeneralSettingsView(launchAtLogin: launchAtLogin)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -410,6 +411,7 @@ private struct SettingsDisplayView: View {
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
     @ObservedObject var launchAtLogin: LaunchAtLoginController
     @ObservedObject var focusMode: FocusModeCoordinator
+    @ObservedObject var permissions: ShortcutPermissionCenter
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
@@ -501,7 +503,7 @@ private struct SettingsDisplayView: View {
 
     private var focusModeSection: some View {
         let accent = Color(nsColor: .systemTeal)
-        let permissionGranted = focusMode.permissionState == .granted
+        let permissionGranted = permissions.snapshot.accessibilityTrusted
 
         return SettingsSection(title: "聚焦模式", subtitle: "自动突出当前显示器") {
             VStack(spacing: 8) {
@@ -586,7 +588,7 @@ private struct SettingsDisplayView: View {
 
                         if !permissionGranted {
                             Button("打开系统设置") {
-                                focusMode.openAccessibilitySettings()
+                                permissions.requestAccessibility()
                             }
                             .buttonStyle(.borderedProminent)
                             .controlSize(.small)
@@ -725,71 +727,12 @@ private struct SettingsDisplayView: View {
     }
 }
 
-private struct MediaKeyPermissionSection: View {
-    @ObservedObject var mediaKeys: DisplayControlMediaKeyController
-
-    private var isReady: Bool {
-        mediaKeys.isTapActive
-    }
-
-    private var accent: Color {
-        isReady ? Color(nsColor: .systemGreen) : Color(nsColor: .systemOrange)
-    }
-
-    var body: some View {
-        SettingsInnerCard {
-            HStack(spacing: 12) {
-                SettingsIconBadge(
-                    systemName: isReady ? "checkmark.shield.fill" : "exclamationmark.shield.fill",
-                    accent: accent,
-                    emphasized: isReady
-                )
-
-                Text("媒体键权限")
-                    .font(.system(size: 13, weight: .semibold))
-
-                Spacer(minLength: 12)
-
-                Text(isReady ? "已授权" : "未授权")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(accent)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(accent.opacity(0.12))
-                    )
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(accent.opacity(0.22), lineWidth: 1)
-                    )
-
-                if !isReady {
-                    Button("请求权限") {
-                        mediaKeys.openRequiredPermissionSettings()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                }
-            }
-        }
-        .onAppear {
-            mediaKeys.refreshAndRetry(promptIfNeeded: false)
-        }
-    }
-}
-
 private struct GeneralSettingsView: View {
     @ObservedObject var launchAtLogin: LaunchAtLoginController
-    @ObservedObject var mediaKeys: DisplayControlMediaKeyController
 
     var body: some View {
         ScrollView(.vertical, showsIndicators: false) {
             VStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
-                SettingsSection(title: "权限") {
-                    MediaKeyPermissionSection(mediaKeys: mediaKeys)
-                }
-
                 SettingsSection(title: "启动") {
                     SettingsInnerCard {
                         HStack(spacing: 12) {

@@ -118,6 +118,8 @@ final class ShortcutRegistry {
 
     private let logger = Logger(subsystem: "ToolBox", category: "ShortcutRegistry")
     private let system: ShortcutCarbonSystem
+    private let mediaKeyBackend: any ShortcutMediaKeyRoutingBackend
+    let permissions: ShortcutPermissionCenter
     private let callbackContext = ShortcutRegistryCallbackContext()
     private var retainedCallbackContext: Unmanaged<ShortcutRegistryCallbackContext>?
     private var handlerRef: EventHandlerRef?
@@ -127,11 +129,19 @@ final class ShortcutRegistry {
     private var rollbackRegistrations: [Registration] = []
     private var idToAction: [UInt32: ShortcutActionID] = [:]
     private var nextTemporaryID: UInt32 = 0x8000_0000
+    private var mediaKeyRoutingRequested = false
 
     var onAction: ((ShortcutActionID) -> Void)?
+    var onRoutedAction: ((ShortcutAction) -> Bool)?
 
-    init(system: ShortcutCarbonSystem = .live) {
+    init(
+        system: ShortcutCarbonSystem = .live,
+        mediaKeyBackend: (any ShortcutMediaKeyRoutingBackend)? = nil,
+        permissions: ShortcutPermissionCenter? = nil
+    ) {
         self.system = system
+        self.mediaKeyBackend = mediaKeyBackend ?? LiveShortcutMediaKeyRoutingBackend()
+        self.permissions = permissions ?? ShortcutPermissionCenter()
     }
 
     func start(rules: [ShortcutRule]) throws {
@@ -171,6 +181,14 @@ final class ShortcutRegistry {
             }
             configuredRules = Self.ruleMap(rules)
             isStarted = true
+            mediaKeyBackend.onEvent = { [weak self] event in
+                self?.onRoutedAction?(.mediaKey(event)) ?? false
+            }
+            permissions.onApplicationDidBecomeActive = { [weak self] in
+                self?.retryMediaKeyRouteIfNeeded()
+            }
+            permissions.start()
+            startMediaKeyRouteIfNeeded()
         } catch {
             if let cleanupStatus = cleanup() {
                 throw ShortcutRegistryError.rollbackFailed(cleanupStatus)
@@ -185,6 +203,8 @@ final class ShortcutRegistry {
     }
 
     private func cleanup() -> OSStatus? {
+        stopMediaKeyRoute(clearRequest: true)
+        permissions.stop()
         isStarted = false
         var firstFailure: OSStatus?
 
@@ -395,6 +415,87 @@ final class ShortcutRegistry {
         return idToAction[registration.carbonID] == action
     }
 
+    func setMediaKeyRoutingEnabled(_ enabled: Bool) {
+        guard mediaKeyRoutingRequested != enabled else {
+            if enabled {
+                startMediaKeyRouteIfNeeded()
+            }
+            return
+        }
+        mediaKeyRoutingRequested = enabled
+        if enabled {
+            startMediaKeyRouteIfNeeded()
+        } else {
+            stopMediaKeyRoute(clearRequest: false)
+        }
+    }
+
+    func refreshMediaKeyRoute(promptIfNeeded: Bool) {
+        permissions.refresh()
+        if promptIfNeeded {
+            permissions.openMediaKeyPermissionSettings()
+        }
+        retryMediaKeyRouteIfNeeded()
+    }
+
+    private func retryMediaKeyRouteIfNeeded() {
+        guard isStarted, mediaKeyRoutingRequested else { return }
+        mediaKeyBackend.stop()
+        startMediaKeyRouteIfNeeded()
+    }
+
+    private func startMediaKeyRouteIfNeeded() {
+        guard isStarted, mediaKeyRoutingRequested else {
+            permissions.updateMediaKeyRoute(
+                requested: mediaKeyRoutingRequested,
+                active: false,
+                listenOnlyTapAvailable: nil
+            )
+            return
+        }
+        guard !mediaKeyBackend.isActive else {
+            permissions.updateMediaKeyRoute(
+                requested: true,
+                active: true,
+                listenOnlyTapAvailable: nil
+            )
+            return
+        }
+
+        mediaKeyBackend.onEvent = { [weak self] event in
+            self?.onRoutedAction?(.mediaKey(event)) ?? false
+        }
+        permissions.quietlyRegisterMediaKeyPermissions()
+        let active = mediaKeyBackend.start()
+        let listenOnly = active ? nil : mediaKeyBackend.canCreateListenOnlyTap()
+        permissions.refresh()
+        permissions.updateMediaKeyRoute(
+            requested: true,
+            active: active,
+            listenOnlyTapAvailable: listenOnly
+        )
+        if active {
+            logger.info("Shared media-key route started")
+        } else {
+            logger.error(
+                "Failed to start shared media-key route. gap=\(String(describing: self.permissions.snapshot.mediaKeyPermissionGap), privacy: .public)"
+            )
+        }
+    }
+
+    private func stopMediaKeyRoute(clearRequest: Bool) {
+        mediaKeyBackend.stop()
+        if clearRequest {
+            mediaKeyRoutingRequested = false
+            mediaKeyBackend.onEvent = nil
+        }
+        permissions.updateMediaKeyRoute(
+            requested: mediaKeyRoutingRequested,
+            active: false,
+            listenOnlyTapAvailable: nil
+        )
+    }
+
     private func validate(rules: [ShortcutRule]) throws {
         guard let error = ShortcutRuleStore.validationError(for: rules) else { return }
         switch error {
@@ -476,6 +577,7 @@ final class ShortcutRegistry {
               let action = idToAction[hotKeyID.id] else {
             return OSStatus(eventNotHandledErr)
         }
+        _ = onRoutedAction?(.hotKey(action))
         onAction?(action)
         return noErr
     }
@@ -490,6 +592,7 @@ final class ShortcutRegistry {
 
     deinit {
         onAction = nil
+        onRoutedAction = nil
         callbackContext.onEvent = nil
         for registration in registrations.values {
             if system.unregisterHotKey(registration.ref) != noErr {

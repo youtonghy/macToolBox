@@ -45,7 +45,10 @@ final class SwiftAudioRouteEngineAdapter: AudioRouteNativeEngineControlling {
         }
         try apply(retainedParameters, to: &candidatePlans)
 
-        let candidateMutedRouteIDs = mutedRouteIDs.intersection(candidatePlans.keys)
+        let changedRouteIDs = Set(changedPlans.map(\.id))
+        let candidateMutedRouteIDs = mutedRouteIDs
+            .intersection(candidatePlans.keys)
+            .subtracting(changedRouteIDs)
         _ = try converge(
             plansByID: candidatePlans,
             mutedRouteIDs: candidateMutedRouteIDs
@@ -59,12 +62,27 @@ final class SwiftAudioRouteEngineAdapter: AudioRouteNativeEngineControlling {
 
         var candidatePlans = plansByID
         try apply(parameters, to: &candidatePlans)
-        _ = try converge(plansByID: candidatePlans, mutedRouteIDs: mutedRouteIDs)
+        let candidateMutedRouteIDs = mutedRouteIDs.subtracting(
+            parameters.map(\.routeID)
+        )
+        _ = try converge(
+            plansByID: candidatePlans,
+            mutedRouteIDs: candidateMutedRouteIDs
+        )
         plansByID = candidatePlans
+        mutedRouteIDs = candidateMutedRouteIDs
     }
 
     func diagnostics() -> [AudioRouteDiagnosticsSnapshot] {
         runtime.snapshot()
+    }
+
+    var fadeOutDuration: Duration {
+        // The runtime uses rampFrames = max(1, sampleRate * 0.010) ≈ 10ms at any rate.
+        // The worst-case callback period is estimated at 2048/44100 ≈ 46ms.
+        // Total: 1 callback period + 1 ramp period = 46ms + 10ms.
+        // Round up to 60ms for safety.
+        .milliseconds(60)
     }
 
     func performMaintenance() -> Bool {

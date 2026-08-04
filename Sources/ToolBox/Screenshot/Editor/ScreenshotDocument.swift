@@ -1,3 +1,5 @@
+import Foundation
+
 struct ScreenshotDocument: Sendable {
     let baseImage: ScreenshotImageSource
     var annotations: [ScreenshotAnnotation]

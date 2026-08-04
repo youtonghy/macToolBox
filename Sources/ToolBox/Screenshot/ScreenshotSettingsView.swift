@@ -1,13 +1,14 @@
 import SwiftUI
 
 struct ScreenshotSettingsView: View {
+    @ObservedObject var permissions: ShortcutPermissionCenter
     @AppStorage("screenshot.smartElementCandidates") private var smartCandidates = true
     @AppStorage("screenshot.scrollCapture.automatic") private var automaticScroll = true
     @AppStorage("screenshot.scrollCapture.stepPixels") private var scrollStep = 160.0
-    @State private var screenCaptureGranted = Permissions.isScreenCaptureTrusted
-    @State private var accessibilityGranted = Permissions.isAccessibilityTrusted
-    @State private var eventPostingGranted = Permissions.canPostEvents
     @State private var ocrSettings = OCRSettingsStore().load().settings
+    @State private var availableOCRSelections = PPOCRv6Profile.allCases.map {
+        OCRModelSelection(pipeline: .ppOCRv6, variantID: $0.rawValue)
+    }
     @State private var ocrModelState: OCRModelState = .notInstalled
     @State private var ocrDownloadSize: Int64 = 0
     @State private var isDownloadingOCR = false
@@ -21,19 +22,13 @@ struct ScreenshotSettingsView: View {
                     VStack(spacing: 10) {
                         permissionRow(
                             title: "屏幕录制",
-                            granted: screenCaptureGranted,
-                            request: {
-                                screenCaptureGranted = Permissions.requestScreenCapture()
-                                if !screenCaptureGranted { Permissions.openScreenCaptureSettings() }
-                            }
+                            granted: permissions.snapshot.screenCaptureTrusted,
+                            request: { permissions.requestScreenCapture() }
                         )
                         permissionRow(
                             title: "辅助功能",
-                            granted: accessibilityGranted,
-                            request: {
-                                accessibilityGranted = Permissions.requestAccessibilityOnce()
-                                if !accessibilityGranted { Permissions.openAccessibilitySettings() }
-                            }
+                            granted: permissions.snapshot.accessibilityTrusted,
+                            request: { permissions.requestAccessibility() }
                         )
                     }
                 }
@@ -53,11 +48,11 @@ struct ScreenshotSettingsView: View {
                                 .font(.caption.monospacedDigit())
                                 .frame(width: 52, alignment: .trailing)
                         }
-                        if automaticScroll && !eventPostingGranted {
+                        if automaticScroll && !permissions.snapshot.canPostEvents {
                             permissionRow(
                                 title: "事件投递",
                                 granted: false,
-                                request: { eventPostingGranted = Permissions.requestEventPosting() }
+                                request: { permissions.requestEventPosting() }
                             )
                         }
                     }
@@ -66,20 +61,25 @@ struct ScreenshotSettingsView: View {
                 SettingsSection(title: "本地文字识别") {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack {
-                            Text("引擎")
+                            Text("解析管线")
                             Spacer()
-                            Text("PP-OCRv6")
-                                .foregroundStyle(.secondary)
+                            Picker("管线", selection: Binding(
+                                get: { ocrSettings.pipeline },
+                                set: { ocrSettings.selection = OCRModelSelection(pipeline: $0) }
+                            )) {
+                                ForEach(availableOCRPipelines, id: \.self) { pipeline in
+                                    Text(pipeline.displayName).tag(pipeline)
+                                }
+                            }
+                            .labelsHidden()
                         }
-                        Picker("规格", selection: $ocrSettings.profile) {
-                            Text("Tiny").tag(PPOCRv6Profile.tiny)
-                            Text("Small").tag(PPOCRv6Profile.small)
-                            Text("Medium").tag(PPOCRv6Profile.medium)
-                        }
-                        .pickerStyle(.segmented)
-                        Picker("运行方式", selection: $ocrSettings.executionProvider) {
-                            Text("CPU").tag(OCRExecutionProvider.cpu)
-                            Text("Core ML").tag(OCRExecutionProvider.coreML)
+                        Picker("模型 / 规模", selection: Binding(
+                            get: { ocrSettings.selection.variantID },
+                            set: { ocrSettings.selection.variantID = $0 }
+                        )) {
+                            ForEach(availableVariants, id: \.self) { variant in
+                                Text(variantLabel(variant, pipeline: ocrSettings.pipeline)).tag(variant)
+                            }
                         }
                         .pickerStyle(.segmented)
                         HStack {
@@ -94,9 +94,6 @@ struct ScreenshotSettingsView: View {
                                 Button("下载") { showsOCRDownloadPrompt = true }
                             }
                         }
-                        Divider()
-                        advancedPipelineRow("PP-StructureV3")
-                        advancedPipelineRow("PaddleOCR-VL")
                         if let ocrError {
                             Text(ocrError)
                                 .font(.caption)
@@ -108,8 +105,9 @@ struct ScreenshotSettingsView: View {
             }
         }
         .onAppear {
-            refresh()
+            permissions.refresh()
             ocrSettings = OCRSettingsStore().load().settings
+            refreshAvailableOCRSelections()
             refreshOCRState()
         }
         .onChange(of: ocrSettings) { _, _ in saveOCRSettings() }
@@ -118,7 +116,7 @@ struct ScreenshotSettingsView: View {
             Button("下载") { downloadOCRModel() }
                 .keyboardShortcut(.defaultAction)
         } message: {
-            Text("将下载 \(profileLabel(ocrSettings.profile))（\(byteCountText)）。模型仅保存在本机。")
+            Text("将准备 \(selectionLabel(ocrSettings.selection))（\(byteCountText)）。模型仅保存在本机。")
         }
     }
 
@@ -138,12 +136,6 @@ struct ScreenshotSettingsView: View {
         .padding(12)
     }
 
-    private func refresh() {
-        screenCaptureGranted = Permissions.isScreenCaptureTrusted
-        accessibilityGranted = Permissions.isAccessibilityTrusted
-        eventPostingGranted = Permissions.canPostEvents
-    }
-
     private func saveOCRSettings() {
         do {
             try OCRSettingsStore().save(ocrSettings)
@@ -155,11 +147,11 @@ struct ScreenshotSettingsView: View {
     }
 
     private func refreshOCRState() {
-        let profile = ocrSettings.profile
+        let selection = ocrSettings.selection
         Task {
             do {
-                let descriptor = try await OCRFeatureService.shared.descriptor(for: profile)
-                guard ocrSettings.profile == profile else { return }
+                let descriptor = try await OCRFeatureService.shared.descriptor(for: selection)
+                guard ocrSettings.selection == selection else { return }
                 ocrModelState = descriptor.state
                 ocrDownloadSize = descriptor.downloadByteCount
             } catch {
@@ -168,8 +160,35 @@ struct ScreenshotSettingsView: View {
         }
     }
 
+    private func refreshAvailableOCRSelections() {
+        Task {
+            do {
+                let selections = try await OCRFeatureService.shared.availableSelections()
+                guard !selections.isEmpty else { return }
+                availableOCRSelections = selections
+                if !selections.contains(ocrSettings.selection), let fallback = selections.first {
+                    ocrSettings.selection = fallback
+                }
+            } catch {
+                ocrError = "无法读取可用 OCR 模型"
+            }
+        }
+    }
+
+    private var availableOCRPipelines: [OCRPipelineID] {
+        availableOCRSelections.reduce(into: []) { result, selection in
+            if !result.contains(selection.pipeline) { result.append(selection.pipeline) }
+        }
+    }
+
+    private var availableVariants: [String] {
+        availableOCRSelections
+            .filter { $0.pipeline == ocrSettings.pipeline }
+            .map(\.variantID)
+    }
+
     private func downloadOCRModel() {
-        let profile = ocrSettings.profile
+        let selection = ocrSettings.selection
         isDownloadingOCR = true
         ocrError = nil
         Task {
@@ -178,24 +197,29 @@ struct ScreenshotSettingsView: View {
                 refreshOCRState()
             }
             do {
-                try await OCRFeatureService.shared.install(profile: profile, userConsented: true)
-                if ocrSettings.profile == profile { ocrModelState = .ready }
+                _ = try await OCRFeatureService.shared.install(selection: selection, userConsented: true)
+                if ocrSettings.selection == selection { ocrModelState = .ready }
             } catch is CancellationError {
                 return
             } catch {
                 ocrModelState = .failed
-                ocrError = "OCR 模型下载或校验失败"
+                ocrError = modelErrorMessage(error)
             }
         }
     }
 
-    private func advancedPipelineRow(_ title: String) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text("当前版本未启用")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+    private func modelErrorMessage(_ error: Error) -> String {
+        switch error {
+        case OCRFeatureServiceError.modelUnavailable:
+            "所选 OCR 模型未包含在当前签名清单中"
+        case OCRFeatureServiceError.workerUnavailable:
+            "本地 OCR Worker 尚未打包"
+        case OCRModelStoreError.lengthMismatch, OCRModelStoreError.hashMismatch:
+            "OCR 模型校验失败"
+        case OCRModelDownloadError.invalidHTTPResponse:
+            "OCR 模型下载失败"
+        default:
+            "OCR 模型下载或校验失败：\(error.localizedDescription)"
         }
     }
 
@@ -223,11 +247,22 @@ struct ScreenshotSettingsView: View {
         Self.byteCountFormatter.string(fromByteCount: ocrDownloadSize)
     }
 
-    private func profileLabel(_ profile: PPOCRv6Profile) -> String {
-        switch profile {
-        case .tiny: "PP-OCRv6 Tiny"
-        case .small: "PP-OCRv6 Small"
-        case .medium: "PP-OCRv6 Medium"
+    private func selectionLabel(_ selection: OCRModelSelection) -> String {
+        switch selection.pipeline {
+        case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
+        case .ppStructureV3: "PP-StructureV3"
+        case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        }
+    }
+
+    private func variantLabel(_ variant: String, pipeline: OCRPipelineID) -> String {
+        switch (pipeline, variant) {
+        case (.ppOCRv6, "tiny"): "Tiny"
+        case (.ppOCRv6, "small"): "Small"
+        case (.ppOCRv6, "medium"): "Medium"
+        case (.ppStructureV3, _): "Default"
+        case (.paddleOCRVL, _): variant
+        default: variant
         }
     }
 

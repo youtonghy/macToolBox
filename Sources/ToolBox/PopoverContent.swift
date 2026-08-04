@@ -10,49 +10,50 @@ struct PopoverContent: View {
     @ObservedObject var wifiSignal: WiFiSignalModel
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            VStack(alignment: .leading, spacing: MenuPanelLayout.outerSpacing) {
-                header
+        VStack(alignment: .leading, spacing: MenuPanelLayout.outerSpacing) {
+            header
 
-                VStack(alignment: .leading, spacing: MenuPanelLayout.contentSpacing) {
-                    hardwareSection
+            VStack(alignment: .leading, spacing: MenuPanelLayout.contentSpacing) {
+                hardwareSection
 
-                    if !audioRouting.menuRows.isEmpty {
-                        section(title: "应用音频", subtitle: "0–300%") {
-                            AudioRoutingPanel(service: audioRouting)
-                                .frame(height: MenuPanelLayout.audioSectionContentHeight)
-                        }
-                    }
-
-                    if !hardware.cableItems.isEmpty {
-                        section(title: "线缆状态") {
-                            CableListView(items: hardware.visibleCableItems)
-                                .frame(height: hardware.cableListHeight)
-                        }
-                    }
-
-                    section(
-                        title: "Wi-Fi 信号",
-                        subtitle: wifiSignal.snapshot.state == .connected
-                            ? "\(wifiSignal.snapshot.identityText) · \(wifiSignal.snapshot.band.displayText)"
-                            : "当前连接"
-                    ) {
-                        WiFiSignalPopoverView(model: wifiSignal)
-                    }
-
-                    if displayControl.hasExternalDisplay {
-                        section(title: "显示器控制") {
-                            DisplayControlPanel(model: displayControl)
-                        }
+                if !audioRouting.menuRows.isEmpty {
+                    section(title: "应用音频", subtitle: "0–300%") {
+                        AudioRoutingPanel(service: audioRouting)
+                            .frame(
+                                height: MenuPanelLayout.audioContentHeight(
+                                    rowCount: audioRouting.menuRows.count
+                                ),
+                                alignment: .topLeading
+                            )
                     }
                 }
 
-                controlsBar
+                if !hardware.cableItems.isEmpty {
+                    section(title: "线缆状态") {
+                        CableListView(items: hardware.visibleCableItems)
+                            .frame(height: hardware.cableListHeight)
+                    }
+                }
+
+                section(
+                    title: "Wi-Fi 信号",
+                    subtitle: wifiSignal.snapshot.state == .connected
+                        ? "\(wifiSignal.snapshot.identityText) · \(wifiSignal.snapshot.band.displayText)"
+                        : "当前连接"
+                ) {
+                    WiFiSignalPopoverView(model: wifiSignal)
+                }
+
+                if displayControl.hasExternalDisplay {
+                    section(title: "显示器控制") {
+                        DisplayControlPanel(model: displayControl)
+                    }
+                }
             }
-            .frame(maxWidth: .infinity, alignment: .topLeading)
+
+            controlsBar
         }
-        .scrollBounceBehavior(.basedOnSize)
-        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
     }
 

@@ -7,15 +7,13 @@ struct AudioRoutingPanel: View {
     private let iconPointSize: CGFloat = 24
 
     var body: some View {
-        ScrollView(.vertical, showsIndicators: true) {
-            LazyVStack(spacing: 6) {
-                ForEach(service.menuRows) { row in
-                    audioRow(row)
-                }
+        VStack(spacing: MenuPanelLayout.audioRowSpacing) {
+            ForEach(service.menuRows) { row in
+                audioRow(row)
             }
-            .padding(.trailing, 2)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(.trailing, 2)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func audioRow(_ row: AudioRoutingRow) -> some View {

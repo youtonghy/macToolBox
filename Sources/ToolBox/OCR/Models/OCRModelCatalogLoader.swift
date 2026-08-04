@@ -81,6 +81,6 @@ struct OCRModelCatalogLoader {
     }
 
     static let shipped = OCRModelCatalogLoader(
-        publicKey: Data(base64Encoded: "PhgH3VJk+drrbYziClQaPCnmsfn902MwwlzYsJnoVu4=")!
+        publicKey: Data(base64Encoded: "+FkvLxWyIRrfJVGSJ7dqVA9aot6GCvnQxp9ftBcWktM=")!
     )
 }

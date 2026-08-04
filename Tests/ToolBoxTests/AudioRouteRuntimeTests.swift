@@ -14,6 +14,20 @@ final class AudioRouteRuntimeTests: XCTestCase {
         XCTAssertEqual(hal.executedTransactions.count, 1)
     }
 
+    func testParameterOnlyChangeUpdatesHALWithoutRebuilding() throws {
+        let hal = ScriptedCoreAudioHAL(observation: AudioRouteTestFixtures.observation())
+        let runtime = AudioRouteRuntime(hal: hal)
+        _ = try runtime.converge(to: AudioRouteTestFixtures.intent(gain: 1))
+
+        XCTAssertEqual(
+            try runtime.converge(to: AudioRouteTestFixtures.intent(generation: 2, gain: 2)),
+            .applied
+        )
+
+        XCTAssertEqual(hal.executedTransactions.count, 1)
+        XCTAssertEqual(hal.updatedIntents.last?.plansByID["output-A"]?.sources.first?.linearGain, 2)
+    }
+
     func testChangedTapFormatRebuildsUnchangedIntent() throws {
         let hal = ScriptedCoreAudioHAL(
             observation: AudioRouteTestFixtures.observation(tapSampleRate: 44_100)
@@ -146,6 +160,7 @@ final class ScriptedCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
     var observation: HALObservationSnapshot
     let capabilities: Set<HALCapability>
     private(set) var executedTransactions: [HALTransaction] = []
+    private(set) var updatedIntents: [AudioRuntimeIntent] = []
     var operationLog: [HALOperation] = []
     private(set) var activeOutputUIDs: Set<String> = []
     private(set) var activeSourceIDs: Set<UInt32> = []
@@ -230,6 +245,10 @@ final class ScriptedCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                 return rollbackSequence.next()
             }
         )
+    }
+
+    func updateParameters(_ intent: AudioRuntimeIntent) throws {
+        updatedIntents.append(intent)
     }
 
     func changes(for observations: Set<HALObservation>) -> AsyncStream<HALChange> {

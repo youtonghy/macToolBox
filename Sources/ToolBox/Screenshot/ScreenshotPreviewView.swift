@@ -2,6 +2,26 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
+struct ScreenshotClipboardWriter {
+    func write(png: Data, to pasteboard: NSPasteboard) throws {
+        guard let bitmap = NSBitmapImageRep(data: png),
+              let tiff = bitmap.representation(using: .tiff, properties: [:])
+        else {
+            throw AnnotationRenderError.exportFailed
+        }
+        let item = NSPasteboardItem()
+        guard item.setData(png, forType: .png),
+              item.setData(tiff, forType: .tiff)
+        else {
+            throw AnnotationRenderError.exportFailed
+        }
+        pasteboard.clearContents()
+        guard pasteboard.writeObjects([item]) else {
+            throw AnnotationRenderError.exportFailed
+        }
+    }
+}
+
 struct ScreenshotAnnotationDraft: Equatable {
     let tool: ScreenshotAnnotationTool
     let start: CGPoint
@@ -22,7 +42,11 @@ final class ScreenshotEditorModel: ObservableObject {
     @Published var textEntry = ""
     @Published private(set) var isExporting = false
     @Published private(set) var isRecognizing = false
+    @Published private(set) var ocrResult: OCRResult?
     @Published private(set) var ocrDocument: TextOCRDocument?
+    @Published private(set) var ocrSelection = OCRSelectionState()
+    @Published var ocrModelSelection: OCRModelSelection
+    @Published private(set) var availableOCRSelections: [OCRModelSelection]
     @Published var showsOCRDownloadPrompt = false
     @Published private(set) var ocrDownloadPrompt = ""
 
@@ -43,6 +67,9 @@ final class ScreenshotEditorModel: ObservableObject {
     var imageSize: CGSize { state.document.baseImage.pixelSize }
     var canUndo: Bool { !state.undoStack.isEmpty }
     var canRedo: Bool { !state.redoStack.isEmpty }
+    var displayedOCRDocument: TextOCRDocument? {
+        ocrDocument.map { ocrSelection.displayedDocument(from: $0) }
+    }
 
     init(
         document: ScreenshotDocument,
@@ -53,11 +80,31 @@ final class ScreenshotEditorModel: ObservableObject {
         self.preview = preview
         self.ocrService = ocrService
         self.ocrSettingsStore = ocrSettingsStore
+        let storedSelection = ocrSettingsStore.load().settings.selection
+        ocrModelSelection = storedSelection
+        availableOCRSelections = [storedSelection]
         state = AnnotationEditorState(document: document)
         renderedImage = try previewBuilder.render(document: document, preview: preview)
+        refreshAvailableOCRSelections()
     }
 
     deinit { ocrTask?.cancel() }
+
+    private func refreshAvailableOCRSelections() {
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let selections = try await ocrService.availableSelections()
+                guard !selections.isEmpty else { return }
+                availableOCRSelections = selections
+                if !selections.contains(ocrModelSelection), let fallback = selections.first {
+                    setOCRModelSelection(fallback)
+                }
+            } catch {
+                errorMessage = localized(error)
+            }
+        }
+    }
 
     func beginDraft(at point: CGPoint) {
         draft = ScreenshotAnnotationDraft(
@@ -141,18 +188,20 @@ final class ScreenshotEditorModel: ObservableObject {
 
     func requestOCR() {
         guard !isRecognizing else { return }
-        let settings = ocrSettingsStore.load().settings
+        var settings = ocrSettingsStore.load().settings
+        settings.selection = ocrModelSelection
+        persistOCRSelection()
         ocrTask?.cancel()
         setRecognizing(true)
         ocrTask = Task { [weak self] in
             guard let self else { return }
             defer { setRecognizing(false) }
             do {
-                let descriptor = try await ocrService.descriptor(for: settings.profile)
+                let descriptor = try await ocrService.descriptor(for: settings.selection)
                 try Task.checkCancellation()
                 guard descriptor.state == .ready else {
                     pendingOCRSettings = settings
-                    ocrDownloadPrompt = "\(profileLabel(settings.profile)) 模型需要下载 \(Self.byteCountFormatter.string(fromByteCount: descriptor.downloadByteCount))。文件仅保存在本机。"
+                    ocrDownloadPrompt = "\(selectionLabel(settings.selection)) 模型需要安装 \(Self.byteCountFormatter.string(fromByteCount: descriptor.downloadByteCount)) 的本地资源。文件仅保存在本机。"
                     showsOCRDownloadPrompt = true
                     return
                 }
@@ -178,7 +227,7 @@ final class ScreenshotEditorModel: ObservableObject {
         ocrTask = Task { [weak self] in
             guard let self else { return }
             do {
-                try await ocrService.install(profile: settings.profile, userConsented: true)
+                _ = try await ocrService.install(selection: settings.selection, userConsented: true)
                 try Task.checkCancellation()
                 let result = try await ocrService.recognize(
                     source: state.document.baseImage,
@@ -196,11 +245,62 @@ final class ScreenshotEditorModel: ObservableObject {
     }
 
     func clearOCR() {
+        ocrResult = nil
         ocrDocument = nil
+        ocrSelection.reset()
+    }
+
+    func resetOCRSelection() {
+        ocrSelection.reset()
+    }
+
+    func isOCRLineSelected(_ lineID: UUID) -> Bool {
+        ocrSelection.selectedLineIDs.contains(lineID)
+    }
+
+    func selectOCRLine(at imagePoint: CGPoint, extendingSelection: Bool) {
+        guard let document = ocrDocument else { return }
+        let normalizedPoint = CGPoint(
+            x: imagePoint.x / imageSize.width,
+            y: imagePoint.y / imageSize.height
+        )
+        let lineID = OCRSelectionGeometry.lineID(at: normalizedPoint, in: document.lines)
+        if extendingSelection {
+            guard let lineID else { return }
+            ocrSelection.toggle(lineID)
+        } else {
+            ocrSelection.replace(with: lineID.map { [$0] } ?? [])
+        }
+    }
+
+    func selectOCRLines(in imageRect: CGRect, togglingSelection: Bool) {
+        guard let document = ocrDocument else { return }
+        let normalizedRect = CGRect(
+            x: imageRect.minX / imageSize.width,
+            y: imageRect.minY / imageSize.height,
+            width: imageRect.width / imageSize.width,
+            height: imageRect.height / imageSize.height
+        )
+        let lineIDs = OCRSelectionGeometry.lineIDs(
+            intersecting: normalizedRect,
+            in: document.lines
+        )
+        if togglingSelection {
+            ocrSelection.toggleBatch(lineIDs)
+        } else {
+            ocrSelection.replace(with: lineIDs)
+        }
     }
 
     func copyOCRText() {
-        guard let text = ocrDocument?.plainText, !text.isEmpty else { return }
+        guard let result = ocrResult else { return }
+        let text: String
+        if case .text = result {
+            text = displayedOCRDocument?.plainText ?? ""
+        } else {
+            text = result.plainText
+        }
+        guard !text.isEmpty else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         guard pasteboard.setString(text, forType: .string) else {
@@ -234,11 +334,12 @@ final class ScreenshotEditorModel: ObservableObject {
                 }.value
                 let pasteboard = NSPasteboard.general
                 let previousItems = Self.copyPasteboardItems(pasteboard.pasteboardItems ?? [])
-                pasteboard.clearContents()
-                guard pasteboard.setData(png, forType: .png) else {
+                do {
+                    try ScreenshotClipboardWriter().write(png: png, to: pasteboard)
+                } catch {
                     pasteboard.clearContents()
                     pasteboard.writeObjects(previousItems)
-                    throw AnnotationRenderError.exportFailed
+                    throw error
                 }
                 self?.errorMessage = nil
             } catch {
@@ -275,9 +376,22 @@ final class ScreenshotEditorModel: ObservableObject {
         onExportingChange(value || isRecognizing)
     }
 
-    private func applyOCRResult(_ result: TextOCRDocument) {
-        ocrDocument = result
-        errorMessage = result.lines.isEmpty ? "未识别到文字" : nil
+    func setOCRModelSelection(_ selection: OCRModelSelection) {
+        guard selection.isKnownVariant else { return }
+        ocrModelSelection = selection
+        persistOCRSelection()
+    }
+
+    private func applyOCRResult(_ result: OCRResult) {
+        ocrSelection.reset()
+        ocrResult = result
+        if case let .text(document) = result {
+            ocrDocument = document
+            errorMessage = document.lines.isEmpty ? "未识别到文字" : nil
+        } else {
+            ocrDocument = nil
+            errorMessage = result.plainText.isEmpty ? "未识别到内容" : nil
+        }
     }
 
     private func setRecognizing(_ value: Bool) {
@@ -352,6 +466,10 @@ final class ScreenshotEditorModel: ObservableObject {
             return "需要确认后才能下载 OCR 模型"
         case OCRFeatureServiceError.modelNotInstalled:
             return "本地 OCR 模型尚未安装"
+        case OCRFeatureServiceError.modelUnavailable:
+            return "所选 OCR 模型未包含在当前签名清单中"
+        case OCRFeatureServiceError.workerUnavailable:
+            return "本地 OCR Worker 尚未打包"
         case OCRSettingsError.unavailablePipeline:
             return "所选 OCR 模型当前不可用"
         case let PaddleOCRInferenceError.sessionCreationFailed(message),
@@ -362,11 +480,21 @@ final class ScreenshotEditorModel: ObservableObject {
         }
     }
 
-    private func profileLabel(_ profile: PPOCRv6Profile) -> String {
-        switch profile {
-        case .tiny: "PP-OCRv6 Tiny"
-        case .small: "PP-OCRv6 Small"
-        case .medium: "PP-OCRv6 Medium"
+    private func selectionLabel(_ selection: OCRModelSelection) -> String {
+        switch selection.pipeline {
+        case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
+        case .ppStructureV3: "PP-StructureV3"
+        case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        }
+    }
+
+    private func persistOCRSelection() {
+        var settings = ocrSettingsStore.load().settings
+        settings.selection = ocrModelSelection
+        do {
+            try ocrSettingsStore.save(settings)
+        } catch {
+            errorMessage = "无法保存 OCR 模型选择"
         }
     }
 
@@ -401,15 +529,16 @@ struct ScreenshotEditorView: View {
             HStack(spacing: 0) {
                 ScreenshotCanvasView(model: model)
                     .frame(minWidth: 640, minHeight: 400)
-                if let document = model.ocrDocument {
+                if model.ocrResult != nil {
                     Divider()
-                    OCRResultPanel(model: model, document: document)
+                    OCRResultPanel(model: model)
                         .frame(width: 260)
                 }
             }
             Divider()
             actionBar
         }
+        .frame(minWidth: 820, minHeight: 540)
         .alert("添加文字", isPresented: $model.showsTextPrompt) {
             TextField("文字", text: $model.textEntry)
             Button("取消", role: .cancel) {}
@@ -455,22 +584,39 @@ struct ScreenshotEditorView: View {
                 .font(.caption.monospacedDigit())
                 .frame(width: 24)
             Divider().frame(height: 22)
-            Button { model.zoom = max(1, model.zoom - 0.25) } label: {
+            Button { model.zoom = ScreenshotZoomAdjuster.adjust(zoom: model.zoom, wheelDeltaY: -1) } label: {
                 Image(systemName: "minus.magnifyingglass")
             }
             .buttonStyle(.plain)
             .disabled(model.zoom <= 1)
             .help("缩小")
-            Slider(value: $model.zoom, in: 1...4, step: 0.25)
+            Slider(value: $model.zoom, in: ScreenshotZoomAdjuster.range, step: 0.25)
                 .frame(width: 90)
                 .help("缩放")
-            Button { model.zoom = min(4, model.zoom + 0.25) } label: {
+            Text("\(Int((model.zoom * 100).rounded()))%")
+                .font(.caption.monospacedDigit())
+                .frame(width: 42, alignment: .trailing)
+            Button { model.zoom = ScreenshotZoomAdjuster.adjust(zoom: model.zoom, wheelDeltaY: 1) } label: {
                 Image(systemName: "plus.magnifyingglass")
             }
             .buttonStyle(.plain)
             .disabled(model.zoom >= 4)
             .help("放大")
             Divider().frame(height: 22)
+            Menu {
+                Picker("OCR 模型", selection: Binding(
+                    get: { model.ocrModelSelection },
+                    set: { model.setOCRModelSelection($0) }
+                )) {
+                    ForEach(model.availableOCRSelections, id: \.self) { selection in
+                        Text(ocrSelectionLabel(selection)).tag(selection)
+                    }
+                }
+            } label: {
+                Label(ocrSelectionLabel(model.ocrModelSelection), systemImage: "cpu")
+            }
+            .menuStyle(.borderlessButton)
+            .help("选择 OCR 解析模型和规格")
             Button { model.requestOCR() } label: {
                 Label("识别文字", systemImage: "text.viewfinder")
             }
@@ -533,6 +679,14 @@ struct ScreenshotEditorView: View {
         }
     }
 
+    private func ocrSelectionLabel(_ selection: OCRModelSelection) -> String {
+        switch selection.pipeline {
+        case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
+        case .ppStructureV3: "PP-StructureV3"
+        case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        }
+    }
+
     private func label(for tool: ScreenshotAnnotationTool) -> String {
         switch tool {
         case .rectangle: "矩形"
@@ -549,32 +703,95 @@ struct ScreenshotEditorView: View {
 
 private struct OCRResultPanel: View {
     @ObservedObject var model: ScreenshotEditorModel
-    let document: TextOCRDocument
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("识别文字").font(.headline)
+                Text("识别结果").font(.headline)
                 Spacer()
+                Button { model.resetOCRSelection() } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                }
+                .buttonStyle(.plain)
+                .disabled(!model.ocrSelection.isFiltering)
+                .help("重置选区")
                 Button { model.clearOCR() } label: { Image(systemName: "xmark") }
                     .buttonStyle(.plain)
                     .help("关闭识别结果")
             }
             Divider()
+            resultContent
+            Button("复制结果", systemImage: "doc.on.doc") { model.copyOCRText() }
+                .disabled(model.ocrResult?.plainText.isEmpty != false)
+        }
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private var resultContent: some View {
+        switch model.ocrResult {
+        case let .text(document):
+            HStack(spacing: 6) {
+                Image(systemName: model.ocrSelection.isFiltering ? "checkmark.square" : "text.alignleft")
+                    .foregroundStyle(.secondary)
+                Text(model.ocrSelection.isFiltering
+                     ? "已选 \(model.ocrSelection.selectedLineIDs.count) / \(document.lines.count) 行"
+                     : "共 \(document.lines.count) 行")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
             ScrollView {
-                Text(document.plainText.isEmpty ? "未识别到文字" : document.plainText)
+                let text = model.displayedOCRDocument?.plainText ?? ""
+                Text(text.isEmpty
+                     ? (model.ocrSelection.isFiltering ? "未选择识别区块" : "未识别到文字")
+                     : text)
                     .frame(maxWidth: .infinity, alignment: .topLeading)
                     .textSelection(.enabled)
             }
-            Button("复制文字", systemImage: "doc.on.doc") { model.copyOCRText() }
-                .disabled(document.plainText.isEmpty)
+        case let .structured(document):
+            Text("布局块：\(document.blocks.count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(document.blocks) { block in
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(block.kind.rawValue.capitalized)
+                                .font(.caption.bold())
+                            if let text = block.text, !text.isEmpty {
+                                Text(text).textSelection(.enabled)
+                            }
+                            if let html = block.html, !html.isEmpty {
+                                Text(html).font(.caption2.monospaced()).textSelection(.enabled)
+                            }
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case let .document(document):
+            Text("文档块：\(document.blocks.count)")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ScrollView {
+                Text(document.markdown)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .textSelection(.enabled)
+                    .font(.body.monospaced())
+            }
+        case nil:
+            Text("未识别到内容")
+                .foregroundStyle(.secondary)
         }
-        .padding(12)
     }
 }
 
 private struct ScreenshotCanvasView: View {
     @ObservedObject var model: ScreenshotEditorModel
+    @State private var ocrDragStart: CGPoint?
+    @State private var ocrDragCurrent: CGPoint?
+    @State private var pinchStartZoom: Double?
 
     var body: some View {
         GeometryReader { proxy in
@@ -591,6 +808,8 @@ private struct ScreenshotCanvasView: View {
                     .frame(width: contentSize.width, height: contentSize.height)
             }
             .background(Color(nsColor: .controlBackgroundColor))
+            .background(ScreenshotZoomWheelMonitor(zoom: $model.zoom))
+            .simultaneousGesture(magnifyGesture)
         }
     }
 
@@ -607,6 +826,7 @@ private struct ScreenshotCanvasView: View {
                     .frame(width: transform.contentRect.width, height: transform.contentRect.height)
                     .position(x: transform.contentRect.midX, y: transform.contentRect.midY)
                 ocrOverlay(transform: transform)
+                ocrSelectionDragOverlay(transform: transform)
                 draftOverlay(transform: transform)
             }
             .contentShape(Rectangle())
@@ -617,9 +837,24 @@ private struct ScreenshotCanvasView: View {
     @ViewBuilder
     private func ocrOverlay(transform: ScreenshotCanvasTransform) -> some View {
         Canvas { context, _ in
-            guard let document = model.ocrDocument else { return }
-            for line in document.lines {
-                let points = line.normalizedPolygon.map {
+            guard let result = model.ocrResult else { return }
+            let overlays: [(UUID, [CGPoint], Bool, Color)]
+            switch result {
+            case let .text(document):
+                overlays = document.lines.map { line in
+                    (line.id, line.normalizedPolygon, model.isOCRLineSelected(line.id), .yellow)
+                }
+            case let .structured(document):
+                overlays = document.blocks.map { block in
+                    (block.id, block.normalizedPolygon, false, block.kind == .table ? .orange : .blue)
+                }
+            case let .document(document):
+                overlays = document.blocks.map { block in
+                    (block.id, block.normalizedPolygon, false, .mint)
+                }
+            }
+            for (_, polygon, selected, color) in overlays {
+                let points = polygon.map {
                     transform.viewPoint(forImagePoint: CGPoint(
                         x: $0.x * model.imageSize.width,
                         y: $0.y * model.imageSize.height
@@ -630,8 +865,13 @@ private struct ScreenshotCanvasView: View {
                 path.move(to: first)
                 for point in points.dropFirst() { path.addLine(to: point) }
                 path.closeSubpath()
-                context.fill(path, with: .color(.yellow.opacity(0.16)))
-                context.stroke(path, with: .color(.yellow), lineWidth: 1.5)
+                if selected {
+                    context.fill(path, with: .color(.accentColor.opacity(0.26)))
+                    context.stroke(path, with: .color(.accentColor), lineWidth: 2.5)
+                } else {
+                    context.fill(path, with: .color(color.opacity(0.08)))
+                    context.stroke(path, with: .color(color.opacity(0.85)), lineWidth: 1.5)
+                }
             }
         }
         .allowsHitTesting(false)
@@ -640,6 +880,10 @@ private struct ScreenshotCanvasView: View {
     private func dragGesture(transform: ScreenshotCanvasTransform) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
+                if model.ocrDocument != nil {
+                    updateOCRSelectionDrag(value, transform: transform)
+                    return
+                }
                 if model.draft == nil {
                     guard let start = transform.imagePoint(forViewPoint: value.startLocation) else { return }
                     model.beginDraft(at: start)
@@ -647,9 +891,85 @@ private struct ScreenshotCanvasView: View {
                 model.updateDraft(to: transform.clampedImagePoint(forViewPoint: value.location))
             }
             .onEnded { value in
+                if model.ocrDocument != nil {
+                    finishOCRSelectionDrag(value, transform: transform)
+                    return
+                }
                 guard model.draft != nil else { return }
                 model.finishDraft(at: transform.clampedImagePoint(forViewPoint: value.location))
             }
+    }
+
+    private var magnifyGesture: some Gesture {
+        MagnifyGesture()
+            .onChanged { value in
+                let startZoom = pinchStartZoom ?? model.zoom
+                if pinchStartZoom == nil { pinchStartZoom = startZoom }
+                model.zoom = ScreenshotZoomAdjuster.pinch(
+                    startZoom: startZoom,
+                    magnification: value.magnification
+                )
+            }
+            .onEnded { _ in
+                pinchStartZoom = nil
+            }
+    }
+
+    private func updateOCRSelectionDrag(
+        _ value: DragGesture.Value,
+        transform: ScreenshotCanvasTransform
+    ) {
+        if ocrDragStart == nil {
+            guard let start = transform.imagePoint(forViewPoint: value.startLocation) else { return }
+            ocrDragStart = start
+        }
+        ocrDragCurrent = transform.clampedImagePoint(forViewPoint: value.location)
+    }
+
+    private func finishOCRSelectionDrag(
+        _ value: DragGesture.Value,
+        transform: ScreenshotCanvasTransform
+    ) {
+        defer {
+            ocrDragStart = nil
+            ocrDragCurrent = nil
+        }
+        guard let start = ocrDragStart else { return }
+        let current = transform.clampedImagePoint(forViewPoint: value.location)
+        let isShiftPressed = NSEvent.modifierFlags.contains(.shift)
+        let viewDistance = hypot(current.x - start.x, current.y - start.y) * transform.scale
+        if viewDistance < 4 {
+            model.selectOCRLine(at: start, extendingSelection: isShiftPressed)
+        } else {
+            let imageRect = CGRect(
+                x: start.x,
+                y: start.y,
+                width: current.x - start.x,
+                height: current.y - start.y
+            ).standardized
+            model.selectOCRLines(in: imageRect, togglingSelection: isShiftPressed)
+        }
+    }
+
+    @ViewBuilder
+    private func ocrSelectionDragOverlay(transform: ScreenshotCanvasTransform) -> some View {
+        Canvas { context, _ in
+            guard model.ocrDocument != nil,
+                  let start = ocrDragStart,
+                  let current = ocrDragCurrent
+            else { return }
+            let startViewPoint = transform.viewPoint(forImagePoint: start)
+            let currentViewPoint = transform.viewPoint(forImagePoint: current)
+            let rect = CGRect(
+                x: startViewPoint.x,
+                y: startViewPoint.y,
+                width: currentViewPoint.x - startViewPoint.x,
+                height: currentViewPoint.y - startViewPoint.y
+            ).standardized
+            context.fill(Path(rect), with: .color(.accentColor.opacity(0.12)))
+            context.stroke(Path(rect), with: .color(.accentColor), lineWidth: 1.5)
+        }
+        .allowsHitTesting(false)
     }
 
     @ViewBuilder
@@ -716,6 +1036,81 @@ private struct ScreenshotCanvasView: View {
     }
 }
 
+private final class ScreenshotZoomMonitorView: NSView {
+    var onDiscreteScroll: (CGFloat) -> Void = { _ in }
+    private var eventMonitor: Any?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        removeEventMonitor()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard window != nil, eventMonitor == nil else { return }
+        eventMonitor = NSEvent.addLocalMonitorForEvents(matching: .scrollWheel) { [weak self] event in
+            guard let self,
+                  let window = self.window,
+                  event.window === window,
+                  self.bounds.contains(self.convert(event.locationInWindow, from: nil)),
+                  ScreenshotZoomAdjuster.shouldZoom(
+                      hasPreciseScrollingDeltas: event.hasPreciseScrollingDeltas
+                  )
+            else { return event }
+            self.onDiscreteScroll(event.scrollingDeltaY)
+            return nil
+        }
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        nil
+    }
+
+    deinit {
+        removeEventMonitor()
+    }
+
+    private func removeEventMonitor() {
+        guard let eventMonitor else { return }
+        NSEvent.removeMonitor(eventMonitor)
+        self.eventMonitor = nil
+    }
+}
+
+private struct ScreenshotZoomWheelMonitor: NSViewRepresentable {
+    @Binding var zoom: Double
+
+    func makeNSView(context: Context) -> ScreenshotZoomMonitorView {
+        let view = ScreenshotZoomMonitorView()
+        view.onDiscreteScroll = context.coordinator.adjustZoom
+        return view
+    }
+
+    func updateNSView(_ view: ScreenshotZoomMonitorView, context: Context) {
+        context.coordinator.zoom = $zoom
+        view.onDiscreteScroll = context.coordinator.adjustZoom
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(zoom: $zoom)
+    }
+
+    final class Coordinator {
+        var zoom: Binding<Double>
+
+        init(zoom: Binding<Double>) {
+            self.zoom = zoom
+        }
+
+        func adjustZoom(wheelDeltaY: CGFloat) {
+            zoom.wrappedValue = ScreenshotZoomAdjuster.adjust(
+                zoom: zoom.wrappedValue,
+                wheelDeltaY: wheelDeltaY
+            )
+        }
+    }
+}
+
 @MainActor
 final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
     private var windowController: NSWindowController?
@@ -758,7 +1153,7 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
                 }
                 self.editorModel = model
                 window.contentViewController = NSHostingController(rootView: ScreenshotEditorView(model: model))
-                window.setContentSize(NSSize(width: 900, height: 680))
+                window.setContentSize(NSSize(width: 1_100, height: 760))
                 window.center()
             } catch is CancellationError {
                 return
@@ -777,7 +1172,8 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
     private func configure(window: NSWindow) {
         window.title = "截图编辑"
         window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-        window.setContentSize(NSSize(width: 900, height: 680))
+        window.contentMinSize = NSSize(width: 820, height: 540)
+        window.setContentSize(NSSize(width: 1_100, height: 760))
         window.center()
         window.delegate = self
         let controller = NSWindowController(window: window)

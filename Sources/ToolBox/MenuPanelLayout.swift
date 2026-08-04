@@ -36,9 +36,13 @@ enum MenuPanelLayout {
     static let cableSectionHeight = cableRowHeight + sectionChromeHeight
     static let displaySectionHeight: CGFloat = 154
     static let displayPresetSectionHeight: CGFloat = 232
-    static let audioSectionContentHeight: CGFloat = 112
+    static let audioRowHeight: CGFloat = 30
+    static let audioRowSpacing: CGFloat = 6
+    static let defaultAudioRowCount = 3
+    static let audioSectionContentHeight = audioContentHeight(rowCount: defaultAudioRowCount)
     static let audioSectionHeight = audioSectionContentHeight + sectionChromeHeight
     static let wifiSectionContentHeight: CGFloat = 82
+    static let wifiConnectedContentWidth: CGFloat = 370
     static let wifiSectionHeight = wifiSectionContentHeight + sectionChromeHeight
 
     static let standardContentHeight = contentHeight(
@@ -58,11 +62,19 @@ enum MenuPanelLayout {
         return listHeight + sectionChromeHeight
     }
 
+    static func audioContentHeight(rowCount: Int) -> CGFloat {
+        guard rowCount > 0 else { return 0 }
+        return CGFloat(rowCount) * audioRowHeight
+            + CGFloat(max(0, rowCount - 1)) * audioRowSpacing
+            + 10
+    }
+
     static func contentHeight(
         cableItemCount: Int,
         showsDisplayControl: Bool,
         showsAudioSection: Bool = true,
-        showsColorPreset: Bool = false
+        showsColorPreset: Bool = false,
+        audioRowCount: Int = defaultAudioRowCount
     ) -> CGFloat {
         var height = headerHeight
             + outerSpacing
@@ -72,8 +84,9 @@ enum MenuPanelLayout {
             + outerSpacing
             + controlsHeight
 
-        if showsAudioSection {
-            height += contentSpacing + audioSectionHeight
+        let audioHeight = audioContentHeight(rowCount: audioRowCount)
+        if showsAudioSection, audioHeight > 0 {
+            height += contentSpacing + audioHeight + sectionChromeHeight
         }
 
         let visibleCableCount = min(max(0, cableItemCount), HardwareMenuLayout.maxCableItemCount)
@@ -94,13 +107,15 @@ enum MenuPanelLayout {
         cableItemCount: Int,
         showsDisplayControl: Bool,
         showsAudioSection: Bool = true,
-        showsColorPreset: Bool = false
+        showsColorPreset: Bool = false,
+        audioRowCount: Int = defaultAudioRowCount
     ) -> CGFloat {
         contentHeight(
             cableItemCount: cableItemCount,
             showsDisplayControl: showsDisplayControl,
             showsAudioSection: showsAudioSection,
-            showsColorPreset: showsColorPreset
+            showsColorPreset: showsColorPreset,
+            audioRowCount: audioRowCount
         )
             + contentInsets.top
             + contentInsets.bottom
@@ -110,7 +125,8 @@ enum MenuPanelLayout {
         cableItemCount: Int,
         showsDisplayControl: Bool,
         showsAudioSection: Bool = true,
-        showsColorPreset: Bool = false
+        showsColorPreset: Bool = false,
+        audioRowCount: Int = defaultAudioRowCount
     ) -> NSSize {
         NSSize(
             width: size.width,
@@ -118,7 +134,8 @@ enum MenuPanelLayout {
                 cableItemCount: cableItemCount,
                 showsDisplayControl: showsDisplayControl,
                 showsAudioSection: showsAudioSection,
-                showsColorPreset: showsColorPreset
+                showsColorPreset: showsColorPreset,
+                audioRowCount: audioRowCount
             )
         )
     }
@@ -161,7 +178,12 @@ enum MenuPanelLayout {
 
         let minimumY = visibleFrame.minY + margin
         let maximumY = max(minimumY, visibleFrame.maxY - size.height - margin)
-        let proposedY = anchorFrame.minY - size.height - verticalOffset
+        // A status-item button can straddle the visible-frame boundary while its
+        // window is being laid out. Keep the panel's top edge tied to the
+        // menu-bar lower edge in that case instead of dropping it into the
+        // middle of the screen.
+        let anchorBottom = max(anchorFrame.minY, visibleFrame.maxY)
+        let proposedY = anchorBottom - size.height - verticalOffset
         let originY = min(max(proposedY, minimumY), maximumY)
 
         return NSRect(origin: NSPoint(x: originX, y: originY), size: size)

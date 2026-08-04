@@ -261,6 +261,7 @@ final class AudioRouteRealtimeTests: XCTestCase {
         XCTAssertEqual(left, [Float](repeating: 0, count: 4))
         XCTAssertEqual(right, [Float](repeating: 0, count: 4))
         XCTAssertEqual(try snapshot(kernel).formatMismatchCount, 1)
+        XCTAssertEqual(try snapshot(kernel).outputFatalCount, 1)
     }
 
     func testSnapshotReportsAcceptedCallbackAndFrameCounts() throws {
@@ -604,7 +605,8 @@ final class AudioRouteRealtimeTests: XCTestCase {
                     outputFormat,
                     4,
                     32,
-                    1
+                    1,
+                    nil
                 )
             else {
                 throw KernelCreationError.rejectedFormat

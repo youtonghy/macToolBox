@@ -17,4 +17,5 @@ enum ScreenshotCoordinatorError: Error, Equatable {
     case longCaptureFailed
 }
 
-typealias ScreenshotCandidateResolver = @MainActor (CGPoint, UInt64) async -> SelectionCandidate?
+typealias ScreenshotCandidateResolver = @MainActor (CGPoint, UInt64) async -> [SelectionCandidate]
+typealias ScreenshotWindowCandidateResolver = @MainActor (CGPoint, UInt64) async -> SelectionCandidate?

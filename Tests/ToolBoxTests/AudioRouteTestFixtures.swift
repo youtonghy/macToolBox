@@ -5,6 +5,7 @@ enum AudioRouteTestFixtures {
     static func healthSample(
         captureFrameCount: UInt64 = 0,
         outputFrameCount: UInt64 = 0,
+        sourceFatalCount: UInt64 = 0,
         underrunFrameCount: UInt64 = 0,
         overrunFrameCount: UInt64 = 0,
         forcedResyncCount: UInt64 = 0,
@@ -17,6 +18,7 @@ enum AudioRouteTestFixtures {
         AudioRouteHealthSample(
             captureFrameCount: captureFrameCount,
             outputFrameCount: outputFrameCount,
+            sourceFatalCount: sourceFatalCount,
             underrunFrameCount: underrunFrameCount,
             overrunFrameCount: overrunFrameCount,
             forcedResyncCount: forcedResyncCount,
@@ -28,15 +30,26 @@ enum AudioRouteTestFixtures {
         )
     }
 
-    static func format(sampleRate: Double) -> AudioStreamBasicDescription {
-        AudioStreamBasicDescription(
+    static func format(
+        sampleRate: Double,
+        channels: UInt32 = 2,
+        nonInterleaved: Bool = false
+    ) -> AudioStreamBasicDescription {
+        let bytesPerFrame = nonInterleaved
+            ? UInt32(MemoryLayout<Float>.size)
+            : channels * UInt32(MemoryLayout<Float>.size)
+        var flags = kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked
+        if nonInterleaved {
+            flags |= kAudioFormatFlagIsNonInterleaved
+        }
+        return AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 8,
+            mFormatFlags: flags,
+            mBytesPerPacket: bytesPerFrame,
             mFramesPerPacket: 1,
-            mBytesPerFrame: 8,
-            mChannelsPerFrame: 2,
+            mBytesPerFrame: bytesPerFrame,
+            mChannelsPerFrame: channels,
             mBitsPerChannel: 32,
             mReserved: 0
         )

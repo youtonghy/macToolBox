@@ -94,7 +94,7 @@ final class AudioRoutingServiceTests: XCTestCase {
 
     func testTopologyChangeBatchesFadeOutBeforeStoppingRoutes() async {
         let native = FakeNativeAudioRouteEngine()
-        let controller = AudioRouteController(nativeEngine: native, fadeOutDelay: .zero)
+        let controller = AudioRouteController(nativeEngine: native)
         let speakers = AudioRoutePlan(
             outputDeviceUID: "speakers",
             sources: [AudioRouteSource(bundleID: "com.apple.Music", processObjectID: 7, linearGain: 1)]
@@ -231,7 +231,7 @@ final class AudioRoutingServiceTests: XCTestCase {
 
     func testNormalStopAllBeginsOneBatchedFadeOut() async {
         let native = FakeNativeAudioRouteEngine()
-        let controller = AudioRouteController(nativeEngine: native, fadeOutDelay: .zero)
+        let controller = AudioRouteController(nativeEngine: native)
 
         _ = await controller.stopAll(reason: .serviceStopped)
 
@@ -712,6 +712,25 @@ final class AudioRoutingServiceTests: XCTestCase {
             speakers.sources.first(where: { $0.bundleID == "com.apple.Music" })
         )
         XCTAssertEqual(music.linearGain, 2.5, accuracy: 0.001)
+        _ = await harness.service.shutdown()
+        harness.cleanup()
+    }
+
+    @MainActor
+    func testOutputDeviceSelectionImmediatelyReconcilesWithoutRegistrySettleDelay() async throws {
+        let harness = try makeTwoRouteServiceHarness()
+        harness.service.start()
+        await harness.engine.waitUntilReconcileCount(1)
+
+        harness.service.setOutputDevice(bundleID: "com.apple.Music", uid: "headset")
+        await harness.engine.waitUntilReconcileCount(2)
+
+        let currentPlans = await harness.engine.currentPlans()
+        XCTAssertEqual(currentPlans.map(\.id), ["headset"])
+        XCTAssertEqual(
+            currentPlans.first?.sources.map(\.bundleID).sorted(),
+            ["com.apple.Music", "us.zoom.xos"]
+        )
         _ = await harness.service.shutdown()
         harness.cleanup()
     }
@@ -1609,6 +1628,8 @@ private final class FakeNativeAudioRouteEngine: AudioRouteNativeEngineControllin
     func diagnostics() -> [AudioRouteDiagnosticsSnapshot] {
         []
     }
+
+    var fadeOutDuration: Duration { .zero }
 
     func performMaintenance() -> Bool { false }
 

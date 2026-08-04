@@ -24,28 +24,6 @@ struct ShortcutSettingsView: View {
                     }
                 }
 
-                SettingsSection(title: "媒体键") {
-                    SettingsInnerCard {
-                        HStack(spacing: 12) {
-                            SettingsIconBadge(
-                                systemName: "sun.max.fill",
-                                accent: Color(nsColor: .systemOrange),
-                                emphasized: true
-                            )
-
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("亮度与音量媒体键")
-                                    .font(.system(size: 13, weight: .semibold))
-                                Text("由显示器控制模块统一管理")
-                                    .font(.system(size: 11, weight: .medium))
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            Spacer(minLength: 12)
-                        }
-                    }
-                }
-
                 HStack {
                     Spacer(minLength: 0)
                     Button {

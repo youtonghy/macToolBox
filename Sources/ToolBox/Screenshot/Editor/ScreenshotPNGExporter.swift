@@ -110,4 +110,28 @@ struct ScreenshotPNGExporter {
             throw AnnotationRenderError.exportFailed
         }
     }
+
+    func export(source: ScreenshotImageSource, to url: URL) throws {
+        let bounds = CGRect(origin: .zero, size: source.pixelSize)
+        let image = try source.copyPixels(in: bounds)
+        guard image.width > 0, image.height > 0 else {
+            throw AnnotationRenderError.imageCreationFailed
+        }
+        guard let destination = CGImageDestinationCreateWithURL(
+            url as CFURL,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw AnnotationRenderError.exportFailed
+        }
+        CGImageDestinationAddImage(destination, image, [
+            kCGImagePropertyPixelWidth: image.width,
+            kCGImagePropertyPixelHeight: image.height,
+        ] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            try? FileManager.default.removeItem(at: url)
+            throw AnnotationRenderError.exportFailed
+        }
+    }
 }

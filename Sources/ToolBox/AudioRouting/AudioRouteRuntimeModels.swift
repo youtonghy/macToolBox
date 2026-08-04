@@ -57,6 +57,11 @@ struct AudioRuntimeIntent: Equatable, Sendable {
         parameterFingerprint = Self.hashParameters(plansByID, mutedRouteIDs)
     }
 
+    func graphFingerprint(for routeID: String) -> Int? {
+        guard let plan = plansByID[routeID] else { return nil }
+        return Self.hashGraph([routeID: plan])
+    }
+
     private static func hashGraph(_ plansByID: [String: AudioRoutePlan]) -> Int {
         var hasher = Hasher()
 
@@ -115,13 +120,13 @@ struct RealizationKey: Hashable, Sendable {
         intent: AudioRuntimeIntent,
         observation: HALObservationSnapshot
     ) {
-        guard intent.plansByID[routeID] != nil,
+        guard let routeGraphFingerprint = intent.graphFingerprint(for: routeID),
               let routeObservation = observation.routesByID[routeID]
         else {
             return nil
         }
 
-        graphFingerprint = intent.graphFingerprint
+        graphFingerprint = routeGraphFingerprint
         processDeviceFingerprint = Self.hashProcessDeviceIDs(
             routeObservation.processDeviceIDsByObjectID
         )

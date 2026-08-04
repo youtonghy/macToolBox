@@ -216,7 +216,7 @@ final class AudioRouteLifecycleTests: XCTestCase {
         )
         var sourceFormat = format
         let kernel = try XCTUnwrap(
-            TBAudioRealtimeKernelCreate(1, &sourceFormat, 1, format, 4, 32, 1)
+            TBAudioRealtimeKernelCreate(1, &sourceFormat, 1, format, 4, 32, 1, nil)
         )
         defer { TBAudioRealtimeKernelDestroy(kernel) }
         let leasesBefore = TBAudioCallbackLeasePermanentInUse()

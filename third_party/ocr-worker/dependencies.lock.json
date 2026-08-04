@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "python": {
+    "implementation": "CPython",
+    "version": "3.11.15",
+    "architecture": "arm64"
+  },
+  "packages": [
+    {
+      "name": "paddleocr",
+      "version": "3.7.0",
+      "requirementsFile": "requirements.lock.txt"
+    },
+    {
+      "name": "paddlepaddle",
+      "version": "3.2.1",
+      "requirementsFile": "requirements.lock.txt"
+    },
+    {
+      "name": "pillow",
+      "version": "12.3.0",
+      "requirementsFile": "requirements.lock.txt"
+    }
+  ]
+}

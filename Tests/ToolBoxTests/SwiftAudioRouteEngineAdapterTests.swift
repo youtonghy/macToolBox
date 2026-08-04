@@ -103,7 +103,48 @@ final class SwiftAudioRouteEngineAdapterTests: XCTestCase {
         ) { error in
             XCTAssertEqual(error as? AudioRuntimeFailure, .audioServerRestarted)
         }
-        XCTAssertEqual(runtime.intents.last?.mutedRouteIDs, ["output-A"])
+        XCTAssertEqual(runtime.intents.last?.mutedRouteIDs, [])
+    }
+
+    func testParameterUpdateCancelsPendingFadeMute() throws {
+        let runtime = RecordingAudioRouteRuntime()
+        let adapter = SwiftAudioRouteEngineAdapter(runtime: runtime)
+        try adapter.reconcile(
+            changedPlans: [plan(outputUID: "output-A", processObjectID: 42, gain: 1)],
+            removingRouteIDs: [],
+            retainedParameters: []
+        )
+        adapter.beginFadeOut(routeIDs: ["output-A"])
+
+        try adapter.update(parameters: [
+            AudioRouteNativeRuntimeParameters(
+                routeID: "output-A",
+                sourceIndex: 0,
+                targetGain: 1
+            )
+        ])
+
+        XCTAssertEqual(runtime.intents.last?.mutedRouteIDs, [])
+    }
+
+    func testReplacingFadedRouteClearsMuteForNewKernel() throws {
+        let runtime = RecordingAudioRouteRuntime()
+        let adapter = SwiftAudioRouteEngineAdapter(runtime: runtime)
+        let initial = plan(outputUID: "output-A", processObjectID: 42, gain: 1)
+        try adapter.reconcile(
+            changedPlans: [initial],
+            removingRouteIDs: [],
+            retainedParameters: []
+        )
+        adapter.beginFadeOut(routeIDs: ["output-A"])
+
+        try adapter.reconcile(
+            changedPlans: [plan(outputUID: "output-A", processObjectID: 43, gain: 1)],
+            removingRouteIDs: ["output-A"],
+            retainedParameters: []
+        )
+
+        XCTAssertEqual(runtime.intents.last?.mutedRouteIDs, [])
     }
 
     func testStopAllClearsAdapterStateAfterRuntimeShutdown() throws {

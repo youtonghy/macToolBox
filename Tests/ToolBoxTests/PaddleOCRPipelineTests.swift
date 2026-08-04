@@ -59,7 +59,7 @@ final class PaddleOCRPipelineTests: XCTestCase {
             threshold: 0.2,
             boxThreshold: 0.4,
             maxCandidates: 10,
-            unclipRatio: 1
+            unclipRatio: 0
         )
 
         let boxes = processor.process(
@@ -72,6 +72,42 @@ final class PaddleOCRPipelineTests: XCTestCase {
         XCTAssertEqual(boxes.count, 1)
         XCTAssertEqual(boxes[0].bounds, CGRect(x: 10, y: 10, width: 50, height: 10))
         XCTAssertEqual(boxes[0].score, 0.9, accuracy: 0.0001)
+        XCTAssertEqual(boxes[0].polygon.count, 4)
+        XCTAssertEqual(boxes[0].polygon[0], CGPoint(x: 10, y: 10))
+        XCTAssertEqual(boxes[0].polygon[1], CGPoint(x: 60, y: 10))
+    }
+
+    func testDetectionPostprocessorPreservesRotatedQuadrilateral() {
+        var probabilities = [Float](repeating: 0, count: 16 * 16)
+        let diamond = [CGPoint(x: 4, y: 6), CGPoint(x: 8, y: 3), CGPoint(x: 12, y: 6), CGPoint(x: 8, y: 9)]
+        for y in 0..<16 {
+            for x in 0..<16 where point(CGPoint(x: CGFloat(x) + 0.5, y: CGFloat(y) + 0.5), isInside: diamond) {
+                probabilities[y * 16 + x] = 0.95
+            }
+        }
+        let processor = PaddleDBPostprocessor(
+            threshold: 0.2,
+            boxThreshold: 0.4,
+            maxCandidates: 10,
+            unclipRatio: 0
+        )
+
+        let boxes = processor.process(
+            probabilities: probabilities,
+            width: 16,
+            height: 16,
+            originalSize: CGSize(width: 160, height: 160)
+        )
+
+        let polygon = try! XCTUnwrap(boxes.first?.polygon)
+        XCTAssertEqual(polygon.count, 4)
+        XCTAssertGreaterThan(polygon[1].x, polygon[0].x)
+        XCTAssertGreaterThan(polygon[2].y, polygon[1].y)
+        XCTAssertTrue(polygon.indices.contains { index in
+            let next = (index + 1) % polygon.count
+            return abs(polygon[next].y - polygon[index].y) > 1
+                && abs(polygon[next].x - polygon[index].x) > 1
+        })
     }
 
     func testRecognitionPreprocessorUsesBGRAndZeroPadding() throws {
@@ -137,6 +173,53 @@ final class PaddleOCRPipelineTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(merged.lines.first).confidence, 0.94, accuracy: 0.0001)
     }
 
+    func testRecognitionMergerRemovesOverlappingSubstringFragments() throws {
+        let complete = PaddleOCRRecognizedLine(
+            text: "开启",
+            confidence: 0.91,
+            bounds: CGRect(x: 20, y: 100, width: 120, height: 30)
+        )
+        let fragment = PaddleOCRRecognizedLine(
+            text: "启",
+            confidence: 0.96,
+            bounds: CGRect(x: 20, y: 101, width: 55, height: 28)
+        )
+
+        let merged = PaddleOCRRecognitionMerger.merge(
+            [fragment, complete],
+            imageSize: CGSize(width: 500, height: 500)
+        )
+
+        XCTAssertEqual(merged.lines.map(\.text), ["开启"])
+    }
+
+    func testPerspectiveCropUsesQuadrilateralDimensions() throws {
+        let image = try solidImage(red: 255, green: 255, blue: 255, width: 100, height: 50)
+        let crop = try PaddleOCRImagePreprocessor.perspectiveCrop(
+            image: image,
+            quadrilateral: [
+                CGPoint(x: 10, y: 8),
+                CGPoint(x: 80, y: 4),
+                CGPoint(x: 86, y: 30),
+                CGPoint(x: 12, y: 34),
+            ]
+        )
+
+        XCTAssertEqual(crop.width, 74)
+        XCTAssertEqual(crop.height, 27)
+    }
+
+    func testPerspectiveCropRejectsInvalidQuadrilateral() throws {
+        let image = try solidImage(red: 255, green: 255, blue: 255, width: 100, height: 50)
+
+        XCTAssertThrowsError(try PaddleOCRImagePreprocessor.perspectiveCrop(
+            image: image,
+            quadrilateral: [CGPoint(x: 0, y: 0), CGPoint(x: 10, y: 0), CGPoint(x: 20, y: 0)]
+        )) {
+            XCTAssertEqual($0 as? PaddleOCRImagePreprocessorError, .invalidImage)
+        }
+    }
+
     private func solidImage(
         red: UInt8,
         green: UInt8,
@@ -166,5 +249,18 @@ final class PaddleOCRPipelineTests: XCTestCase {
             shouldInterpolate: false,
             intent: .defaultIntent
         )!
+    }
+
+    private func point(_ point: CGPoint, isInside polygon: [CGPoint]) -> Bool {
+        var sign: CGFloat = 0
+        for index in polygon.indices {
+            let a = polygon[index]
+            let b = polygon[(index + 1) % polygon.count]
+            let value = (b.x - a.x) * (point.y - a.y) - (b.y - a.y) * (point.x - a.x)
+            if abs(value) < 0.001 { continue }
+            if sign == 0 { sign = value }
+            else if sign * value < 0 { return false }
+        }
+        return sign != 0
     }
 }

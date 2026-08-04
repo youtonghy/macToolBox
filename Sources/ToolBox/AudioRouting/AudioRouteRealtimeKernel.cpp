@@ -93,9 +93,10 @@ struct SourceState {
         TBAudioRealtimeFormat canonicalFormat,
         uint32_t targetFrames,
         uint32_t capacityFrames,
-        uint32_t rampFrames
+        uint32_t rampFrames,
+        float initialGain
     )
-        : ring(targetFrames, capacityFrames, rampFrames),
+        : ring(targetFrames, capacityFrames, rampFrames, initialGain),
           convertedCapacityFrames(MaximumConvertedFrames(
               sourceFormat, canonicalFormat, capacityFrames
           )),
@@ -115,7 +116,7 @@ struct SourceState {
               convertedCapacityFrames, 2
           ))),
           defaultRampFrames(rampFrames),
-          gainBits(FloatBits(1)) {
+          gainBits(FloatBits(initialGain)) {
         if (converter == nullptr) throw std::invalid_argument("unsupported source format");
     }
 
@@ -157,7 +158,8 @@ struct TBAudioRealtimeKernel {
         TBAudioRealtimeFormat outputFormat,
         uint32_t targetFrames,
         uint32_t capacityFrames,
-        uint32_t rampFrames
+        uint32_t rampFrames,
+        const float* initialGains
     ) : generation(valueGeneration),
         capacityFrames(capacityFrames),
         canonicalFormat(CanonicalFormat(outputFormat.sampleRate)),
@@ -172,12 +174,18 @@ struct TBAudioRealtimeKernel {
         }
         sources.reserve(sourceCount);
         for (uint32_t index = 0; index < sourceCount; ++index) {
+            const float initialGain = (initialGains != nullptr && index < sourceCount)
+                ? (std::isfinite(initialGains[index])
+                    ? std::min(std::max(initialGains[index], 0.0f), 3.0f)
+                    : 0.0f)
+                : 1.0f;
             sources.push_back(std::make_unique<SourceState>(
                 sourceFormats[index],
                 canonicalFormat,
                 targetFrames,
                 capacityFrames,
-                rampFrames
+                rampFrames,
+                initialGain
             ));
         }
     }
@@ -199,6 +207,7 @@ struct TBAudioRealtimeKernel {
     std::atomic<uint64_t> clippedSampleCount{0};
     std::atomic<uint64_t> rejectedGenerationCount{0};
     std::atomic<uint64_t> sourceFatalCount{0};
+    std::atomic<uint64_t> outputFatalCount{0};
 };
 
 TBAudioRealtimeKernelRef TBAudioRealtimeKernelCreate(
@@ -208,7 +217,8 @@ TBAudioRealtimeKernelRef TBAudioRealtimeKernelCreate(
     TBAudioRealtimeFormat outputFormat,
     uint32_t targetFrames,
     uint32_t capacityFrames,
-    uint32_t rampFrames
+    uint32_t rampFrames,
+    const float* initialGains
 ) {
     if (sourceFormats == nullptr || sourceCount == 0) return nullptr;
     try {
@@ -219,7 +229,8 @@ TBAudioRealtimeKernelRef TBAudioRealtimeKernelCreate(
             outputFormat,
             targetFrames,
             capacityFrames,
-            rampFrames
+            rampFrames,
+            initialGains
         );
     } catch (...) {
         return nullptr;
@@ -268,6 +279,7 @@ bool TBAudioRealtimeKernelRenderOutput(
     if (output == nullptr || output->frameCount > kernel->capacityFrames
         || !kernel->outputAdapter->AcceptsOutput(*output)) {
         kernel->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
+        kernel->outputFatalCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
 
@@ -302,6 +314,7 @@ bool TBAudioRealtimeKernelRenderOutput(
     if (!kernel->outputAdapter->Convert(canonical, *output)) {
         ZeroOutput(output);
         kernel->formatMismatchCount.fetch_add(1, std::memory_order_relaxed);
+        kernel->outputFatalCount.fetch_add(1, std::memory_order_relaxed);
         return false;
     }
     return true;
@@ -326,9 +339,18 @@ void TBAudioRealtimeKernelBeginSourceMute(
     uint32_t sourceIndex,
     uint32_t rampFrames
 ) {
+    TBAudioRealtimeKernelSetSourceMuted(kernel, sourceIndex, true, rampFrames);
+}
+
+void TBAudioRealtimeKernelSetSourceMuted(
+    TBAudioRealtimeKernelRef kernel,
+    uint32_t sourceIndex,
+    bool muted,
+    uint32_t rampFrames
+) {
     if (kernel == nullptr || sourceIndex >= kernel->sources.size()) return;
     kernel->sources[sourceIndex]->muteRampFrames.store(rampFrames, std::memory_order_relaxed);
-    kernel->sources[sourceIndex]->muted.store(1, std::memory_order_release);
+    kernel->sources[sourceIndex]->muted.store(muted ? 1 : 0, std::memory_order_release);
 }
 
 void TBAudioRealtimeKernelDetach(TBAudioRealtimeKernelRef kernel) {
@@ -349,6 +371,7 @@ bool TBAudioRealtimeKernelCopySnapshot(
     value.clippedSampleCount = kernel->clippedSampleCount.load(std::memory_order_relaxed);
     value.rejectedGenerationCount = kernel->rejectedGenerationCount.load(std::memory_order_relaxed);
     value.sourceFatalCount = kernel->sourceFatalCount.load(std::memory_order_relaxed);
+    value.outputFatalCount = kernel->outputFatalCount.load(std::memory_order_relaxed);
     for (const auto& source : kernel->sources) {
         value.ringOccupancyFrames += source->ring.OccupancyFrames();
         value.ringHighWaterFrames = std::max(

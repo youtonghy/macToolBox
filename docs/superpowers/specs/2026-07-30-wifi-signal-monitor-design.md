@@ -23,8 +23,9 @@ and does not use private KVC keys or the `airport` command.
 
 The popover always shows a compact Wi-Fi section after cable status and before
 display control. Connected state presents quality, RSSI, SNR, link rate, and
-channel. No-interface, powered-off, disconnected, and temporarily unavailable
-states retain the section height and explain the condition.
+channel in one fixed-width group centered within the section, with stable label
+and value columns. No-interface, powered-off, disconnected, and temporarily
+unavailable states retain the section height and explain the condition.
 
 Settings adds a Wi-Fi sidebar page between Cables and Displays. It includes a
 five-minute RSSI/SNR chart, connection quality, radio-link details, network

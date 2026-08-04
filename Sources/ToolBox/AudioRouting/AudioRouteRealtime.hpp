@@ -8,7 +8,7 @@
 
 class TBAudioStereoRingBuffer {
 public:
-    TBAudioStereoRingBuffer(uint32_t targetFrames, uint32_t capacityFrames, uint32_t gainRampFrames);
+    TBAudioStereoRingBuffer(uint32_t targetFrames, uint32_t capacityFrames, uint32_t gainRampFrames, float initialGain = 1.0f);
 
     void Write(const float* source, uint32_t frameCount) noexcept;
     void Mix(float* destination, uint32_t frameCount, float targetGain) noexcept;
@@ -67,6 +67,12 @@ TBAudioRealtimeTestState* TBAudioRealtimeTestCreate(
     uint32_t targetFrames,
     uint32_t capacityFrames,
     uint32_t gainRampFrames
+);
+TBAudioRealtimeTestState* TBAudioRealtimeTestCreateWithInitialGain(
+    uint32_t targetFrames,
+    uint32_t capacityFrames,
+    uint32_t gainRampFrames,
+    float initialGain
 );
 void TBAudioRealtimeTestDestroy(TBAudioRealtimeTestState* state);
 void TBAudioRealtimeTestWrite(TBAudioRealtimeTestState* state, const float* source, uint32_t frameCount);

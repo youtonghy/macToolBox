@@ -84,9 +84,11 @@ struct AnnotationRenderer {
         }
 
         let base = try document.baseImage.copyPixels(in: pixelRect)
-        configureTopLeftCoordinates(context, height: height, pixelRect: pixelRect)
         context.interpolationQuality = .high
-        context.draw(base, in: pixelRect)
+        context.draw(base, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        // Base pixels are already upright. Flip only the annotation coordinate space.
+        configureTopLeftCoordinates(context, height: height, pixelRect: pixelRect)
 
         for annotation in document.annotations {
             try draw(annotation, source: document.baseImage, visiblePixelRect: pixelRect, in: context)

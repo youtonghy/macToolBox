@@ -56,9 +56,6 @@ enum ScreenshotImageComposer {
         }
 
         context.clear(CGRect(x: 0, y: 0, width: width, height: height))
-        context.translateBy(x: 0, y: CGFloat(height))
-        context.scaleBy(x: 1, y: -1)
-
         let framesByID = Dictionary(uniqueKeysWithValues: frames.map { ($0.geometry.displayID, $0) })
         for fragment in fragments {
             guard let frame = framesByID[fragment.displayID] else {
@@ -70,7 +67,7 @@ enum ScreenshotImageComposer {
 
             let destination = CGRect(
                 x: (fragment.globalIntersectionPoints.minX - selection.minX) * outputScale,
-                y: (selection.maxY - fragment.globalIntersectionPoints.maxY) * outputScale,
+                y: (fragment.globalIntersectionPoints.minY - selection.minY) * outputScale,
                 width: fragment.globalIntersectionPoints.width * outputScale,
                 height: fragment.globalIntersectionPoints.height * outputScale
             )

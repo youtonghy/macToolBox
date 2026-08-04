@@ -29,7 +29,20 @@ final class MenuPanelLayoutTests: XCTestCase {
         )
 
         XCTAssertEqual(frame.size, NSSize(width: 560, height: 600))
-        XCTAssertEqual(frame.maxY, 992)
+        XCTAssertEqual(frame.maxY, 1_070)
+    }
+
+    func testPanelFrameUsesMenuBarLowerEdgeWhenAnchorFrameIsBelowIt() {
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 875)
+        let anchorFrame = NSRect(x: 1_000, y: 760, width: 28, height: 25)
+
+        let frame = MenuPanelLayout.panelFrame(
+            preferredSize: NSSize(width: 560, height: 600),
+            anchorFrame: anchorFrame,
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(frame.maxY, visibleFrame.maxY - 10)
     }
 
     func testPanelFrameUsesScreenContainingMenuBarAnchor() throws {
@@ -77,6 +90,18 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertEqual(MenuPanelLayout.wifiSectionHeight, 126)
     }
 
+    func testWiFiConnectedContentLeavesBalancedHorizontalSpace() {
+        let availableWidth = MenuPanelLayout.size.width
+            - MenuPanelLayout.contentInsets.left
+            - MenuPanelLayout.contentInsets.right
+            - MenuPanelLayout.sectionPadding * 2
+        let sideInset = (availableWidth - MenuPanelLayout.wifiConnectedContentWidth) / 2
+
+        XCTAssertEqual(MenuPanelLayout.wifiConnectedContentWidth, 370)
+        XCTAssertEqual(sideInset, 71)
+        XCTAssertGreaterThan(sideInset, MenuPanelLayout.sectionPadding * 4)
+    }
+
     func testStandardCompleteConfigurationFitsWithoutScrolling() {
         let availableHeight = MenuPanelLayout.size.height
             - MenuPanelLayout.contentInsets.top
@@ -88,6 +113,38 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertLessThan(MenuPanelLayout.controlsHeight, 64)
         XCTAssertLessThan(MenuPanelLayout.sectionPadding, 14)
         XCTAssertLessThan(MenuPanelLayout.outerSpacing, 18)
+    }
+
+    func testAudioSectionHeightGrowsWithRowsInsteadOfScrolling() {
+        XCTAssertEqual(
+            MenuPanelLayout.audioContentHeight(rowCount: 3),
+            MenuPanelLayout.audioSectionContentHeight
+        )
+        XCTAssertGreaterThan(
+            MenuPanelLayout.audioContentHeight(rowCount: 4),
+            MenuPanelLayout.audioSectionContentHeight
+        )
+        XCTAssertEqual(MenuPanelLayout.audioContentHeight(rowCount: 0), 0)
+    }
+
+    func testPanelHeightIncludesAllVisibleAudioRows() {
+        let threeRowHeight = MenuPanelLayout.panelHeight(
+            cableItemCount: 0,
+            showsDisplayControl: false,
+            showsAudioSection: true,
+            audioRowCount: 3
+        )
+        let fourRowHeight = MenuPanelLayout.panelHeight(
+            cableItemCount: 0,
+            showsDisplayControl: false,
+            showsAudioSection: true,
+            audioRowCount: 4
+        )
+
+        XCTAssertEqual(
+            fourRowHeight - threeRowHeight,
+            MenuPanelLayout.audioRowHeight + MenuPanelLayout.audioRowSpacing
+        )
     }
 
     func testCableGridGeometryForUpToThreeItems() {

@@ -45,30 +45,36 @@ final class ScreenCaptureProvider: ScreenCaptureProviding {
             }
             return (CGDirectDisplayID(number.uint32Value), screen.frame)
         })
-        let geometries: [DisplayCaptureGeometry] = try displays.map { display in
+        var captureRequests: [(SCDisplay, SCContentFilter, DisplayCaptureGeometry)] = []
+        captureRequests.reserveCapacity(displays.count)
+        for display in displays {
             guard let frame = screenFrames[display.displayID] else {
                 throw ScreenshotCaptureError.displayGeometryUnavailable(display.displayID)
             }
-            return DisplayCaptureGeometry(
-                displayID: display.displayID,
-                globalFramePoints: frame,
-                pixelSize: CGSize(width: display.width, height: display.height)
-            )
-        }
-        try FrozenCaptureBudget.validate(pixelSizes: geometries.map(\.pixelSize))
-
-        var frames: [DisplayCaptureFrame] = []
-        frames.reserveCapacity(displays.count)
-        for (display, geometry) in zip(displays, geometries) {
-            try Task.checkCancellation()
             let filter = SCContentFilter(
                 display: display,
                 excludingApplications: [ownApplication],
                 exceptingWindows: []
             )
+            let geometry = DisplayCaptureGeometry(
+                displayID: display.displayID,
+                globalFramePoints: frame,
+                pixelSize: Self.pixelSize(
+                    for: frame.size,
+                    pointPixelScale: CGFloat(filter.pointPixelScale)
+                )
+            )
+            captureRequests.append((display, filter, geometry))
+        }
+        try FrozenCaptureBudget.validate(pixelSizes: captureRequests.map { $0.2.pixelSize })
+
+        var frames: [DisplayCaptureFrame] = []
+        frames.reserveCapacity(displays.count)
+        for (display, filter, geometry) in captureRequests {
+            try Task.checkCancellation()
             let configuration = SCStreamConfiguration()
-            configuration.width = display.width
-            configuration.height = display.height
+            configuration.width = Int(geometry.pixelSize.width)
+            configuration.height = Int(geometry.pixelSize.height)
             configuration.showsCursor = false
             configuration.scalesToFit = false
 
@@ -90,6 +96,13 @@ final class ScreenCaptureProvider: ScreenCaptureProviding {
             throw ScreenshotCaptureError.displayTopologyChanged
         }
         return frames
+    }
+
+    static func pixelSize(for pointSize: CGSize, pointPixelScale: CGFloat) -> CGSize {
+        CGSize(
+            width: (pointSize.width * pointPixelScale).rounded(),
+            height: (pointSize.height * pointPixelScale).rounded()
+        )
     }
 
     private func shareableContent() async throws -> SCShareableContent {

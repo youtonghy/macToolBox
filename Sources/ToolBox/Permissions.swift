@@ -271,8 +271,13 @@ enum Permissions {
         openMediaKeyPermissionSettings(gap: .inputMonitoring, completion: completion)
     }
 
-    static func openAccessibilitySettings(completion: (() -> Void)? = nil) {
-        _ = registerAccessibility(prompt: !isAccessibilityTrusted)
+    static func openAccessibilitySettings(
+        registerIfNeeded: Bool = true,
+        completion: (() -> Void)? = nil
+    ) {
+        if registerIfNeeded {
+            _ = registerAccessibility(prompt: !isAccessibilityTrusted)
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
             openPrivacyPane(anchors: ["Privacy_Accessibility"])
             completion?()

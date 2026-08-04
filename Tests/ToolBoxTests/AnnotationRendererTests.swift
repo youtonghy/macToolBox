@@ -1,3 +1,4 @@
+import AppKit
 import CoreGraphics
 import ImageIO
 import XCTest
@@ -103,6 +104,49 @@ final class AnnotationRendererTests: XCTestCase {
         assertRGBAEqual(try pixel(in: image, x: 0, y: 0), RGBA(10, 20, 30, 128), accuracy: 1)
     }
 
+    func testPNGExporterPreservesAsymmetricImageOrientationAcrossBands() throws {
+        let base = try makeQuadrantImage(width: 12, height: 10)
+        let document = ScreenshotDocument(baseImage: CGImageScreenshotSource(image: base))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("annotation-orientation-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        try ScreenshotPNGExporter(renderer: AnnotationRenderer(maximumBandBytes: 12 * 4 * 3))
+            .export(document: document, to: url)
+
+        let source = try XCTUnwrap(CGImageSourceCreateWithURL(url as CFURL, nil))
+        let exported = try XCTUnwrap(CGImageSourceCreateImageAtIndex(source, 0, nil))
+        XCTAssertEqual(try pixel(in: exported, x: 1, y: 1), RGBA(255, 0, 0, 255))
+        XCTAssertEqual(try pixel(in: exported, x: 10, y: 1), RGBA(0, 255, 0, 255))
+        XCTAssertEqual(try pixel(in: exported, x: 1, y: 8), RGBA(0, 0, 255, 255))
+        XCTAssertEqual(try pixel(in: exported, x: 10, y: 8), RGBA(255, 255, 0, 255))
+    }
+
+    func testClipboardPublishesEquivalentPNGAndTIFFRepresentations() throws {
+        let base = try makeQuadrantImage(width: 12, height: 10)
+        let document = ScreenshotDocument(baseImage: CGImageScreenshotSource(image: base))
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("annotation-clipboard-\(UUID().uuidString).png")
+        defer { try? FileManager.default.removeItem(at: url) }
+        try ScreenshotPNGExporter().export(document: document, to: url)
+        let png = try Data(contentsOf: url)
+        let pasteboard = NSPasteboard(name: .init("ToolBoxTests.\(UUID().uuidString)"))
+        defer { pasteboard.clearContents() }
+
+        try ScreenshotClipboardWriter().write(png: png, to: pasteboard)
+
+        let writtenPNG = try XCTUnwrap(pasteboard.data(forType: .png))
+        let writtenTIFF = try XCTUnwrap(pasteboard.data(forType: .tiff))
+        let pngImage = try XCTUnwrap(NSBitmapImageRep(data: writtenPNG)?.cgImage)
+        let tiffImage = try XCTUnwrap(NSBitmapImageRep(data: writtenTIFF)?.cgImage)
+        XCTAssertEqual(pngImage.width, 12)
+        XCTAssertEqual(pngImage.height, 10)
+        XCTAssertEqual(tiffImage.width, 12)
+        XCTAssertEqual(tiffImage.height, 10)
+        XCTAssertEqual(try pixel(in: pngImage, x: 1, y: 1), try pixel(in: tiffImage, x: 1, y: 1))
+        XCTAssertEqual(try pixel(in: pngImage, x: 10, y: 8), try pixel(in: tiffImage, x: 10, y: 8))
+    }
+
     func testExporterRequestsNoSourceBandLargerThanConfiguredLimit() throws {
         let source = RecordingImageSource(width: 100, height: 60_000)
         let document = ScreenshotDocument(baseImage: source)
@@ -158,6 +202,40 @@ final class AnnotationRendererTests: XCTestCase {
         context.fill(CGRect(x: width / 2, y: 0, width: width / 2, height: height))
         guard let image = context.makeImage() else { throw TestError.image }
         return image
+    }
+
+    private func makeQuadrantImage(width: Int, height: Int) throws -> CGImage {
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        for row in 0..<height {
+            for column in 0..<width {
+                let color: RGBA
+                switch (row < height / 2, column < width / 2) {
+                case (true, true): color = RGBA(255, 0, 0, 255)
+                case (true, false): color = RGBA(0, 255, 0, 255)
+                case (false, true): color = RGBA(0, 0, 255, 255)
+                case (false, false): color = RGBA(255, 255, 0, 255)
+                }
+                let offset = (row * width + column) * 4
+                bytes[offset] = color.red
+                bytes[offset + 1] = color.green
+                bytes[offset + 2] = color.blue
+                bytes[offset + 3] = color.alpha
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes) as CFData))
+        return try XCTUnwrap(CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: width * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ))
     }
 
     private func makeContext(width: Int, height: Int) throws -> CGContext {

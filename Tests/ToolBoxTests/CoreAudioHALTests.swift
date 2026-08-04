@@ -115,7 +115,7 @@ final class CoreAudioHALTests: XCTestCase {
         XCTAssertEqual(
             resources.operations,
             [
-                "createKernel", "createTap", "createAggregate",
+                "createTap", "createAggregate", "createKernel",
                 "createCaptureIOProc", "createOutputIOProc",
                 "startOutput", "startCapture",
                 "detachKernel", "detachOutput", "detachCapture",
@@ -124,6 +124,241 @@ final class CoreAudioHALTests: XCTestCase {
                 "destroyAggregate", "destroyTap", "destroyKernel",
             ]
         )
+    }
+
+    func testPrepareUsesActualTapFormatInsteadOfPredictedDeviceFormat() throws {
+        let properties = FixtureHALProperties.processOnDeviceAWithTap441AndOutput48()
+        let actualCaptureFormat = AudioRouteTestFixtures.format(
+            sampleRate: 48_000,
+            channels: 1,
+            nonInterleaved: true
+        )
+        properties.set(
+            actualCaptureFormat,
+            objectID: 77,
+            selector: kAudioTapPropertyFormat
+        )
+        properties.set(
+            [AudioObjectID(301)],
+            objectID: 300,
+            selector: kAudioDevicePropertyStreams,
+            scope: kAudioObjectPropertyScopeInput
+        )
+        properties.set(
+            actualCaptureFormat,
+            objectID: 301,
+            selector: kAudioStreamPropertyVirtualFormat
+        )
+        let resources = RecordingHALResources()
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let intent = AudioRouteTestFixtures.intent()
+        let observation = try hal.observe(HALObservationRequest(intent: intent))
+
+        _ = try hal.execute(transaction(intent: intent, observation: observation))
+
+        XCTAssertEqual(
+            resources.createdKernelSourceFormats,
+            [AudioFormatFingerprint(actualCaptureFormat)]
+        )
+    }
+
+    func testPrepareStartsCaptureWhileAggregateStreamsArePermissionPending() throws {
+        let properties = FixtureHALProperties.processOnDeviceAWithTap441AndOutput48()
+        let tapFormat = AudioRouteTestFixtures.format(sampleRate: 44_100)
+        properties.set(
+            tapFormat,
+            objectID: 77,
+            selector: kAudioTapPropertyFormat
+        )
+        let resources = RecordingHALResources()
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let intent = AudioRouteTestFixtures.intent()
+        let observation = try hal.observe(HALObservationRequest(intent: intent))
+
+        _ = try hal.execute(transaction(intent: intent, observation: observation))
+
+        XCTAssertEqual(
+            resources.createdKernelSourceFormats,
+            [AudioFormatFingerprint(tapFormat)]
+        )
+        XCTAssertTrue(resources.operations.contains("startCapture"))
+    }
+
+    func testActiveRouteDiagnosticsExposeRealtimeKernelSnapshot() throws {
+        let properties = configuredPropertiesForExecution()
+        var realtimeSnapshot = TBAudioRealtimeSnapshot()
+        realtimeSnapshot.captureCallbackCount = 3
+        realtimeSnapshot.captureFrameCount = 768
+        realtimeSnapshot.outputCallbackCount = 4
+        realtimeSnapshot.outputFrameCount = 1_024
+        realtimeSnapshot.ringOccupancyFrames = 256
+        realtimeSnapshot.formatMismatchCount = 2
+        let resources = RecordingHALResources(realtimeSnapshot: realtimeSnapshot)
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let intent = AudioRouteTestFixtures.intent(generation: 9)
+        let observation = try hal.observe(HALObservationRequest(intent: intent))
+        _ = try hal.execute(transaction(intent: intent, observation: observation))
+
+        let snapshot = try XCTUnwrap(hal.diagnostics().first)
+
+        XCTAssertEqual(snapshot.routeID, "output-A")
+        XCTAssertEqual(snapshot.generation, 9)
+        XCTAssertEqual(snapshot.captureCallbackCount, 3)
+        XCTAssertEqual(snapshot.captureFrameCount, 768)
+        XCTAssertEqual(snapshot.outputCallbackCount, 4)
+        XCTAssertEqual(snapshot.outputFrameCount, 1_024)
+        XCTAssertEqual(snapshot.ringOccupancyFrames, 256)
+        XCTAssertEqual(snapshot.formatMismatchCount, 2)
+    }
+
+    func testParameterUpdateChangesGainAndMuteWithoutRebuildingResources() throws {
+        let properties = configuredPropertiesForExecution()
+        let resources = RecordingHALResources()
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let initial = AudioRouteTestFixtures.intent()
+        let observation = try hal.observe(HALObservationRequest(intent: initial))
+        _ = try hal.execute(transaction(intent: initial, observation: observation))
+
+        let updated = AudioRuntimeIntent(
+            generation: 2,
+            plansByID: [
+                "output-A": AudioRoutePlan(
+                    outputDeviceUID: "output-A",
+                    sources: [
+                        AudioRouteSource(
+                            bundleID: "com.example.player",
+                            processObjectID: 42,
+                            linearGain: 2
+                        )
+                    ]
+                )
+            ],
+            mutedRouteIDs: ["output-A"]
+        )
+        try hal.updateParameters(updated)
+
+        XCTAssertEqual(resources.operations.filter { $0 == "createKernel" }.count, 1)
+        XCTAssertEqual(resources.sourceGains, [2])
+        XCTAssertEqual(resources.sourceMuteStates, [false, true])
+    }
+
+    func testReplacingOneRouteKeepsUnchangedRouteResourcesRunning() throws {
+        let properties = configuredPropertiesForTwoRouteExecution()
+        let resources = RecordingHALResources(
+            realtimeSnapshot: TBAudioRealtimeSnapshot()
+        )
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let initialIntent = twoRouteIntent(routeAProcessObjectID: 42, generation: 1)
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42, 43],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        resources.resetOperations()
+
+        let changedIntent = twoRouteIntent(routeAProcessObjectID: 44, generation: 2)
+        let changedObservation = try hal.observe(
+            HALObservationRequest(intent: changedIntent)
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [44],
+                intent: changedIntent,
+                observation: changedObservation,
+                replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+            )
+        )
+
+        XCTAssertEqual(resources.operations.filter { $0 == "destroyTap" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "destroyAggregate" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "destroyKernel" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "createTap" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "createAggregate" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "createKernel" }.count, 1)
+        XCTAssertEqual(
+            hal.diagnostics().map(\.generation),
+            [changedIntent.generation, changedIntent.generation]
+        )
+    }
+
+    func testRemovingOneRouteKeepsUnchangedRouteResourcesRunning() throws {
+        let properties = configuredPropertiesForTwoRouteExecution()
+        let resources = RecordingHALResources(
+            realtimeSnapshot: TBAudioRealtimeSnapshot()
+        )
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let initialIntent = twoRouteIntent(routeAProcessObjectID: 42, generation: 1)
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42, 43],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        resources.resetOperations()
+
+        let retainedRouteA = try XCTUnwrap(initialIntent.plansByID["output-A"])
+        let changedIntent = AudioRuntimeIntent(
+            generation: 2,
+            plansByID: [retainedRouteA.id: retainedRouteA],
+            mutedRouteIDs: []
+        )
+        let changedObservation = try hal.observe(
+            HALObservationRequest(intent: changedIntent)
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-B",
+                sourceIDs: [43],
+                intent: changedIntent,
+                observation: changedObservation,
+                replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+            )
+        )
+
+        XCTAssertEqual(resources.operations.filter { $0 == "destroyTap" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "destroyAggregate" }.count, 1)
+        XCTAssertEqual(resources.operations.filter { $0 == "destroyKernel" }.count, 1)
+        XCTAssertFalse(resources.operations.contains("createTap"))
+        XCTAssertFalse(resources.operations.contains("createAggregate"))
+        XCTAssertFalse(resources.operations.contains("createKernel"))
+        XCTAssertEqual(hal.diagnostics().map(\.routeID), ["output-A"])
+        XCTAssertEqual(hal.diagnostics().map(\.generation), [changedIntent.generation])
     }
 
     func testResourceFailureIsAttributedToTheRouteBeingPrepared() throws {
@@ -219,6 +454,319 @@ final class CoreAudioHALTests: XCTestCase {
             ]))
     }
 
+    // MARK: - Process tap reuse on output switch
+
+    func testProcessTapIsReusedWhenProcessAndCaptureDeviceMatchAcrossOutputSwitch() throws {
+        let properties = tapReuseProperties()
+        let resources = RecordingHALResources(
+            realtimeSnapshot: TBAudioRealtimeSnapshot()
+        )
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+
+        // Route A: process 42 captured from device-A (its single listed device).
+        let initialIntent = tapReuseIntent(
+            routeID: "output-A",
+            processObjectID: 42,
+            generation: 1
+        )
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        // The single tap created so far is route A's (objectID 77).
+        let originalTapObjectID = try XCTUnwrap(resources.createdTapObjectIDs.first)
+        XCTAssertEqual(resources.createdTapObjectIDs, [originalTapObjectID])
+        resources.resetOperations()
+
+        // Process 42 migrates to route B (output-B) but still captures device-A —
+        // the REDIRECT case where selectCaptureDevice binds the tap identically.
+        let migratedIntent = tapReuseIntent(
+            routeID: "output-B",
+            processObjectID: 42,
+            generation: 2
+        )
+        let migratedObservation = try hal.observe(
+            HALObservationRequest(intent: migratedIntent)
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-B",
+                sourceIDs: [42],
+                intent: migratedIntent,
+                observation: migratedObservation,
+                replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+            )
+        )
+
+        // No new tap was created and the migrated tap was not destroyed: it was
+        // reused (spared during cleanup and claimed by route B).
+        XCTAssertFalse(
+            resources.operations.contains("createTap"),
+            "Process tap should be reused, not recreated."
+        )
+        XCTAssertFalse(
+            resources.operations.contains("destroyTap"),
+            "Reused process tap should be spared during the switch."
+        )
+        XCTAssertEqual(resources.createdTapObjectIDs, [originalTapObjectID])
+        XCTAssertTrue(resources.destroyedTapObjectIDs.isEmpty)
+        XCTAssertEqual(
+            hal.diagnostics().map(\.routeID),
+            ["output-B"],
+            "Route B should be the only active route after migration."
+        )
+
+        // Confirm route B holds the SAME tap object as route A had: tearing it
+        // down destroys exactly the original objectID.
+        let shutdownIntent = AudioRuntimeIntent(
+            generation: 3,
+            plansByID: [:],
+            mutedRouteIDs: []
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .shutdown,
+                routeID: "output-B",
+                sourceIDs: [42],
+                intent: shutdownIntent,
+                observation: HALObservationSnapshot(
+                    audioServerGeneration: 0,
+                    routesByID: [:]
+                ),
+                replacingKeysByRouteID: [:]
+            )
+        )
+        XCTAssertEqual(resources.destroyedTapObjectIDs, [originalTapObjectID])
+    }
+
+    func testProcessTapIsNotReusedWhenProcessObjectIDDiffers() throws {
+        let properties = tapReuseProperties()
+        let resources = RecordingHALResources(
+            realtimeSnapshot: TBAudioRealtimeSnapshot()
+        )
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+
+        let initialIntent = tapReuseIntent(
+            routeID: "output-A",
+            processObjectID: 42,
+            generation: 1
+        )
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        let routeATapObjectID = try XCTUnwrap(resources.createdTapObjectIDs.first)
+        resources.resetOperations()
+
+        // A different app (process 44) takes route B: the tap must be created fresh.
+        let migratedIntent = tapReuseIntent(
+            routeID: "output-B",
+            processObjectID: 44,
+            generation: 2
+        )
+        let migratedObservation = try hal.observe(
+            HALObservationRequest(intent: migratedIntent)
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-B",
+                sourceIDs: [44],
+                intent: migratedIntent,
+                observation: migratedObservation,
+                replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+            )
+        )
+
+        XCTAssertEqual(
+            resources.operations.filter { $0 == "createTap" }.count, 1,
+            "A different process should get a fresh tap."
+        )
+        // Route A's tap is torn down (process 42 is gone from the new intent).
+        XCTAssertEqual(resources.destroyedTapObjectIDs, [routeATapObjectID])
+        // The freshly-created tap is distinct from route A's original.
+        let routeBTapObjectID = try XCTUnwrap(resources.createdTapObjectIDs.last)
+        XCTAssertNotEqual(routeATapObjectID, routeBTapObjectID)
+    }
+
+    func testProcessTapIsNotReusedWhenCaptureDeviceUIDDiffers() throws {
+        let properties = tapReuseProperties()
+        let resources = RecordingHALResources(
+            realtimeSnapshot: TBAudioRealtimeSnapshot()
+        )
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+
+        let initialIntent = tapReuseIntent(
+            routeID: "output-A",
+            processObjectID: 42,
+            generation: 1
+        )
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        let routeATapObjectID = try XCTUnwrap(resources.createdTapObjectIDs.first)
+        resources.resetOperations()
+
+        // Same process 42, but it now captures device-B instead of device-A. The
+        // capture device binding differs, so the tap cannot be reused.
+        properties.set(
+            [AudioObjectID(110)],
+            objectID: 42,
+            selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+        let migratedIntent = tapReuseIntent(
+            routeID: "output-B",
+            processObjectID: 42,
+            generation: 2
+        )
+        let migratedObservation = try hal.observe(
+            HALObservationRequest(intent: migratedIntent)
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-B",
+                sourceIDs: [42],
+                intent: migratedIntent,
+                observation: migratedObservation,
+                replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+            )
+        )
+
+        XCTAssertEqual(
+            resources.operations.filter { $0 == "createTap" }.count, 1,
+            "A different capture device binding should get a fresh tap."
+        )
+        XCTAssertEqual(resources.destroyedTapObjectIDs, [routeATapObjectID])
+        let routeBTapObjectID = try XCTUnwrap(resources.createdTapObjectIDs.last)
+        XCTAssertNotEqual(routeATapObjectID, routeBTapObjectID)
+    }
+
+    private func tapReuseIntent(
+        routeID: String,
+        processObjectID: UInt32,
+        generation: UInt64
+    ) -> AudioRuntimeIntent {
+        let plan = AudioRoutePlan(
+            outputDeviceUID: routeID,
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player",
+                    processObjectID: processObjectID,
+                    linearGain: 1
+                )
+            ]
+        )
+        return AudioRuntimeIntent(
+            generation: generation,
+            plansByID: [plan.id: plan],
+            mutedRouteIDs: []
+        )
+    }
+
+    private func tapReuseProperties() -> FixtureHALProperties {
+        let properties = FixtureHALProperties()
+        // Two output devices.
+        properties.setDeviceID(200, forUID: "output-A")
+        properties.setDeviceID(400, forUID: "output-B")
+        // Two capture devices the processes can be bound to.
+        properties.setDeviceID(100, forUID: "device-A")
+        properties.setDeviceID(110, forUID: "device-B")
+        // Process 42 starts captured from device-A; process 44 from device-A too.
+        properties.set(
+            [AudioObjectID(100)], objectID: 42, selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput)
+        properties.set(
+            [AudioObjectID(100)], objectID: 44, selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput)
+        // Capture device stream formats (44.1k).
+        properties.set(
+            [AudioObjectID(101)], objectID: 100, selector: kAudioDevicePropertyStreams,
+            scope: kAudioObjectPropertyScopeOutput)
+        properties.set(
+            AudioRouteTestFixtures.format(sampleRate: 44_100), objectID: 101,
+            selector: kAudioStreamPropertyVirtualFormat)
+        properties.set(
+            [AudioObjectID(111)], objectID: 110, selector: kAudioDevicePropertyStreams,
+            scope: kAudioObjectPropertyScopeOutput)
+        properties.set(
+            AudioRouteTestFixtures.format(sampleRate: 44_100), objectID: 111,
+            selector: kAudioStreamPropertyVirtualFormat)
+        // Output device stream formats + alive + nominal rate (48k).
+        for outputID: AudioObjectID in [200, 400] {
+            let streamID: AudioObjectID = outputID == 200 ? 201 : 401
+            properties.set(
+                [streamID], objectID: outputID,
+                selector: kAudioDevicePropertyStreams,
+                scope: kAudioObjectPropertyScopeOutput)
+            properties.set(
+                AudioRouteTestFixtures.format(sampleRate: 48_000), objectID: streamID,
+                selector: kAudioStreamPropertyVirtualFormat)
+            properties.set(
+                UInt32(1), objectID: outputID, selector: kAudioDevicePropertyDeviceIsAlive)
+            properties.set(
+                Float64(48_000), objectID: outputID,
+                selector: kAudioDevicePropertyNominalSampleRate)
+        }
+        // Process tap formats: the recording resource hands out object IDs 77, 78, ...
+        // per create, so register a format for each.
+        for tapObjectID: AudioObjectID in 77...90 {
+            properties.set(
+                AudioRouteTestFixtures.format(sampleRate: 44_100),
+                objectID: tapObjectID,
+                selector: kAudioTapPropertyFormat
+            )
+        }
+        // Aggregate device (createAggregate always returns 300) input streams.
+        properties.set(
+            [AudioObjectID(301)], objectID: 300, selector: kAudioDevicePropertyStreams,
+            scope: kAudioObjectPropertyScopeInput)
+        properties.set(
+            AudioRouteTestFixtures.format(sampleRate: 44_100), objectID: 301,
+            selector: kAudioStreamPropertyVirtualFormat)
+        return properties
+    }
+
+
     private func configuredPropertiesForExecution() -> FixtureHALProperties {
         let properties = FixtureHALProperties.processOnDeviceAWithTap441AndOutput48()
         properties.set(
@@ -238,6 +786,98 @@ final class CoreAudioHALTests: XCTestCase {
             selector: kAudioStreamPropertyVirtualFormat
         )
         return properties
+    }
+
+    private func configuredPropertiesForTwoRouteExecution() -> FixtureHALProperties {
+        let properties = configuredPropertiesForExecution()
+        // The recording resource hands out a fresh process-tap object ID per create
+        // (77, 78, 79, ...); register a tap format for each so prepareRoute can read
+        // kAudioTapPropertyFormat regardless of how many taps a test creates.
+        for tapObjectID: AudioObjectID in 78...90 {
+            properties.set(
+                AudioRouteTestFixtures.format(sampleRate: 44_100),
+                objectID: tapObjectID,
+                selector: kAudioTapPropertyFormat
+            )
+        }
+        properties.setDeviceID(400, forUID: "output-B")
+        properties.setDeviceID(110, forUID: "device-B")
+        properties.set(
+            [AudioObjectID(110)],
+            objectID: 43,
+            selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+        properties.set(
+            [AudioObjectID(100)],
+            objectID: 44,
+            selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+        properties.set(
+            [AudioObjectID(111)],
+            objectID: 110,
+            selector: kAudioDevicePropertyStreams,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+        properties.set(
+            AudioRouteTestFixtures.format(sampleRate: 44_100),
+            objectID: 111,
+            selector: kAudioStreamPropertyVirtualFormat
+        )
+        properties.set(
+            [AudioObjectID(401)],
+            objectID: 400,
+            selector: kAudioDevicePropertyStreams,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+        properties.set(
+            AudioRouteTestFixtures.format(sampleRate: 48_000),
+            objectID: 401,
+            selector: kAudioStreamPropertyVirtualFormat
+        )
+        properties.set(
+            UInt32(1),
+            objectID: 400,
+            selector: kAudioDevicePropertyDeviceIsAlive
+        )
+        properties.set(
+            Float64(48_000),
+            objectID: 400,
+            selector: kAudioDevicePropertyNominalSampleRate
+        )
+        return properties
+    }
+
+    private func twoRouteIntent(
+        routeAProcessObjectID: UInt32,
+        generation: UInt64
+    ) -> AudioRuntimeIntent {
+        let routeA = AudioRoutePlan(
+            outputDeviceUID: "output-A",
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player-a",
+                    processObjectID: routeAProcessObjectID,
+                    linearGain: 1
+                )
+            ]
+        )
+        let routeB = AudioRoutePlan(
+            outputDeviceUID: "output-B",
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player-b",
+                    processObjectID: 43,
+                    linearGain: 1
+                )
+            ]
+        )
+        return AudioRuntimeIntent(
+            generation: generation,
+            plansByID: [routeA.id: routeA, routeB.id: routeB],
+            mutedRouteIDs: []
+        )
     }
 
     private func transaction(
@@ -382,6 +1022,10 @@ private final class FixtureHALProperties: CoreAudioPropertyAccess, @unchecked Se
             withUnsafeBytes(of: &value) { Data($0) }
     }
 
+    fileprivate func setDeviceID(_ deviceID: AudioObjectID, forUID uid: String) {
+        deviceIDsByUID[uid] = deviceID
+    }
+
     fileprivate func remove(
         objectID: AudioObjectID,
         selector: AudioObjectPropertySelector,
@@ -415,22 +1059,35 @@ private final class FixtureHALProperties: CoreAudioPropertyAccess, @unchecked Se
 @available(macOS 14.2, *)
 private final class RecordingHALResources: CoreAudioResourceAccess {
     private(set) var operations: [String] = []
+    private(set) var createdKernelSourceFormats: [AudioFormatFingerprint] = []
+    private(set) var sourceGains: [Float] = []
+    private(set) var sourceMuteStates: [Bool] = []
+    private(set) var createdTapObjectIDs: [AudioObjectID] = []
+    private(set) var destroyedTapObjectIDs: [AudioObjectID] = []
+    private var nextTapObjectID: AudioObjectID = 77
     private let failCaptureStart: Bool
     private let createOutputStatus: OSStatus
+    private let realtimeSnapshot: TBAudioRealtimeSnapshot?
     private var destroyAggregateStatuses: [OSStatus]
 
     init(
         failCaptureStart: Bool = false,
         createOutputStatus: OSStatus = noErr,
+        realtimeSnapshot: TBAudioRealtimeSnapshot? = nil,
         destroyAggregateStatus: OSStatus = noErr,
         destroyAggregateStatuses: [OSStatus] = []
     ) {
         self.failCaptureStart = failCaptureStart
         self.createOutputStatus = createOutputStatus
+        self.realtimeSnapshot = realtimeSnapshot
         self.destroyAggregateStatuses =
             destroyAggregateStatuses.isEmpty
             ? [destroyAggregateStatus]
             : destroyAggregateStatuses
+    }
+
+    func resetOperations() {
+        operations = []
     }
 
     func createKernel(
@@ -442,6 +1099,7 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
         gains: [Float]
     ) throws -> HALKernelResource {
         operations.append("createKernel")
+        createdKernelSourceFormats = sourceFormats
         return HALKernelResource(pointer: nil)
     }
 
@@ -454,11 +1112,15 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
         deviceUID: String?
     ) throws -> HALTapResource {
         operations.append("createTap")
-        return HALTapResource(objectID: 77, uid: "tap-77")
+        let objectID = nextTapObjectID
+        nextTapObjectID += 1
+        createdTapObjectIDs.append(objectID)
+        return HALTapResource(objectID: objectID, uid: "tap-\(objectID)")
     }
 
     func destroyProcessTap(_ tap: HALTapResource) -> OSStatus {
         operations.append("destroyTap")
+        destroyedTapObjectIDs.append(tap.objectID)
         return noErr
     }
 
@@ -503,6 +1165,23 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
             )
         }
         return HALIOProcResource(deviceID: deviceID, ioProcID: nil, lease: nil)
+    }
+
+    func snapshot(_ kernel: HALKernelResource) -> TBAudioRealtimeSnapshot? {
+        realtimeSnapshot
+    }
+
+    func setSourceGain(_ gain: Float, index: UInt32, kernel: HALKernelResource) {
+        sourceGains.append(gain)
+    }
+
+    func setSourceMuted(
+        _ muted: Bool,
+        index: UInt32,
+        rampFrames: UInt32,
+        kernel: HALKernelResource
+    ) {
+        sourceMuteStates.append(muted)
     }
 
     func start(_ ioProc: HALIOProcResource) -> OSStatus {
