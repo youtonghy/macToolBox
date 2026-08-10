@@ -14,3 +14,6 @@ default.profraw
 .DS_Store
 __pycache__/
 *.pyc
+
+# Pi harness state
+.pi/
