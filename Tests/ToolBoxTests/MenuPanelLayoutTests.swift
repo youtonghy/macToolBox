@@ -361,7 +361,7 @@ final class MenuPanelLayoutTests: XCTestCase {
         service.setSnapshotForTesting(snapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
         model.start()
 

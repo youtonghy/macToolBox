@@ -282,6 +282,87 @@ struct DDCCapabilityReport: Equatable, Sendable {
     }
 }
 
+/// The VCP code used to select a monitor color preset.
+///
+/// Dell displays expose color preset selection through the vendor code
+/// `0xE2(...)` (confirmed by reverse-engineering DDPM v2.2.0.0024, where the
+/// preset command string is `"E2 <value>"`). Other displays follow the MCCS
+/// standard `0x14(...)` enumeration. A display may advertise either one.
+enum DisplayColorPresetCode: Equatable, Sendable {
+    case dellE2
+    case mccs14
+    /// A preset VCP is advertised but with no enumerated value subset.
+    case advertisedNoEnumSubset
+    case notAdvertised
+    case capabilityStringUnavailable
+
+    var rawValue: UInt8? {
+        switch self {
+        case .dellE2:
+            return 0xE2
+        case .mccs14:
+            return 0x14
+        case .advertisedNoEnumSubset, .notAdvertised, .capabilityStringUnavailable:
+            return nil
+        }
+    }
+
+    var isAvailable: Bool {
+        switch self {
+        case .dellE2, .mccs14:
+            return true
+        case .advertisedNoEnumSubset, .notAdvertised, .capabilityStringUnavailable:
+            return false
+        }
+    }
+}
+
+extension DDCCapabilityReport {
+    /// Resolve the color-preset VCP code for this display from its
+    /// capability report. Dell's vendor `0xE2` takes precedence because a
+    /// Dell monitor may advertise both `E2(...)` and `14(...)` and DDPM
+    /// drives preset selection exclusively through `E2` on Dell hardware.
+    /// A code advertised without a value subset is reported distinctly from
+    /// one that is absent entirely, so discovery can stay fail-closed while
+    /// preserving the diagnostic state.
+    func resolveColorPresetCode() -> DisplayColorPresetCode {
+        switch support(for: 0xE2) {
+        case .advertisedWithSubset:
+            return .dellE2
+        case .capabilityStringUnavailable:
+            return .capabilityStringUnavailable
+        case .notAdvertised, .advertisedNoEnumSubset:
+            break
+        }
+
+        switch support(for: 0x14) {
+        case .advertisedWithSubset:
+            return .mccs14
+        case .notAdvertised, .advertisedNoEnumSubset:
+            break
+        case .capabilityStringUnavailable:
+            return .capabilityStringUnavailable
+        }
+
+        if case .advertisedNoEnumSubset = support(for: 0xE2) {
+            return .advertisedNoEnumSubset
+        }
+        if case .advertisedNoEnumSubset = support(for: 0x14) {
+            return .advertisedNoEnumSubset
+        }
+        return .notAdvertised
+    }
+
+    /// The advertised value subset for a resolved preset code, if any.
+    func advertisedValues(for code: DisplayColorPresetCode) -> Set<UInt8>? {
+        guard let rawValue = code.rawValue else { return nil }
+        guard case let .advertisedWithSubset(values) = support(for: rawValue) else {
+            return nil
+        }
+        return values
+    }
+}
+
 enum DDCCapabilityParseFailure: Error, Equatable {
     case missingVCPBlock
     case unterminatedVCPBlock

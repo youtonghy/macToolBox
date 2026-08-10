@@ -108,35 +108,13 @@ final class DisplayControlMenuModelTests: XCTestCase {
         await provider.releaseFirstWrite()
     }
 
-    func testDisabledPresetFeatureHidesAdvertisedOptionsAndRejectsSelection() async {
-        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
-        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
-        service.setSnapshotForTesting(Self.presetSnapshot)
-        let model = DisplayControlMenuModel(
-            service: service,
-            colorPresetPOCEnabled: { false }
-        )
-
-        model.start()
-
-        XCTAssertFalse(model.presetAvailable)
-        XCTAssertTrue(model.presetItems.isEmpty)
-        XCTAssertNil(model.selectedPresetRawValue)
-        model.setColorPreset(rawValue: 0x41)
-        for _ in 0..<10 {
-            await Task.yield()
-        }
-        let writes = await provider.recordedPresetWrites()
-        XCTAssertTrue(writes.isEmpty)
-    }
-
     func testEnabledPresetFeatureProjectsAvailableOptions() {
         let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
         let service = DisplayControlService(provider: provider, timing: .immediateForTests)
         service.setSnapshotForTesting(Self.presetSnapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
 
         model.start()
@@ -163,7 +141,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
         service.setSnapshotForTesting(snapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
 
         model.start()
@@ -188,7 +166,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
         service.setSnapshotForTesting(snapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
 
         model.start()
@@ -205,7 +183,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
         service.setSnapshotForTesting(Self.presetSnapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
         model.start()
 
@@ -223,7 +201,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
         service.setSnapshotForTesting(Self.presetSnapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
         model.start()
 
@@ -253,7 +231,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
         service.setSnapshotForTesting(snapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
         model.start()
 
@@ -273,7 +251,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
         service.setSnapshotForTesting(snapshot)
         let model = DisplayControlMenuModel(
             service: service,
-            colorPresetPOCEnabled: { true }
+
         )
 
         model.start()

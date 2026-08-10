@@ -44,7 +44,6 @@ final class DisplayControlMenuModel: ObservableObject {
 
     private let service: DisplayControlService
     private let pendingValueLifetimeNanos: UInt64
-    private let colorPresetPOCEnabled: () -> Bool
     private var cancellables = Set<AnyCancellable>()
     private var pendingValues: [DisplayControlPendingKey: Double] = [:]
     private var pendingClearTasks: [DisplayControlPendingKey: Task<Void, Never>] = [:]
@@ -54,26 +53,12 @@ final class DisplayControlMenuModel: ObservableObject {
         self.init(service: .shared)
     }
 
-    convenience init(
+    init(
         service: DisplayControlService,
         pendingValueLifetimeNanos: UInt64 = 750_000_000
     ) {
-        let experimentalFeatures = DisplayControlExperimentalFeatures()
-        self.init(
-            service: service,
-            pendingValueLifetimeNanos: pendingValueLifetimeNanos,
-            colorPresetPOCEnabled: { experimentalFeatures.colorPresetPOCEnabled }
-        )
-    }
-
-    init(
-        service: DisplayControlService,
-        pendingValueLifetimeNanos: UInt64 = 750_000_000,
-        colorPresetPOCEnabled: @escaping () -> Bool
-    ) {
         self.service = service
         self.pendingValueLifetimeNanos = pendingValueLifetimeNanos
-        self.colorPresetPOCEnabled = colorPresetPOCEnabled
     }
 
     var hasExternalDisplay: Bool {
@@ -193,8 +178,7 @@ final class DisplayControlMenuModel: ObservableObject {
     }
 
     private func projectColorPreset(for display: DisplayControlDisplay) {
-        guard colorPresetPOCEnabled(),
-              display.colorPreset?.status == .available,
+        guard display.colorPreset?.status == .available,
               let capability = display.colorPreset,
               !capability.options.isEmpty else {
             resetPresetProjection()

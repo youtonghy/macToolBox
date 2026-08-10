@@ -2,11 +2,11 @@
 
 ## 1. 适用范围
 
-本记录对应 `11-authoritative-spec.md` §12.2 的 Q1-Q10 和 Q20。它只用于验证：
+本记录对应 `11-authoritative-spec.md` §12.2 的 Q1-Q10 和 Q20。它用于验证：
 
 - Intel I2C 与 Apple Silicon AVService 的 DDC/CI 读写行为；
 - Capability String 分块读取和严格解析；
-- exact identity allowlist 下 VCP `0x14` 的受控写入与读回；
+- 按 Capability String 广告值（Dell `0xE2` 优先，MCCS `0x14` 次之）的通用发现、写入与读回；
 - preset 切换对亮度、对比度和 RGB Gain 的可观察副作用。
 
 它不证明 ICC、ColorSync、HDR 状态、RGB Gain 写入、Dell USB SDK 或远程 ICC 下载可用于正式产品。Q11-Q19 需使用各自独立的证据和验收流程。
@@ -15,24 +15,12 @@
 
 ## 2. 当前发布门
 
-- 实验开关默认关闭。
-- production `DisplayColorPresetCatalog` 为空。
-- 当前没有任何通过 Stage A 的硬件身份，因此不得加入 production allowlist。
-- 当前结论仅为“代码和自动化已具备硬件 POC 条件”，不是“正式色彩管理可发布”。
-
-启用硬件 POC：
-
-```bash
-defaults write com.youtonghy.toolbox displayControl.experimental.colorPresetPOC -bool true
-```
-
-关闭并恢复默认：
-
-```bash
-defaults delete com.youtonghy.toolbox displayControl.experimental.colorPresetPOC
-```
-
-修改后重启 ToolBox。没有 Stage A catalog 条目时，即使开关已启用，界面也不得出现可写预设。
+- 色彩预设按 DDPM 主程序的通用发现方式实现，不再依赖 identity allowlist。
+- 凡是 Capability String 广告了 `0xE2(...)`（Dell）或 `0x14(...)`（MCCS）枚举子集，即生成可写选项。
+- 名称来自 `DisplayColorPresetDDPMTable`（已用 IDA 逐项核对 DDPM v2.2.0.0024）；查不到的值显示 `Preset 0xXX`。
+- 写入目标必须是广告值之一，写后必须读回确认；读回失败或 mismatch 不得报告完整成功。
+- 无实验开关；行为直接生效，但仍受第 8 节发布阻断约束。
+- 实时 `0xF3` capability 读取失败时，若显示器型号命中已验证回退表，使用该表；当前只包含从 DDPM 自身加密缓存解出的 Dell U2723QE（固件 M2T105）真实广告值。回退仅用于实时 DDC 不可用时，写入仍按广告值校验并读回。
 
 ## 3. 诊断采集
 
@@ -53,7 +41,7 @@ log stream --level debug --style compact \
 
 - `vcp-read`: Get VCP request、原始 reply、解析结果和失败类型；
 - `capability-block`: backend、offset、request 和原始 50-byte reply；
-- `capability-report`: exact vendor/model/serial、backend、完整长度和 `0x14` 广告值；
+- `capability-report`: vendor/model/serial、backend、完整长度和 `0xE2`/`0x14` 广告值；
 - `preset-write`: exact identity、backend 和请求值；
 - `preset-verify`: 每次读回的 attempt、current、maximum 和 match/mismatch/failure。
 
@@ -76,8 +64,8 @@ log stream --level debug --style compact \
 | Q3 | Thunderbolt/USB-C hub 与 Daisy-Chain 下的 Capability String | NOT RUN - 当前无目标拓扑 |
 | Q4 | 明确不支持 VCP 的 reply result code | NOT RUN - 当前无外接显示器 |
 | Q5 | HDR on/off/capable-SDR 下 NSScreen EDR 返回值 | NOT RUN - 不属于当前受控预设 POC，且无外接显示器 |
-| Q6 | preset 前后 brightness/contrast/RGB Gain | NOT RUN - 没有 Stage A exact identity |
-| Q7 | `0x14` 写后 200 ms 与重试次数 | NOT RUN - 没有 Stage A exact identity |
+| Q6 | preset 前后 brightness/contrast/RGB Gain | NOT RUN - 当前无外接显示器 |
+| Q7 | `0xE2`/`0x14` 写后 200 ms 与重试次数 | NOT RUN - 当前无外接显示器 |
 | Q8 | 0x16/0x18/0x1A 范围和 preset 可写性 | NOT RUN - 第一版禁止 RGB Gain 写入 |
 | Q9 | 非 Dell 与畸形 Capability String 实机行为 | NOT RUN - 当前无非 Dell 外接显示器 |
 | Q10 | preset/HDR/PiP/输入源切换后的 Capability String 变化 | NOT RUN - 当前无外接显示器 |
@@ -126,12 +114,12 @@ log stream --level debug --style compact \
 
 每种拓扑使用独立记录行。连接变化后必须看到新的 connection token 触发重新读取，不能复用上一拓扑的缓存作为证据。
 
-### 6.6 VCP `0x14` 写入与读回时序
+### 6.6 VCP `0xE2`/`0x14` 写入与读回时序
 
-只有通过 Stage A 的 exact identity 才能执行：
+只对 Capability String 明确广告且已枚举的值执行：
 
-1. 记录当前 `0x14`、亮度 `0x10`、对比度 `0x12`，并拍摄 OSD 当前 preset 名称。
-2. 使用 raw label 对一个已广告且已授权的值执行一次写入。
+1. 记录当前 preset VCP、亮度 `0x10`、对比度 `0x12`，并拍摄 OSD 当前 preset 名称。
+2. 使用 raw label 对一个已广告的值执行一次写入。
 3. 保存 `preset-write` 和全部 `preset-verify` 行。
 4. 记录首次 match 的实际延时和 attempt；分别验证 200 ms、400 ms、600 ms 观察点。
 5. 若写入成功但读回失败或不一致，结果必须为失败；不得声称预设已验证，也不得自动回滚硬件。
@@ -155,38 +143,23 @@ log stream --level debug --style compact \
 3. 分别记录 maximum、current 是否为 `0xFFFF`，以及 result code 和 checksum。
 4. 只有实机证据可用于判断 sentinel 是暂态异常、write-only 表现还是型号特例；parser 保持 fail-closed。
 
-## 7. Allowlist 两阶段门
+## 7. 名称来源与未知值展示
 
-### Stage A - exact identity POC 授权
+### 名称映射
 
-只有同一条证据链同时包含以下内容时，才能加入 raw label catalog：
-
-- exact vendor/model/serial；
-- 完整且 checksum 有效的 Capability String；
-- `0x14` 明确广告目标 raw value；
-- 连接方式和 backend；
-- raw label 使用 `Preset 0xXX`，不使用色域名称。
-
-Stage A 只授权受控写入/读回测试，不声明 `sRGB`、`Display P3`、`Adobe RGB`、`HDR` 等语义。
-
-### Stage B - friendly name
-
-只有 Stage A 通过且同一型号/固件还具备以下证据时，才能替换为 friendly name：
-
-- Set VCP 成功且 Get VCP 读回匹配；
-- 显示器 OSD、厂商文档或 DDPM 实机来源显示的 preset 名称；
-- brightness/contrast/RGB Gain 副作用结果；
-- 至少一次断开重连后的重复验证。
-
-若 Stage A 未通过，production catalog 必须保持为空。若 Stage A 通过但 Stage B 未通过，只保留 `Preset 0xXX`。
+- 名称直接使用 `DisplayColorPresetDDPMTable`，与 DDPM 主程序一致：
+  - 基础表来自 `-[AMControl init_ColorPresetDictionary]`；
+  - 型号覆盖来自 `-[AMControl CreateColorPresetDictWithE2h:andModelName:]` 和 `-[AMControl updateColorPresetDict:]`（UP32/UP27/standard/U2723QE-family）；
+  - 标准家族的 Rec.709 名称按 `GetModelFY:` 的型号年份规则切换。
+- 表内没有的值显示 `Preset 0xXX`，并且仍可写入（前提是它来自广告值）。
+- 已知名称只表示 DDPM 的名称映射，不代表厂商正式语义；OSD/厂商文档核对仍属于 §12.2 实测项。
 
 ## 8. 发布阻断
 
 出现以下任一情况时不得扩大范围：
 
 - Capability String 缺失、畸形、offset 不连续或 checksum 无效；
-- identity 任一字段缺失或发生同型号串台；
-- 目标 raw value 未广告或未精确 allowlist；
+- 目标 raw value 未广告；
 - 写后读回不匹配、全部失败或返回 unsupported；
 - sleep、stop、断连后旧 worker 仍发布结果；
 - 预设切换导致亮度/对比度不可恢复且没有明确产品策略；
@@ -210,5 +183,5 @@ ColorSync 行为。第 5 节的 Q1-Q10、Q20 状态仍为 `NOT RUN`。
 当前发布结论：
 
 ```text
-POC CODE READY / PRODUCTION CATALOG EMPTY / FEATURE DEFAULT-OFF
+DDPM-COMPATIBLE GENERIC DISCOVERY / NAMES FROM DDPM TABLE / UNKNOWN VALUES SHOW Preset 0xXX
 ```

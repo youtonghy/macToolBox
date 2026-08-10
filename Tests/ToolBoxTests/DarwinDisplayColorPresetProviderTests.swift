@@ -3,7 +3,7 @@ import XCTest
 @testable import ToolBox
 
 final class DarwinDisplayColorPresetProviderTests: XCTestCase {
-    func testCompleteCapabilityProjectsOnlyAllowlistedAdvertisedOptions() async throws {
+    func testAdvertisedCapabilityProjectsAllDDPMNamedOptions() async throws {
         let transport = PresetTestTransport(
             connectionToken: 10,
             capabilityResult: .success("vcp(10 12 14(0B 41 FE) 62 8D)")
@@ -16,14 +16,15 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
 
         XCTAssertEqual(preset.status, .available)
         XCTAssertEqual(preset.currentRawValue, 0x0B)
-        XCTAssertEqual(preset.options.map(\.rawValue), [0x0B, 0x41])
+        XCTAssertEqual(preset.options.map(\.rawValue), [0x0B, 0x41, 0xFE])
+        XCTAssertEqual(preset.options.map(\.name), ["sRGB", "Preset 0x41", "Preset 0xFE"])
         XCTAssertEqual(preset.advertisedRawValues, [0x0B, 0x41, 0xFE])
         XCTAssertEqual(transport.capabilityReadCount, 1)
         XCTAssertEqual(transport.readCommands.filter { $0 == 0x14 }.count, 1)
         XCTAssertEqual(display.controls.map(\.kind), DisplayControlKind.allCases)
     }
 
-    func testUnknownIdentityRetainsAdvertisedValuesButIsUnavailable() async throws {
+    func testUnknownIdentityStillProjectsAdvertisedPresetOptions() async throws {
         let transport = PresetTestTransport(
             connectionToken: 10,
             capabilityResult: .success("vcp(10 14(0B 41))")
@@ -40,10 +41,33 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
         let snapshot = try await provider.snapshot()
         let preset = try XCTUnwrap(snapshot.displays.first?.colorPreset)
 
-        XCTAssertEqual(preset.status, .unavailable)
-        XCTAssertEqual(preset.options, [])
+        XCTAssertEqual(preset.status, .available)
+        XCTAssertEqual(preset.options.map(\.rawValue), [0x0B, 0x41])
         XCTAssertEqual(preset.advertisedRawValues, [0x0B, 0x41])
         XCTAssertEqual(transport.readCommands.filter { $0 == 0x14 }.count, 1)
+    }
+
+    func testLiveCapabilityFailureFallsBackToVerifiedU2723QECapability() async throws {
+        let transport = PresetTestTransport(
+            connectionToken: 10,
+            capabilityResult: .failure(.transportFailure)
+        )
+        let provider = makeProvider(
+            displayName: "DELL U2723QE",
+            transport: { transport }
+        )
+
+        let snapshot = try await provider.snapshot()
+        let preset = try XCTUnwrap(snapshot.displays.first?.colorPreset)
+
+        XCTAssertEqual(preset.status, .available)
+        XCTAssertEqual(
+            preset.options.map(\.rawValue),
+            [0x00, 0x02, 0x04, 0x0B, 0x0C, 0x0D, 0x0F, 0x10, 0x11, 0x13, 0x14, 0x1A, 0x1B, 0x23, 0x24, 0x27, 0x3A]
+        )
+        XCTAssertEqual(preset.options.first(where: { $0.rawValue == 0x3A })?.name, "Display HDR")
+        XCTAssertTrue(transport.readCommands.contains(0xE2))
+        XCTAssertFalse(transport.readCommands.contains(0x14))
     }
 
     func testPresetWithoutEnumSubsetIsUnavailableAndSkipsGetVCP() async throws {
@@ -66,7 +90,10 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
             connectionToken: 10,
             capabilityResult: .success("vcp(10 14(0B 41)")
         )
-        let provider = makeProvider(transport: { transport })
+        let provider = makeProvider(
+            displayName: "Other Display",
+            transport: { transport }
+        )
 
         let snapshot = try await provider.snapshot()
         let display = try XCTUnwrap(snapshot.displays.first)
@@ -74,26 +101,6 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
         XCTAssertEqual(display.colorPreset?.status, .unavailable)
         XCTAssertEqual(display.controls.count, DisplayControlKind.allCases.count)
         XCTAssertTrue(display.controls.allSatisfy { $0.status.isWritable })
-    }
-
-    func testDisabledExperimentalFlagSkipsCapabilityReadAndRejectsWrites() async throws {
-        let transport = PresetTestTransport(
-            connectionToken: 10,
-            capabilityResult: .success("vcp(14(0B 41))")
-        )
-        let provider = makeProvider(enabled: false, transport: { transport })
-
-        let snapshot = try await provider.snapshot()
-        let display = try XCTUnwrap(snapshot.displays.first)
-
-        XCTAssertNil(display.colorPreset)
-        XCTAssertEqual(transport.capabilityReadCount, 0)
-        do {
-            _ = try await provider.writeColorPreset(displayID: display.id, rawValue: 0x0B)
-            XCTFail("Expected color preset write rejection")
-        } catch {
-            XCTAssertEqual(error as? DisplayColorPresetError, .capabilityUnavailable)
-        }
     }
 
     func testSameConnectionTokenCachesCapabilityButReadsCurrentPresetOncePerSnapshot() async throws {
@@ -135,7 +142,10 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
             connectionToken: 10,
             capabilityResult: .failure(.transportFailure)
         )
-        let provider = makeProvider(transport: { transport })
+        let provider = makeProvider(
+            displayName: "Other Display",
+            transport: { transport }
+        )
 
         _ = try await provider.snapshot()
         _ = try await provider.snapshot()
@@ -157,7 +167,7 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
         XCTAssertFalse(transport.writes.contains { $0.command == 0x14 })
     }
 
-    func testPresetWriteRejectsUnknownIdentityEvenWhenValueIsAdvertised() async throws {
+    func testPresetWriteSucceedsForUnknownIdentityWhenValueIsAdvertised() async throws {
         let transport = makeWritableTransport()
         let provider = makeProvider(
             identity: DisplayHardwareIdentity(
@@ -168,13 +178,17 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
             transport: { transport }
         )
         _ = try await provider.snapshot()
+        transport.presetReadOutcomes = [
+            .success(DDCReadResult(current: 0x0B, maximum: 0xFF)),
+        ]
 
-        await assertPresetError(
-            .unverifiedDisplayIdentity,
-            from: provider,
+        let result = try await provider.writeColorPreset(
+            displayID: displayID,
             rawValue: 0x0B
         )
-        XCTAssertFalse(transport.writes.contains { $0.command == 0x14 })
+
+        XCTAssertEqual(result.verifiedRawValue, 0x0B)
+        XCTAssertTrue(transport.writes.contains { $0.command == 0x14 && $0.value == 0x0B })
     }
 
     func testPresetWriteDoesNotReportSuccessWhenTransportWriteFails() async throws {
@@ -298,6 +312,118 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
         XCTAssertEqual(transport.presetVerificationReadCount, 1)
     }
 
+    // MARK: - Dell vendor code 0xE2
+
+    func testDellE2CapabilityDrivesDiscoveryAndCurrentRead() async throws {
+        let transport = PresetTestTransport(
+            connectionToken: 10,
+            capabilityResult: .success("vcp(10 12 E2(0B 41 1B) 62)")
+        )
+        let provider = makeProvider(transport: { transport })
+
+        let snapshot = try await provider.snapshot()
+        let display = try XCTUnwrap(snapshot.displays.first)
+        let preset = try XCTUnwrap(display.colorPreset)
+
+        XCTAssertEqual(preset.status, .available)
+        XCTAssertEqual(preset.options.map(\.rawValue), [0x0B, 0x1B, 0x41])
+        XCTAssertEqual(preset.advertisedRawValues, [0x0B, 0x1B, 0x41])
+        // Current-value probe must use the Dell 0xE2 code, not 0x14.
+        XCTAssertTrue(transport.readCommands.contains(0xE2))
+        XCTAssertFalse(transport.readCommands.contains(0x14))
+    }
+
+    func testDellE2PresetWriteAndReadbackUseE2VCP() async throws {
+        let transport = PresetTestTransport(
+            connectionToken: 10,
+            capabilityResult: .success("vcp(10 12 E2(0B 41) 62)")
+        )
+        let provider = makeProvider(transport: { transport })
+        _ = try await provider.snapshot()
+        transport.presetReadOutcomes = [
+            .success(DDCReadResult(current: 0x41, maximum: 0xFF)),
+        ]
+
+        let result = try await provider.writeColorPreset(
+            displayID: displayID,
+            rawValue: 0x41
+        )
+
+        XCTAssertEqual(result.verifiedRawValue, 0x41)
+        XCTAssertEqual(transport.writes.last?.command, 0xE2)
+        XCTAssertEqual(transport.writes.last?.value, 0x41)
+        XCTAssertEqual(transport.presetVerificationReadCount, 1)
+        XCTAssertFalse(transport.writes.contains { $0.command == 0x14 })
+    }
+
+    func testDellE2KnownPresetWritesDDPMResolvedVCP() async throws {
+        let transport = PresetTestTransport(
+            connectionToken: 10,
+            capabilityResult: .success("vcp(10 E2(0B 1B 3A) 62)")
+        )
+        let provider = makeProvider(displayName: "U2723QE", transport: { transport })
+        _ = try await provider.snapshot()
+        transport.presetReadOutcomes = [
+            .success(DDCReadResult(current: 0x0B, maximum: 0xFF)),
+        ]
+
+        let result = try await provider.writeColorPreset(
+            displayID: displayID,
+            rawValue: 0x0B
+        )
+
+        XCTAssertEqual(result.verifiedRawValue, 0x0B)
+        XCTAssertTrue(transport.writes.contains { $0.command == 0x14 && $0.value == 0x01 })
+        XCTAssertFalse(transport.writes.contains { $0.command == 0xE2 })
+        XCTAssertTrue(transport.readCommands.contains(0xE2))
+
+        transport.presetReadOutcomes = [
+            .success(DDCReadResult(current: 0x1B, maximum: 0xFF)),
+        ]
+        _ = try await provider.writeColorPreset(displayID: displayID, rawValue: 0x1B)
+
+        XCTAssertTrue(transport.writes.contains { $0.command == 0xF0 && $0.value == 0x0A })
+        XCTAssertFalse(transport.writes.contains { $0.command == 0xE2 && $0.value == 0x1B })
+    }
+
+    func testDellE2WriteRetriesOnTransportFailureThenSucceeds() async throws {
+        let transport = PresetTestTransport(
+            connectionToken: 10,
+            capabilityResult: .success("vcp(10 12 E2(0B 41) 62)")
+        )
+        let provider = makeProvider(transport: { transport })
+        _ = try await provider.snapshot()
+
+        transport.writeFailuresRemaining = 2
+        transport.presetReadOutcomes = [
+            .success(DDCReadResult(current: 0x41, maximum: 0xFF)),
+        ]
+        let result = try await provider.writeColorPreset(
+            displayID: displayID,
+            rawValue: 0x41
+        )
+
+        XCTAssertEqual(transport.writes.filter { $0.command == 0xE2 }.count, 3)
+        XCTAssertEqual(result.verifiedRawValue, 0x41)
+    }
+
+    func testDellE2WriteRetriesThenFailsAfterAllAttempts() async throws {
+        let transport = PresetTestTransport(
+            connectionToken: 10,
+            capabilityResult: .success("vcp(10 12 E2(0B 41) 62)")
+        )
+        let provider = makeProvider(transport: { transport })
+        _ = try await provider.snapshot()
+        transport.writeSucceeds = false
+
+        await assertPresetError(
+            .transportWriteFailed,
+            from: provider,
+            rawValue: 0x41
+        )
+        XCTAssertEqual(transport.writes.filter { $0.command == 0xE2 }.count, 3)
+    }
+
     private let displayID: CGDirectDisplayID = 77
 
     private var verifiedIdentity: DisplayHardwareIdentity {
@@ -310,26 +436,15 @@ final class DarwinDisplayColorPresetProviderTests: XCTestCase {
 
     private func makeProvider(
         identity: DisplayHardwareIdentity? = nil,
-        enabled: Bool = true,
+        displayName: String = "U2723QE",
         sleeper: @escaping (UInt64) -> Void = { _ in },
         transport: @escaping () -> DDCTransport?
     ) -> DarwinDisplayControlProvider {
         DarwinDisplayControlProvider(
             onlineDisplayIDs: { [self.displayID] },
             identity: { _ in identity ?? self.verifiedIdentity },
+            displayName: { _ in displayName },
             transportFactory: { _ in transport() },
-            presetCatalog: DisplayColorPresetCatalog(
-                entries: [
-                    DisplayColorPresetCatalogEntry(
-                        identity: verifiedIdentity,
-                        options: [
-                            DisplayColorPresetOption(rawValue: 0x0B, name: "Verified sRGB"),
-                            DisplayColorPresetOption(rawValue: 0x41, name: "Verified HDR Preview"),
-                        ]
-                    ),
-                ]
-            ),
-            colorPresetPOCEnabled: { enabled },
             verificationPolicy: DisplayColorPresetVerificationPolicy(
                 initialDelayNanos: 0,
                 retryDelayNanos: 0,
@@ -378,6 +493,7 @@ private final class PresetTestTransport: DDCTransport {
     private(set) var writes: [Write] = []
     var presetReadOutcomes: [DDCReadOutcome] = []
     var writeSucceeds = true
+    var writeFailuresRemaining = 0
 
     init(
         connectionToken: UInt64?,
@@ -389,7 +505,7 @@ private final class PresetTestTransport: DDCTransport {
 
     func readOutcome(command: UInt8, options _: DDCRequestOptions) -> DDCReadOutcome {
         readCommands.append(command)
-        if command == 0x14 {
+        if command == 0x14 || command == 0xE2 {
             if !presetReadOutcomes.isEmpty {
                 presetVerificationReadCount += 1
                 return presetReadOutcomes.removeFirst()
@@ -411,6 +527,10 @@ private final class PresetTestTransport: DDCTransport {
 
     func write(command: UInt8, value: UInt16, options _: DDCRequestOptions) -> Bool {
         writes.append(Write(command: command, value: value))
+        if writeFailuresRemaining > 0 {
+            writeFailuresRemaining -= 1
+            return false
+        }
         return writeSucceeds
     }
 }

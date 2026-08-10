@@ -99,6 +99,13 @@ final class Arm64DDCBackend: DDCTransport {
     }
 
     func write(command: UInt8, value: UInt16, options: DDCRequestOptions) -> Bool {
+        // DDPM runs cleanDDCI (3x [0x82,0x01,0x00,0xBC], 60ms apart) before
+        // every Apple Silicon Set VCP. Without it, writes can be dropped on a
+        // busy/error-recovering DDC bus while IOAVService still reports the
+        // I2C transaction as completed.
+        guard Self.performCleanDDCI(service: service, sleepMicros: sleepMicros) else {
+            return false
+        }
         var send = [command, UInt8(value >> 8), UInt8(value & 0xff)]
         var reply: [UInt8] = []
         return Self.performDDCCommunication(
@@ -218,6 +225,27 @@ extension Arm64DDCBackend {
             }
         }
         return matches
+    }
+
+    private static func performCleanDDCI(
+        service: IOAVService?,
+        sleepMicros: @escaping (UInt32) -> Void
+    ) -> Bool {
+        guard let service else { return false }
+        var clean: [UInt8] = [0x82, 0x01, 0x00, 0xBC]
+        for _ in 0..<3 {
+            sleepMicros(60_000)
+            guard IOAVServiceWriteI2C(
+                service,
+                UInt32(Arm64DDCConstants.ddcAddress),
+                UInt32(Arm64DDCConstants.dataAddress),
+                &clean,
+                UInt32(clean.count)
+            ) == 0 else {
+                return false
+            }
+        }
+        return true
     }
 
     private static func performDDCCommunication(

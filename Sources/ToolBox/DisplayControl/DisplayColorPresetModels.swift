@@ -32,11 +32,16 @@ struct DisplayColorPresetVerificationPolicy: Sendable {
     var initialDelayNanos: UInt64
     var retryDelayNanos: UInt64
     var maximumReadAttempts: Int
+    /// Number of Set VCP attempts before reporting a transport failure.
+    /// DDPM's `-[DDCCtl(ReadWrite) Set:::]` retries the write up to 3 times.
+    var maximumWriteAttempts: Int = 3
+    /// Delay between failed write attempts (defaults to none, like DDPM).
+    var writeRetryDelayNanos: UInt64 = 0
 
     static let poc = DisplayColorPresetVerificationPolicy(
-        initialDelayNanos: 200_000_000,
-        retryDelayNanos: 200_000_000,
-        maximumReadAttempts: 3
+        initialDelayNanos: 500_000_000,
+        retryDelayNanos: 500_000_000,
+        maximumReadAttempts: 5
     )
 }
 
@@ -44,7 +49,6 @@ enum DisplayColorPresetError: Error, Equatable, LocalizedError {
     case providerUnsupported
     case capabilityUnavailable
     case presetNotAdvertised
-    case unverifiedDisplayIdentity
     case valueNotAdvertised(UInt8)
     case transportWriteFailed
     case readbackFailed
@@ -58,8 +62,6 @@ enum DisplayColorPresetError: Error, Equatable, LocalizedError {
             return "The display capability report is unavailable."
         case .presetNotAdvertised:
             return "The display did not advertise color preset control."
-        case .unverifiedDisplayIdentity:
-            return "This display identity has no verified color preset mapping."
         case let .valueNotAdvertised(value):
             return String(format: "Preset 0x%02X was not advertised by this display.", value)
         case .transportWriteFailed:
@@ -74,42 +76,5 @@ enum DisplayColorPresetError: Error, Equatable, LocalizedError {
                 actual
             )
         }
-    }
-}
-
-struct DisplayColorPresetCatalogEntry: Equatable, Sendable {
-    var identity: DisplayHardwareIdentity
-    var options: [DisplayColorPresetOption]
-}
-
-struct DisplayColorPresetCatalog: Sendable {
-    static let production = DisplayColorPresetCatalog(entries: [])
-
-    private let entries: [DisplayHardwareIdentity: [DisplayColorPresetOption]]
-
-    init(entries: [DisplayColorPresetCatalogEntry]) {
-        var indexedEntries: [DisplayHardwareIdentity: [DisplayColorPresetOption]] = [:]
-        for entry in entries {
-            indexedEntries[entry.identity] = entry.options
-        }
-        self.entries = indexedEntries
-    }
-
-    func options(
-        identity: DisplayHardwareIdentity,
-        advertisedValues: Set<UInt8>
-    ) -> [DisplayColorPresetOption] {
-        guard let verifiedOptions = entries[identity] else {
-            return []
-        }
-        return verifiedOptions.filter { advertisedValues.contains($0.rawValue) }
-    }
-
-    func contains(identity: DisplayHardwareIdentity) -> Bool {
-        entries[identity] != nil
-    }
-
-    func authorizes(identity: DisplayHardwareIdentity, rawValue: UInt8) -> Bool {
-        entries[identity]?.contains { $0.rawValue == rawValue } == true
     }
 }

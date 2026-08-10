@@ -491,6 +491,76 @@ private struct SettingsDisplayView: View {
                     }
                 }
 
+                if model.presetAvailable, !model.presetItems.isEmpty {
+                    SettingsSection(
+                        title: "色域预设",
+                        subtitle: model.selectedDisplayName
+                    ) {
+                        VStack(spacing: 12) {
+                            ForEach(model.presetItems) { preset in
+                                Button {
+                                    model.setColorPreset(rawValue: preset.rawValue)
+                                } label: {
+                                    HStack(spacing: 12) {
+                                        Image(systemName: model.selectedPresetRawValue == preset.rawValue ? "circle.inset.filled" : "circle")
+                                            .font(.system(size: 16))
+                                            .foregroundStyle(Color(nsColor: .systemTeal))
+                                            .frame(width: 20, height: 20)
+
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(preset.name)
+                                                .font(.system(size: 13))
+                                                .foregroundStyle(.primary)
+
+                                            if model.selectedPresetRawValue == preset.rawValue {
+                                                Text("当前")
+                                                    .font(.system(size: 11))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                        }
+
+                                        Spacer(minLength: 8)
+                                    }
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
+                                            .fill(model.selectedPresetRawValue == preset.rawValue ? Color.white.opacity(0.08) : Color.clear)
+                                    )
+                                    .overlay(
+                                        RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
+                                            .strokeBorder(
+                                                model.selectedPresetRawValue == preset.rawValue ? Color(nsColor: .systemTeal).opacity(0.4) : Color.white.opacity(0.1),
+                                                lineWidth: 1
+                                            )
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+
+                            if let errorText = model.presetErrorText {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .font(.system(size: 12))
+                                        .foregroundStyle(Color(nsColor: .systemOrange))
+
+                                    Text(errorText)
+                                        .font(.system(size: 11))
+                                        .foregroundStyle(.secondary)
+                                }
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(
+                                    RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
+                                        .fill(Color(nsColor: .systemOrange).opacity(0.1))
+                                )
+                            }
+                        }
+                    }
+                }
+
                 BrightnessScheduleSettingsView(
                     coordinator: brightnessSchedule,
                     launchAtLogin: launchAtLogin

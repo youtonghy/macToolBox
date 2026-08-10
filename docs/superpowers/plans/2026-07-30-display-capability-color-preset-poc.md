@@ -1,5 +1,11 @@
 # Display Capability and Controlled Color Preset POC Implementation Plan
 
+> **2026-08-10 status:** This plan's experimental switch, empty production catalog, Stage A/B
+> allowlist, and `defaults write colorPresetPOC` instructions no longer apply. macToolBox now
+> replicates DDPM's generic discovery directly: any `0xE2`/`0x14` advertised value is writable,
+> names come from `DisplayColorPresetDDPMTable`, and unknown values display `Preset 0xXX`.
+> The current acceptance wording is in `docs/testing/display-color-preset-poc-acceptance.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add safe Capability String discovery and an experimental, fail-closed VCP `0x14` color preset workflow for verified displays while preserving all existing DDC controls.

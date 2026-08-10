@@ -668,6 +668,26 @@ final class DisplayControlServiceTests: XCTestCase {
         XCTAssertNil(service.colorPresetError(displayID: 42))
     }
 
+    func testRefreshProbeFailureKeepsLastVerifiedPresetSelection() async {
+        let provider = RecordingDisplayControlProvider(snapshot: Self.presetSnapshot)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x0B)
+        await provider.waitUntilPresetWriteCount(1)
+        await yieldForPendingTasks()
+        XCTAssertEqual(service.presentedColorPreset(displayID: 42), 0x0B)
+
+        // A refresh whose current-value probe fails must not blank the last
+        // value verified by the successful write/readback.
+        service.setSnapshotForTesting(
+            Self.makePresetSnapshot(currentRawValue: nil)
+        )
+        await yieldForPendingTasks()
+
+        XCTAssertEqual(service.presentedColorPreset(displayID: 42), 0x0B)
+    }
+
     func testPresetSuccessSchedulesOneSnapshotRefresh() async {
         let verifiedSnapshot = Self.makePresetSnapshot(currentRawValue: 0x41)
         let provider = RecordingDisplayControlProvider(snapshot: verifiedSnapshot)
@@ -707,7 +727,7 @@ final class DisplayControlServiceTests: XCTestCase {
 
     private static let presetSnapshot = makePresetSnapshot(currentRawValue: 0x0B)
 
-    private static func makePresetSnapshot(currentRawValue: UInt8) -> DisplayControlSnapshot {
+    private static func makePresetSnapshot(currentRawValue: UInt8?) -> DisplayControlSnapshot {
         DisplayControlSnapshot(
             timestamp: Date(),
             displays: [

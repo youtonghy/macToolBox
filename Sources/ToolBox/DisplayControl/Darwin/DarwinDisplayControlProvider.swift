@@ -9,9 +9,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     private let logger = Logger(subsystem: "ToolBox", category: "DisplayControlProvider")
     private let onlineDisplayIDsProvider: () -> [CGDirectDisplayID]
     private let hardwareIdentityProvider: (CGDirectDisplayID) -> DisplayHardwareIdentity
+    private let displayNameProvider: (CGDirectDisplayID) -> String
     private let injectedTransportFactory: ((CGDirectDisplayID) -> DDCTransport?)?
-    private let presetCatalog: DisplayColorPresetCatalog
-    private let colorPresetPOCEnabled: () -> Bool
     private let verificationPolicy: DisplayColorPresetVerificationPolicy
     private let sleepNanos: (UInt64) -> Void
     private var transports: [CGDirectDisplayID: DDCTransport] = [:]
@@ -20,12 +19,10 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     private var capabilityStore = DisplayCapabilityStore()
 
     init() {
-        let experimentalFeatures = DisplayControlExperimentalFeatures()
         onlineDisplayIDsProvider = Self.onlineDisplayIDs
         hardwareIdentityProvider = Self.hardwareIdentity
+        displayNameProvider = Self.displayName(displayID:)
         injectedTransportFactory = nil
-        presetCatalog = .production
-        colorPresetPOCEnabled = { experimentalFeatures.colorPresetPOCEnabled }
         verificationPolicy = .poc
         sleepNanos = { nanos in
             Thread.sleep(forTimeInterval: Double(nanos) / 1_000_000_000)
@@ -35,9 +32,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     init(
         onlineDisplayIDs: @escaping () -> [CGDirectDisplayID],
         identity: @escaping (CGDirectDisplayID) -> DisplayHardwareIdentity,
+        displayName: @escaping (CGDirectDisplayID) -> String = DarwinDisplayControlProvider.displayName(displayID:),
         transportFactory: @escaping (CGDirectDisplayID) -> DDCTransport?,
-        presetCatalog: DisplayColorPresetCatalog,
-        colorPresetPOCEnabled: @escaping () -> Bool,
         verificationPolicy: DisplayColorPresetVerificationPolicy = .poc,
         sleepNanos: @escaping (UInt64) -> Void = { nanos in
             Thread.sleep(forTimeInterval: Double(nanos) / 1_000_000_000)
@@ -45,9 +41,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     ) {
         onlineDisplayIDsProvider = onlineDisplayIDs
         hardwareIdentityProvider = identity
+        displayNameProvider = displayName
         injectedTransportFactory = transportFactory
-        self.presetCatalog = presetCatalog
-        self.colorPresetPOCEnabled = colorPresetPOCEnabled
         self.verificationPolicy = verificationPolicy
         self.sleepNanos = sleepNanos
     }
@@ -125,9 +120,6 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         rawValue: UInt8
     ) async throws -> DisplayColorPresetWriteResult {
         try await queue.asyncCancellable {
-            guard self.colorPresetPOCEnabled() else {
-                throw DisplayColorPresetError.capabilityUnavailable
-            }
             do {
                 try self.ensureDisplayOnline(displayID)
             } catch {
@@ -145,41 +137,77 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 backendName: transport.backendName,
                 connectionToken: connectionToken
             )
-            guard let report = self.capabilityStore.report(for: cacheKey) else {
+            let report: DDCCapabilityReport
+            if let cached = self.capabilityStore.report(for: cacheKey) {
+                report = cached
+            } else if let fallback = self.fallbackColorPresetReport(
+                displayID: displayID,
+                transport: transport,
+                cacheKey: cacheKey
+            ) {
+                report = fallback
+            } else {
                 throw DisplayColorPresetError.capabilityUnavailable
             }
 
-            let advertisedValues: Set<UInt8>
-            switch report.support(for: 0x14) {
-            case .advertisedWithSubset(let values):
-                advertisedValues = values
-            case .notAdvertised, .advertisedNoEnumSubset:
+            let presetCode = report.resolveColorPresetCode()
+            guard let presetCodeValue = presetCode.rawValue else {
+                switch presetCode {
+                case .notAdvertised, .advertisedNoEnumSubset:
+                    throw DisplayColorPresetError.presetNotAdvertised
+                case .capabilityStringUnavailable:
+                    throw DisplayColorPresetError.capabilityUnavailable
+                case .dellE2, .mccs14:
+                    throw DisplayColorPresetError.capabilityUnavailable
+                }
+            }
+            guard let advertisedValues = report.advertisedValues(for: presetCode) else {
                 throw DisplayColorPresetError.presetNotAdvertised
-            case .capabilityStringUnavailable:
-                throw DisplayColorPresetError.capabilityUnavailable
             }
             guard advertisedValues.contains(rawValue) else {
                 throw DisplayColorPresetError.valueNotAdvertised(rawValue)
             }
-            guard self.presetCatalog.contains(identity: identity) else {
-                throw DisplayColorPresetError.unverifiedDisplayIdentity
-            }
-            guard self.presetCatalog.authorizes(identity: identity, rawValue: rawValue) else {
-                throw DisplayColorPresetError.valueNotAdvertised(rawValue)
-            }
 
             let identityDescription = DDCDiagnostics.identity(identity)
-            self.logger.info(
-                "preset-write display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public)"
+            let modelName = self.displayNameProvider(displayID)
+            let modelYear = DisplayColorPresetDDPMTable.modelYear(from: modelName)
+            let optionName = DisplayColorPresetDDPMTable.name(
+                for: rawValue,
+                modelName: modelName,
+                modelYear: modelYear
             )
-            guard transport.write(
-                command: 0x14,
-                value: UInt16(rawValue),
-                options: .interactive
-            ) else {
-                self.logger.error(
-                    "VCP 0x14 write failed for display \(displayID, privacy: .public)."
-                )
+            let writeCommand: DisplayColorPresetWriteCommand?
+            if presetCode == .dellE2, let optionName {
+                writeCommand = DisplayColorPresetDDPMTable.writeCommand(forName: optionName)
+            } else {
+                writeCommand = nil
+            }
+            let writeVCP = writeCommand?.vcp ?? presetCodeValue
+            let writeValue = writeCommand?.value ?? rawValue
+            self.logger.info(
+                "preset-write display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(writeVCP), privacy: .public) requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) write-value=\(DDCDiagnostics.hex(writeValue), privacy: .public)"
+            )
+
+            let maximumWriteAttempts = max(self.verificationPolicy.maximumWriteAttempts, 1)
+            var writeSucceeded = false
+            for writeAttempt in 1...maximumWriteAttempts {
+                guard transport.write(
+                    command: writeVCP,
+                    value: UInt16(writeValue),
+                    options: .interactive
+                ) else {
+                    self.logger.error(
+                        "VCP \(DDCDiagnostics.hex(writeVCP)) write attempt \(writeAttempt) failed for display \(displayID, privacy: .public)."
+                    )
+                    if writeAttempt < maximumWriteAttempts {
+                        self.sleepNanos(self.verificationPolicy.writeRetryDelayNanos)
+                    }
+                    continue
+                }
+                writeSucceeded = true
+                break
+            }
+            guard writeSucceeded else {
                 throw DisplayColorPresetError.transportWriteFailed
             }
 
@@ -188,13 +216,13 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             var lastObserved: UInt8?
             var receivedValidRead = false
             for attempt in 1...maximumReadAttempts {
-                switch transport.readOutcome(command: 0x14, options: .interactive) {
+                switch transport.readOutcome(command: presetCodeValue, options: .interactive) {
                 case .success(let result):
                     receivedValidRead = true
                     lastObserved = UInt8(exactly: result.current)
                     let disposition = lastObserved == rawValue ? "match" : "mismatch"
                     self.logger.debug(
-                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) current=\(DDCDiagnostics.hex(result.current), privacy: .public) maximum=\(DDCDiagnostics.hex(result.maximum), privacy: .public) result=\(disposition, privacy: .public)"
+                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(presetCodeValue), privacy: .public) requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) current=\(DDCDiagnostics.hex(result.current), privacy: .public) maximum=\(DDCDiagnostics.hex(result.maximum), privacy: .public) result=\(disposition, privacy: .public)"
                     )
                     if lastObserved == rawValue {
                         self.valueStore.invalidate(
@@ -210,15 +238,15 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                     }
                 case .failure(.unsupportedReply):
                     self.logger.debug(
-                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) result=unsupported-reply"
+                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(presetCodeValue), privacy: .public) requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) result=unsupported-reply"
                     )
                     self.logger.error(
-                        "VCP 0x14 readback was unsupported for display \(displayID, privacy: .public)."
+                        "VCP \(DDCDiagnostics.hex(presetCodeValue)) readback was unsupported for display \(displayID, privacy: .public)."
                     )
                     throw DisplayColorPresetError.readbackFailed
                 case .failure(let failure):
                     self.logger.debug(
-                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=0x14 requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) result=\(String(describing: failure), privacy: .public)"
+                        "preset-verify display=\(displayID, privacy: .public) \(identityDescription, privacy: .public) backend=\(transport.backendName, privacy: .public) vcp=\(DDCDiagnostics.hex(presetCodeValue), privacy: .public) requested=\(DDCDiagnostics.hex(rawValue), privacy: .public) attempt=\(attempt, privacy: .public) result=\(String(describing: failure), privacy: .public)"
                     )
                 }
                 if attempt < maximumReadAttempts {
@@ -314,7 +342,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
 
         return DisplayControlDisplay(
             id: displayID,
-            name: Self.displayName(displayID: displayID),
+            name: displayNameProvider(displayID),
             vendorNumber: identity.vendorNumber,
             modelNumber: identity.modelNumber,
             serialNumber: identity.serialNumber,
@@ -399,9 +427,6 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         identity: DisplayHardwareIdentity,
         transport: DDCTransport?
     ) -> DisplayColorPresetCapability? {
-        guard colorPresetPOCEnabled() else {
-            return nil
-        }
         guard let transport, let connectionToken = transport.connectionToken else {
             return unavailableColorPreset(reason: "Capability discovery requires a registry-backed display connection.")
         }
@@ -415,78 +440,112 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
         let report: DDCCapabilityReport
         if let cached = capabilityStore.report(for: cacheKey) {
             report = cached
-        } else {
-            guard case let .success(rawString) = transport.readCapabilityString(options: .probe),
-                  case let .success(parsed) = DDCCapabilityParser.parse(rawString) else {
-                return unavailableColorPreset(reason: "The display capability report could not be read and validated.")
-            }
+        } else if case let .success(rawString) = transport.readCapabilityString(options: .probe),
+                  case let .success(parsed) = DDCCapabilityParser.parse(rawString) {
             let advertisedPresetValues: String
-            switch parsed.support(for: 0x14) {
-            case .advertisedWithSubset(let values):
-                advertisedPresetValues = values
-                    .sorted()
-                    .map(DDCDiagnostics.hex)
-                    .joined(separator: ",")
+            let advertisedPresetCode: UInt8?
+            switch parsed.resolveColorPresetCode() {
+            case .dellE2:
+                advertisedPresetCode = 0xE2
+                advertisedPresetValues = parsed.advertisedValues(for: .dellE2)
+                    .map { $0.sorted().map(DDCDiagnostics.hex).joined(separator: ",") } ?? "no-enum-subset"
+            case .mccs14:
+                advertisedPresetCode = 0x14
+                advertisedPresetValues = parsed.advertisedValues(for: .mccs14)
+                    .map { $0.sorted().map(DDCDiagnostics.hex).joined(separator: ",") } ?? "no-enum-subset"
             case .advertisedNoEnumSubset:
+                advertisedPresetCode = nil
                 advertisedPresetValues = "no-enum-subset"
             case .notAdvertised:
+                advertisedPresetCode = nil
                 advertisedPresetValues = "not-advertised"
             case .capabilityStringUnavailable:
+                advertisedPresetCode = nil
                 advertisedPresetValues = "unavailable"
             }
+            let presetCodeLog = advertisedPresetCode.map(DDCDiagnostics.hex) ?? "none"
             self.logger.debug(
-                "capability-report display=\(displayID, privacy: .public) \(DDCDiagnostics.identity(identity), privacy: .public) backend=\(transport.backendName, privacy: .public) bytes=\(rawString.utf8.count, privacy: .public) vcp-0x14=\(advertisedPresetValues, privacy: .public)"
+                "capability-report display=\(displayID, privacy: .public) \(DDCDiagnostics.identity(identity), privacy: .public) backend=\(transport.backendName, privacy: .public) bytes=\(rawString.utf8.count, privacy: .public) vcp=\(presetCodeLog, privacy: .public) preset-values=\(advertisedPresetValues, privacy: .public)"
             )
             capabilityStore.record(parsed, for: cacheKey)
             report = parsed
+        } else if let fallback = fallbackColorPresetReport(
+            displayID: displayID,
+            transport: transport,
+            cacheKey: cacheKey
+        ) {
+            report = fallback
+        } else {
+            return unavailableColorPreset(reason: "The display capability report could not be read and validated.")
         }
 
-        switch report.support(for: 0x14) {
-        case .capabilityStringUnavailable:
-            return unavailableColorPreset(
-                reason: "The display capability report is unavailable."
-            )
-        case .notAdvertised:
-            return DisplayColorPresetCapability(
-                status: .unsupported,
-                currentRawValue: nil,
-                options: [],
-                advertisedRawValues: [],
-                unavailableReason: "The display did not advertise VCP 0x14."
-            )
-        case .advertisedNoEnumSubset:
-            return unavailableColorPreset(
-                reason: "The display advertised VCP 0x14 without an allowed value subset."
-            )
-        case .advertisedWithSubset(let advertisedValues):
-            let sortedValues = advertisedValues.sorted()
-            let options = presetCatalog.options(
-                identity: identity,
-                advertisedValues: advertisedValues
-            )
-            let currentRawValue: UInt8?
-            if case let .success(read) = transport.readOutcome(command: 0x14, options: .probe) {
-                currentRawValue = UInt8(exactly: read.current)
-            } else {
-                currentRawValue = nil
-            }
-            guard !options.isEmpty else {
+        let presetCode = report.resolveColorPresetCode()
+        guard let presetCodeValue = presetCode.rawValue else {
+            switch presetCode {
+            case .capabilityStringUnavailable:
+                return unavailableColorPreset(
+                    reason: "The display capability report is unavailable."
+                )
+            case .advertisedNoEnumSubset:
+                return unavailableColorPreset(
+                    reason: "The display advertised a color preset VCP without an allowed value subset."
+                )
+            case .notAdvertised:
                 return DisplayColorPresetCapability(
-                    status: .unavailable,
-                    currentRawValue: currentRawValue,
+                    status: .unsupported,
+                    currentRawValue: nil,
                     options: [],
-                    advertisedRawValues: sortedValues,
-                    unavailableReason: "This display identity has no verified color preset mapping."
+                    advertisedRawValues: [],
+                    unavailableReason: "The display did not advertise a color preset VCP (0xE2 or 0x14)."
+                )
+            case .dellE2, .mccs14:
+                return unavailableColorPreset(
+                    reason: "The display advertised a resolvable preset code without a usable value."
                 )
             }
-            return DisplayColorPresetCapability(
-                status: .available,
-                currentRawValue: currentRawValue,
-                options: options,
-                advertisedRawValues: sortedValues,
-                unavailableReason: nil
+        }
+        guard let advertisedValues = report.advertisedValues(for: presetCode) else {
+            return unavailableColorPreset(
+                reason: "The display advertised a color preset VCP without an allowed value subset."
             )
         }
+        let sortedValues = advertisedValues.sorted()
+        let modelName = displayNameProvider(displayID)
+        let options = DisplayColorPresetDDPMTable.options(
+            for: advertisedValues,
+            modelName: modelName,
+            modelYear: DisplayColorPresetDDPMTable.modelYear(from: modelName)
+        )
+        let currentRawValue: UInt8?
+        if case let .success(read) = transport.readOutcome(command: presetCodeValue, options: .probe) {
+            currentRawValue = UInt8(exactly: read.current)
+        } else {
+            currentRawValue = nil
+        }
+        return DisplayColorPresetCapability(
+            status: .available,
+            currentRawValue: currentRawValue,
+            options: options,
+            advertisedRawValues: sortedValues,
+            unavailableReason: nil
+        )
+    }
+
+    private func fallbackColorPresetReport(
+        displayID: CGDirectDisplayID,
+        transport: DDCTransport,
+        cacheKey: DisplayCapabilityCacheKey
+    ) -> DDCCapabilityReport? {
+        let modelName = displayNameProvider(displayID)
+        guard let rawString = DisplayCapabilityStringFallback.capabilityString(forModelName: modelName),
+              case let .success(parsed) = DDCCapabilityParser.parse(rawString) else {
+            return nil
+        }
+        self.logger.info(
+            "capability-fallback display=\(displayID, privacy: .public) model=\(modelName, privacy: .public) source=ddpm-verified-cache"
+        )
+        capabilityStore.record(parsed, for: cacheKey)
+        return parsed
     }
 
     private func unavailableColorPreset(reason: String) -> DisplayColorPresetCapability {

@@ -681,15 +681,21 @@ final class DisplayControlService: ObservableObject {
             }
 
             guard presetWorkers[display.id] == nil else { continue }
-            guard display.colorPreset?.status == .available,
-                  let currentRawValue = display.colorPreset?.currentRawValue else {
+            guard display.colorPreset?.status == .available else {
                 desiredPresetValues[display.id] = nil
                 lastVerifiedPresetValues[display.id] = nil
                 colorPresetErrors[display.id] = nil
                 continue
             }
-            desiredPresetValues[display.id] = currentRawValue
-            lastVerifiedPresetValues[display.id] = currentRawValue
+            if let currentRawValue = display.colorPreset?.currentRawValue {
+                desiredPresetValues[display.id] = currentRawValue
+                lastVerifiedPresetValues[display.id] = currentRawValue
+            } else if let lastVerified = lastVerifiedPresetValues[display.id] {
+                // A transient probe read failure must not erase the last value
+                // verified by a successful write/readback. The menu keeps
+                // showing it until a real read succeeds or presets disappear.
+                desiredPresetValues[display.id] = lastVerified
+            }
         }
     }
 
