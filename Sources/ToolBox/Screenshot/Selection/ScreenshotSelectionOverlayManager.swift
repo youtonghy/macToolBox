@@ -105,7 +105,25 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
         if activateApplication {
             NSApp.activate()
             panels.values.forEach { $0.orderFront(nil) }
+            // Give one panel key focus immediately so keyboard input (notably ESC
+            // to cancel) works before the user has clicked anything. Previously key
+            // capability was only granted from beginInteraction(), which is driven
+            // by mouseDown, so ESC was dead until the first click.
+            if let initial = initialKeyDisplayID() {
+                beginInteraction(on: initial)
+            }
         }
+    }
+
+    /// Display whose panel should receive key focus when the overlay appears: the
+    /// one under the pointer, falling back to the lowest display ID so the choice
+    /// is deterministic when the pointer is not over any captured display.
+    private func initialKeyDisplayID() -> CGDirectDisplayID? {
+        let pointer = NSEvent.mouseLocation
+        if let hovered = panels.first(where: { $0.value.frame.contains(pointer) })?.key {
+            return hovered
+        }
+        return panels.keys.min()
     }
 
     func beginInteraction(on displayID: CGDirectDisplayID) {

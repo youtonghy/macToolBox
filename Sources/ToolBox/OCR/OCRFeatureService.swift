@@ -112,7 +112,7 @@ actor OCRFeatureService: OCRFeatureServing {
     func availableSelections() async throws -> [OCRModelSelection] {
         let models = try catalog().models
         var seen = Set<OCRModelSelection>()
-        return models.compactMap { manifest in
+        var selections = models.compactMap { manifest -> OCRModelSelection? in
             let selection = manifest.selection
             guard selection.isKnownVariant,
                   selection.pipeline == .ppOCRv6 || worker != nil,
@@ -120,12 +120,31 @@ actor OCRFeatureService: OCRFeatureServing {
             else { return nil }
             return selection
         }
+        
+        // System Vision is always available (no catalog entry, no download)
+        let systemVision = OCRModelSelection(pipeline: .systemVision, variantID: "default")
+        if !seen.contains(systemVision) {
+            selections.insert(systemVision, at: 0)
+        }
+        
+        return selections
     }
 
     func descriptor(for selection: OCRModelSelection) throws -> OCRModelDescriptor {
         guard selection.isKnownVariant else {
             throw OCRFeatureServiceError.modelUnavailable(selection)
         }
+        
+        // System Vision pipeline: always ready, no download
+        if selection.pipeline == .systemVision {
+            return OCRModelDescriptor(
+                selection: selection,
+                displayName: selectionDisplayName(selection),
+                downloadByteCount: 0,
+                state: .ready
+            )
+        }
+        
         let manifest = try manifest(for: selection)
         return OCRModelDescriptor(
             selection: selection,
@@ -140,6 +159,12 @@ actor OCRFeatureService: OCRFeatureServing {
         guard selection.isKnownVariant else {
             throw OCRFeatureServiceError.modelUnavailable(selection)
         }
+        
+        // System Vision pipeline: no-op install (always ready)
+        if selection.pipeline == .systemVision {
+            return FileManager.default.temporaryDirectory
+        }
+        
         let manifest = try manifest(for: selection)
         if activeEngine?.key.selection == selection { activeEngine = nil }
         return try await downloadManager.install(
@@ -157,6 +182,15 @@ actor OCRFeatureService: OCRFeatureServing {
         guard selection.isKnownVariant else {
             throw OCRFeatureServiceError.modelUnavailable(selection)
         }
+        
+        // System Vision pipeline: no download, no worker, always available
+        if selection.pipeline == .systemVision {
+            let engine = SystemVisionOCREngine()
+            let fullImage = try source.copyPixels(in: CGRect(origin: .zero, size: source.pixelSize))
+            let document = try await engine.recognize(image: fullImage)
+            return .text(document)
+        }
+        
         if selection.pipeline == .ppOCRv6 {
             let manifest = try manifest(for: selection)
             guard try store.state(for: manifest) == .ready else {
@@ -216,6 +250,7 @@ actor OCRFeatureService: OCRFeatureServing {
         case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
         case .ppStructureV3: "PP-StructureV3"
         case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        case .systemVision: "System OCR"
         }
     }
 

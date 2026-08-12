@@ -4,12 +4,16 @@ enum OCRPipelineID: String, Codable, CaseIterable, Equatable, Hashable, Sendable
     case ppOCRv6
     case ppStructureV3
     case paddleOCRVL
+    /// System-provided Vision text recognition (VNRecognizeTextRequest).
+    /// No download required, always available on macOS 11+.
+    case systemVision
 
     var displayName: String {
         switch self {
         case .ppOCRv6: "PP-OCRv6"
         case .ppStructureV3: "PP-StructureV3"
         case .paddleOCRVL: "PaddleOCR-VL"
+        case .systemVision: "System OCR"
         }
     }
 
@@ -18,6 +22,7 @@ enum OCRPipelineID: String, Codable, CaseIterable, Equatable, Hashable, Sendable
         case .ppOCRv6: "tiny"
         case .ppStructureV3: "default"
         case .paddleOCRVL: "v1.6"
+        case .systemVision: "default"
         }
     }
 
@@ -26,6 +31,7 @@ enum OCRPipelineID: String, Codable, CaseIterable, Equatable, Hashable, Sendable
         case .ppOCRv6: Set(PPOCRv6Profile.allCases.map(\.rawValue))
         case .ppStructureV3: [defaultVariantID]
         case .paddleOCRVL: ["v1", "v1.5", "v1.6"]
+        case .systemVision: [defaultVariantID]
         }
     }
 }
@@ -95,6 +101,7 @@ struct OCRRuntimeAvailability: Equatable, Sendable {
 
     // The advanced pipelines use the bundled worker and are available on Apple
     // Silicon once the worker/model runtime is present in the app bundle.
+    // System Vision pipelines are always available (no download) but gated by OS version.
     static let shipped = OCRRuntimeAvailability(gates: [
         Gate(
             pipeline: .ppOCRv6,
@@ -110,6 +117,11 @@ struct OCRRuntimeAvailability: Equatable, Sendable {
             pipeline: .paddleOCRVL,
             architectures: [.arm64],
             deviceClasses: [.appleSiliconM1OrNewer]
+        ),
+        Gate(
+            pipeline: .systemVision,
+            architectures: [.arm64, .x86_64],
+            deviceClasses: [.appleSiliconM1OrNewer, .intel]
         ),
     ])
 }

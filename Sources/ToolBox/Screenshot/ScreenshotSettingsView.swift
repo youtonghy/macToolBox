@@ -252,6 +252,7 @@ struct ScreenshotSettingsView: View {
         case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
         case .ppStructureV3: "PP-StructureV3"
         case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        case .systemVision: "System OCR"
         }
     }
 

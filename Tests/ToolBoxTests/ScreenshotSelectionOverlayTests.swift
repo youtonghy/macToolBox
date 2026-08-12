@@ -49,7 +49,7 @@ final class ScreenshotSelectionOverlayTests: XCTestCase {
         XCTAssertLessThan(outsidePixel[1], selectedPixel[1])
     }
 
-    func testHoveredCandidateUsesThickBlueBorder() throws {
+    func testHoveredCandidateUsesThinBlueBorder() throws {
         var state = SelectionSessionState.empty
         state.hoveredCandidate = candidate(rect: CGRect(x: 60, y: 60, width: 30, height: 30))
         let view = selectionView(
@@ -59,17 +59,18 @@ final class ScreenshotSelectionOverlayTests: XCTestCase {
 
         let rendered = try render(view)
 
-        let innerBorderPixel = try pixel(
+        // Sample the left edge of the border (x=60) — should be blue.
+        let borderPixel = try pixel(
             in: rendered,
-            xFraction: 0.62,
+            xFraction: 0.60,
             yFractionFromTop: 0.25
         )
-        XCTAssertLessThan(innerBorderPixel[0], 100)
-        XCTAssertLessThan(innerBorderPixel[1], 190)
-        XCTAssertGreaterThan(innerBorderPixel[2], 200)
+        XCTAssertLessThan(borderPixel[0], 100, "red channel should be low")
+        XCTAssertLessThan(borderPixel[1], 190, "green channel should be low")
+        XCTAssertGreaterThan(borderPixel[2], 200, "blue channel should be high")
     }
 
-    func testHoveredCandidateUsesContrastOutlineAroundAccentBorder() throws {
+    func testHoveredCandidateBorderIsHairlineNotThick() throws {
         var state = SelectionSessionState.empty
         state.hoveredCandidate = candidate(rect: CGRect(x: 60, y: 60, width: 30, height: 30))
         let view = selectionView(
@@ -79,12 +80,12 @@ final class ScreenshotSelectionOverlayTests: XCTestCase {
 
         let rendered = try render(view)
 
-        let accentPixel = try pixel(in: rendered, xFraction: 0.62, yFractionFromTop: 0.25)
-        let outlinePixel = try pixel(in: rendered, xFraction: 0.66, yFractionFromTop: 0.25)
-        XCTAssertGreaterThan(accentPixel[2], 200)
-        XCTAssertLessThan(outlinePixel[0], 80)
-        XCTAssertLessThan(outlinePixel[1], 80)
-        XCTAssertLessThan(outlinePixel[2], 80)
+        // The border is 1pt. The candidate interior (x=70) should remain bright
+        // green (undimmed), proving there's no thick black outline eating into it.
+        let interiorPixel = try pixel(in: rendered, xFraction: 0.70, yFractionFromTop: 0.25)
+        XCTAssertLessThan(interiorPixel[0], 50, "red channel should be low")
+        XCTAssertGreaterThan(interiorPixel[1], 220, "green should stay bright (not dimmed)")
+        XCTAssertLessThan(interiorPixel[2], 50, "blue channel should be low")
     }
 
     func testWheelRequestsNextHierarchyCandidate() throws {

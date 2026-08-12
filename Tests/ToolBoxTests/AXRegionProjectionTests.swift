@@ -172,6 +172,141 @@ final class AXRegionProjectionTests: XCTestCase {
         XCTAssertEqual(capturedRequests.values.map(\.point.x), [1, 3])
     }
 
+    func testDeduplicationMergesNearIdenticalRects() async throws {
+        let records = [
+            // AXButton and AXGroup have the same position and nearly identical size
+            // (width 30 vs 31, within 2pt tolerance) — they should be merged.
+            AXRegionRecord(ownerPID: 55, role: "AXButton", title: "Save", position: CGPoint(x: 10, y: 20), size: CGSize(width: 30, height: 10), hierarchyIndex: 0),
+            AXRegionRecord(ownerPID: 55, role: "AXGroup", title: nil, position: CGPoint(x: 10, y: 20), size: CGSize(width: 31, height: 10), hierarchyIndex: 1),
+            AXRegionRecord(ownerPID: 55, role: "AXWindow", title: "Editor", position: CGPoint(x: 0, y: 0), size: CGSize(width: 200, height: 120), hierarchyIndex: 2),
+        ]
+        let provider = AXRegionProvider(
+            ownPID: 99,
+            primaryScreenTop: { 1_000 },
+            currentGeneration: { 7 },
+            lookup: { _ in .success(records) }
+        )
+
+        let candidates = try await provider.regions(at: CGPoint(x: 20, y: 970), generation: 7)
+
+        // The AXButton (hierarchyIndex 0) and AXGroup (hierarchyIndex 1) have
+        // near-identical rects (within 2pt tolerance) — the AXButton should be kept
+        // and the AXGroup should be deduplicated away.
+        XCTAssertEqual(candidates.map(\.role), ["AXButton", "AXWindow"])
+    }
+
+    func testDeduplicationPreservesDistinctRects() async throws {
+        let records = [
+            AXRegionRecord(ownerPID: 55, role: "AXButton", title: "Save", position: CGPoint(x: 10, y: 20), size: CGSize(width: 30, height: 10), hierarchyIndex: 0),
+            AXRegionRecord(ownerPID: 55, role: "AXWindow", title: "Editor", position: CGPoint(x: 0, y: 0), size: CGSize(width: 200, height: 120), hierarchyIndex: 1),
+        ]
+        let provider = AXRegionProvider(
+            ownPID: 99,
+            primaryScreenTop: { 1_000 },
+            currentGeneration: { 7 },
+            lookup: { _ in .success(records) }
+        )
+
+        let candidates = try await provider.regions(at: CGPoint(x: 20, y: 970), generation: 7)
+
+        // Distinct rects should all be preserved
+        XCTAssertEqual(candidates.map(\.role), ["AXButton", "AXWindow"])
+    }
+
+    func testDockFullScreenOverlayDoesNotSwallowApplicationWindowHits() async throws {
+        // Reproduces the shipped bug: the Dock publishes a window covering the whole
+        // screen at layer 20 and sits ahead of ordinary windows in front-to-back
+        // order, so an unfiltered scan resolved EVERY point to the Dock.
+        let records = [
+            WindowRegionRecord(
+                ownerPID: 300,
+                windowID: 8,
+                title: nil,
+                bounds: CGRect(x: 0, y: 0, width: 1_920, height: 1_080),
+                layer: 20
+            ),
+            WindowRegionRecord(
+                ownerPID: 55,
+                windowID: 71,
+                title: "Editor",
+                bounds: CGRect(x: 100, y: 100, width: 800, height: 600),
+                layer: 0
+            ),
+        ]
+        let provider = WindowRegionProvider(
+            ownPID: 99,
+            primaryScreenTop: { 1_080 },
+            windowList: { records }
+        )
+
+        // A point inside the application window (flipped y = 1080 - 700 = 380).
+        let candidate = try await provider.region(at: CGPoint(x: 500, y: 500), generation: 1)
+
+        XCTAssertEqual(candidate?.ownerPID, 55, "must resolve to the app window, not the Dock")
+        XCTAssertEqual(candidate?.windowID, 71)
+    }
+
+    func testMenuBarAndDockLayersAreNeverSelectable() async throws {
+        let records = [
+            WindowRegionRecord(ownerPID: 300, windowID: 8, title: nil, bounds: CGRect(x: 0, y: 0, width: 1_920, height: 1_080), layer: 20),
+            WindowRegionRecord(ownerPID: 301, windowID: 9, title: nil, bounds: CGRect(x: 0, y: 0, width: 1_920, height: 30), layer: 24),
+            WindowRegionRecord(ownerPID: 302, windowID: 10, title: nil, bounds: CGRect(x: 0, y: 0, width: 200, height: 30), layer: 25),
+        ]
+        let provider = WindowRegionProvider(
+            ownPID: 99,
+            primaryScreenTop: { 1_080 },
+            windowList: { records }
+        )
+
+        let candidate = try await provider.region(at: CGPoint(x: 500, y: 500), generation: 1)
+
+        XCTAssertNil(candidate, "shell layers must not be selectable window targets")
+    }
+
+    func testNegativeLayerWindowsAreRejected() async throws {
+        // Notification Center uses a large negative layer.
+        let records = [
+            WindowRegionRecord(
+                ownerPID: 400,
+                windowID: 11,
+                title: nil,
+                bounds: CGRect(x: 0, y: 0, width: 1_920, height: 1_080),
+                layer: -2_147_483_601
+            ),
+        ]
+        let provider = WindowRegionProvider(
+            ownPID: 99,
+            primaryScreenTop: { 1_080 },
+            windowList: { records }
+        )
+
+        let candidate = try await provider.region(at: CGPoint(x: 500, y: 500), generation: 1)
+
+        XCTAssertNil(candidate)
+    }
+
+    func testFloatingPanelLayerRemainsSelectable() async throws {
+        // Genuine floating panels sit just above layer 0 and must stay usable.
+        let records = [
+            WindowRegionRecord(
+                ownerPID: 55,
+                windowID: 71,
+                title: "Inspector",
+                bounds: CGRect(x: 100, y: 100, width: 400, height: 300),
+                layer: 3
+            ),
+        ]
+        let provider = WindowRegionProvider(
+            ownPID: 99,
+            primaryScreenTop: { 1_080 },
+            windowList: { records }
+        )
+
+        let candidate = try await provider.region(at: CGPoint(x: 200, y: 800), generation: 1)
+
+        XCTAssertEqual(candidate?.windowID, 71)
+    }
+
     func testWindowProviderSkipsOwnOverlayAndUsesFrontToBackOrder() async throws {
         let records = [
             WindowRegionRecord(

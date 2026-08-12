@@ -319,7 +319,7 @@ final class ScreenshotEditorModel: ObservableObject {
         ocrTask?.cancel()
     }
 
-    func copy() {
+    func copy(autoClose: Bool = false) {
         guard !isExporting else { return }
         setExporting(true)
         let document = state.document
@@ -342,6 +342,10 @@ final class ScreenshotEditorModel: ObservableObject {
                     throw error
                 }
                 self?.errorMessage = nil
+                
+                if autoClose {
+                    self?.onClose()
+                }
             } catch {
                 self?.errorMessage = self?.localized(error)
             }
@@ -349,7 +353,7 @@ final class ScreenshotEditorModel: ObservableObject {
         }
     }
 
-    func save() {
+    func save(autoClose: Bool = false) {
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "ToolBox Screenshot.png"
@@ -364,6 +368,10 @@ final class ScreenshotEditorModel: ObservableObject {
                     try exporter.export(document: document, to: url)
                 }.value
                 self?.errorMessage = nil
+                
+                if autoClose {
+                    self?.onClose()
+                }
             } catch {
                 self?.errorMessage = self?.localized(error)
             }
@@ -485,6 +493,7 @@ final class ScreenshotEditorModel: ObservableObject {
         case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
         case .ppStructureV3: "PP-StructureV3"
         case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        case .systemVision: "System OCR"
         }
     }
 
@@ -661,6 +670,14 @@ struct ScreenshotEditorView: View {
             Button("关闭") { model.onClose() }
                 .disabled(model.isExporting || model.isRecognizing)
                 .keyboardShortcut(.cancelAction)
+            
+            // Hidden buttons for Cmd+C/S auto-close behavior
+            Button("") { model.copy(autoClose: true) }
+                .hidden()
+                .keyboardShortcut("c", modifiers: .command)
+            Button("") { model.save(autoClose: true) }
+                .hidden()
+                .keyboardShortcut("s", modifiers: .command)
         }
         .padding(.horizontal, 12)
         .frame(minHeight: 50)
@@ -684,6 +701,7 @@ struct ScreenshotEditorView: View {
         case .ppOCRv6: "PP-OCRv6 \(selection.variantID.capitalized)"
         case .ppStructureV3: "PP-StructureV3"
         case .paddleOCRVL: "PaddleOCR-VL \(selection.variantID)"
+        case .systemVision: "System OCR"
         }
     }
 

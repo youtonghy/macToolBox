@@ -79,6 +79,7 @@ final class AXRegionProvider {
     private let lookup: Lookup
     private let queue = DispatchQueue(label: "ToolBox.AXRegionProvider")
     private var pendingLookup: AXLookupJob?
+    private let activator: AXAccessibilityActivator
 
     init(
         ownPID: pid_t = ProcessInfo.processInfo.processIdentifier,
@@ -89,15 +90,23 @@ final class AXRegionProvider {
         },
         visibleScreenFrames: @escaping () -> [CGRect] = { NSScreen.screens.map(\.frame) },
         currentGeneration: (() -> UInt64)? = nil,
+        activator: AXAccessibilityActivator = AXAccessibilityActivator(),
         lookup: Lookup? = nil
     ) {
         self.ownPID = ownPID
         self.primaryScreenTop = primaryScreenTop
         self.visibleScreenFrames = visibleScreenFrames
         self.currentGeneration = currentGeneration
+        self.activator = activator
         self.lookup = lookup ?? { request in
-            AXRegionProvider.systemLookup(request: request)
+            AXRegionProvider.systemLookup(request: request, activator: activator)
         }
+    }
+
+    /// Restore any accessibility opt-in attributes this process enabled.
+    /// Call when a capture session ends so target apps are left as we found them.
+    func restoreActivatedApplications() {
+        activator.restoreAll { pid in AXUIElementCreateApplication(pid) }
     }
 
     func regions(
@@ -162,6 +171,11 @@ final class AXRegionProvider {
             )
         }
 
+        // Deduplicate near-identical rects before merging with the target window.
+        // This prevents the scroll-cycling from showing 3-5 candidates with nearly
+        // identical positions (e.g., AXGroup -> AXWindow with same bounds).
+        candidates = AXRegionProvider.deduplicated(candidates)
+
         if let targetWindow {
             candidates.removeAll { candidate in
                 approximatelyEqual(candidate.globalRect, targetWindow.globalRect)
@@ -171,10 +185,44 @@ final class AXRegionProvider {
         return candidates
     }
 
-    nonisolated private static func systemLookup(request: AXLookupRequest) -> AXLookupResult {
+    /// Deduplicate candidates whose rects are within ~2pt tolerance.
+    /// Keeps the first (deepest, most specific) occurrence and discards near-duplicates.
+    nonisolated private static func deduplicated(_ candidates: [SelectionCandidate]) -> [SelectionCandidate] {
+        guard candidates.count > 1 else { return candidates }
+        var result: [SelectionCandidate] = []
+        for candidate in candidates {
+            if !result.contains(where: { existing in
+                abs(existing.globalRect.minX - candidate.globalRect.minX) <= 2
+                    && abs(existing.globalRect.minY - candidate.globalRect.minY) <= 2
+                    && abs(existing.globalRect.width - candidate.globalRect.width) <= 2
+                    && abs(existing.globalRect.height - candidate.globalRect.height) <= 2
+            }) {
+                result.append(candidate)
+            }
+        }
+        return result
+    }
+
+    nonisolated private static func systemLookup(
+        request: AXLookupRequest,
+        activator: AXAccessibilityActivator
+    ) -> AXLookupResult {
         guard AXIsProcessTrusted() else { return .failure(.permissionDenied) }
         let root = request.targetPID.map(AXUIElementCreateApplication) ?? AXUIElementCreateSystemWide()
-        AXUIElementSetMessagingTimeout(root, Float(request.timeout))
+        // Only set timeout on per-application elements, not the system-wide element.
+        // AXUIElementSetMessagingTimeout on the system-wide element mutates process-global
+        // state and affects other subsystems (e.g., SystemFocusModeObserver).
+        if request.targetPID != nil {
+            AXUIElementSetMessagingTimeout(root, Float(request.timeout))
+        }
+        // Opt the target application into exposing its full accessibility tree
+        // BEFORE hit testing. AppKit builds deep subtrees lazily and Electron apps
+        // keep the tree off entirely, so without this the hit test resolves only to
+        // the window (or to nothing) for most applications. System processes such as
+        // the menu bar and Dock are always exposed, which is why they already work.
+        if let targetPID = request.targetPID {
+            activator.activate(application: root, pid: targetPID)
+        }
         var hit: AXUIElement?
         let hitError = AXUIElementCopyElementAtPosition(
             root,
@@ -186,9 +234,17 @@ final class AXRegionProvider {
             return .failure(hitError == .cannotComplete ? .timeout : .unavailable)
         }
 
+        // Wall-clock deadline: total budget is 5x the per-message timeout (min 500ms).
+        // This prevents multi-second hangs when a target app is unresponsive and each
+        // AX message takes the full per-message timeout.
+        let deadline = CFAbsoluteTimeGetCurrent() + max(request.timeout * 5, 0.5)
         var records: [AXRegionRecord] = []
         for index in 0..<32 {
-            AXUIElementSetMessagingTimeout(current, Float(request.timeout))
+            guard CFAbsoluteTimeGetCurrent() < deadline else { break }
+
+            if current != root {
+                AXUIElementSetMessagingTimeout(current, Float(request.timeout))
+            }
             let attributes = attributeSnapshot(current)
             var pid = request.targetPID ?? 0
             if request.targetPID == nil {

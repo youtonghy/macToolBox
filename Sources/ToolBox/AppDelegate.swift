@@ -97,6 +97,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowCandidateResolver: { [weak self] point, generation in
             try? await self?.screenshotWindowProvider.region(at: point, generation: generation)
         },
+        onSelectionSessionEnded: { [weak self] in
+            // Leave target applications exactly as we found them: undo any
+            // accessibility opt-in attributes we enabled during this session.
+            self?.screenshotAXProvider.restoreActivatedApplications()
+        },
         bringEditorForward: { [weak self] in self?.screenshotPreview.bringForward() },
         editorHandoff: { [weak self] image in self?.screenshotPreview.show(image: image) },
         documentHandoff: { [weak self] document, cleanup in

@@ -8,12 +8,16 @@ final class MagnifierView: NSView {
     private let displayFrame: CGRect
     private let magnification: CGFloat = 4
     private let radius: CGFloat = 50
+    /// Pre-rendered pixel grid, stroked once and cached — avoids 100+ NSBezierPath strokes per frame.
+    private let gridImage: CGImage
 
     init(sourceImage: CGImage, magnifiedPoint: CGPoint, displayFrame: CGRect) {
         self.sourceImage = sourceImage
         self.magnifiedPoint = magnifiedPoint
         self.displayFrame = displayFrame
         let size = radius * 2
+        let gridSize = CGSize(width: size, height: size)
+        self.gridImage = MagnifierView.renderGrid(size: gridSize, step: 4, color: NSColor.separatorColor.withAlphaComponent(0.3))
         super.init(frame: NSRect(x: 0, y: 0, width: size, height: size))
         wantsLayer = true
         layer?.cornerRadius = 6
@@ -25,6 +29,42 @@ final class MagnifierView: NSView {
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
 
+    /// Pre-render a pixel grid pattern into a cached CGImage.
+    nonisolated private static func renderGrid(size: CGSize, step: CGFloat, color: NSColor) -> CGImage {
+        let width = Int(size.width)
+        let height = Int(size.height)
+        let bytesPerRow = width * 4
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return NSImage(size: size, flipped: false) { _ in true }.cgImage(forProposedRect: nil, context: nil, hints: nil)! }
+
+        context.clear(CGRect(origin: .zero, size: size))
+        context.setStrokeColor(color.cgColor)
+        context.setLineWidth(0.5)
+
+        var x: CGFloat = 0
+        while x <= size.width {
+            context.move(to: CGPoint(x: x, y: 0))
+            context.addLine(to: CGPoint(x: x, y: size.height))
+            x += step
+        }
+        var y: CGFloat = 0
+        while y <= size.height {
+            context.move(to: CGPoint(x: 0, y: y))
+            context.addLine(to: CGPoint(x: size.width, y: y))
+            y += step
+        }
+        context.strokePath()
+
+        return context.makeImage() ?? NSImage(size: size, flipped: false) { _ in true }.cgImage(forProposedRect: nil, context: nil, hints: nil)!
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         let pixelRadius = radius / magnification
@@ -35,24 +75,30 @@ final class MagnifierView: NSView {
             x: (magnifiedPoint.x - displayFrame.minX) * xScale,
             y: (displayFrame.maxY - magnifiedPoint.y) * yScale
         )
-        let sourceRect = CGRect(
+        var sourceRect = CGRect(
             x: pixelCenter.x - pixelRadius,
             y: pixelCenter.y - pixelRadius,
             width: pixelRadius * 2,
             height: pixelRadius * 2
         )
+        // Clamp to image bounds to prevent nil from cropping() near edges
+        sourceRect = sourceRect.intersection(CGRect(origin: .zero, size: CGSize(width: sourceImage.width, height: sourceImage.height)))
 
         NSColor.windowBackgroundColor.setFill()
         context.fill(bounds)
 
         // Draw magnified image
-        guard let crop = sourceImage.cropping(to: sourceRect) else { return }
-        context.saveGState()
-        context.translateBy(x: 0, y: bounds.height)
-        context.scaleBy(x: 1, y: -1)
-        context.interpolationQuality = .none
-        context.draw(crop, in: bounds)
-        context.restoreGState()
+        if let crop = sourceImage.cropping(to: sourceRect) {
+            context.saveGState()
+            context.translateBy(x: 0, y: bounds.height)
+            context.scaleBy(x: 1, y: -1)
+            context.interpolationQuality = .none
+            context.draw(crop, in: bounds)
+            context.restoreGState()
+        }
+
+        // Draw pre-rendered pixel grid (cached, no per-frame path stroking)
+        context.draw(gridImage, in: bounds)
 
         // Draw crosshair at center
         let center = CGPoint(x: bounds.midX, y: bounds.midY)
@@ -67,27 +113,6 @@ final class MagnifierView: NSView {
         vPath.move(to: CGPoint(x: center.x, y: center.y - crosshairLen))
         vPath.line(to: CGPoint(x: center.x, y: center.y + crosshairLen))
         vPath.stroke()
-
-        // Draw pixel grid
-        NSColor.separatorColor.withAlphaComponent(0.3).setStroke()
-        NSBezierPath.defaultLineWidth = 0.5
-        let step = magnification
-        var x: CGFloat = 0
-        while x <= bounds.width {
-            let line = NSBezierPath()
-            line.move(to: CGPoint(x: x, y: 0))
-            line.line(to: CGPoint(x: x, y: bounds.height))
-            line.stroke()
-            x += step
-        }
-        var y: CGFloat = 0
-        while y <= bounds.height {
-            let line = NSBezierPath()
-            line.move(to: CGPoint(x: 0, y: y))
-            line.line(to: CGPoint(x: bounds.width, y: y))
-            line.stroke()
-            y += step
-        }
     }
 }
 
@@ -130,6 +155,9 @@ final class ScreenshotSelectionView: NSView {
     private var draggingHandle: HandlePosition?
     private var shiftPressed = false
     private var hierarchyScrollAccumulator: CGFloat = 0
+    /// Tracks the last hovered candidate key to avoid redundant full-screen redraws
+    /// when the hover state hasn't actually changed.
+    private var previousHoveredCandidateKey: String?
 
     private let handleSize: CGFloat = 8
     private let infoBarHeight: CGFloat = 36
@@ -166,6 +194,7 @@ final class ScreenshotSelectionView: NSView {
     override var acceptsFirstResponder: Bool { true }
 
     func update(state: SelectionSessionState) {
+        previousHoveredCandidateKey = state.hoveredCandidate?.candidateKey
         self.state = state
         needsDisplay = true
     }
@@ -214,19 +243,19 @@ final class ScreenshotSelectionView: NSView {
 
         // Draw hovered candidate
         if let hovered = state.hoveredCandidate {
-            drawSelectionBorder(globalRect: hovered.globalRect, color: .systemBlue, width: 4, in: context)
+            drawSelectionBorder(globalRect: hovered.globalRect, color: .systemBlue, in: context)
         }
 
         // Draw selected regions
         for region in state.selectedRegions {
-            drawSelectionBorder(globalRect: region.globalRect, color: .systemBlue, width: 4, in: context)
+            drawSelectionBorder(globalRect: region.globalRect, color: .systemBlue, in: context)
             drawHandles(globalRect: region.globalRect, in: context)
         }
 
         // Draw drag rect
         if let start = dragStart, let current = dragCurrent {
             let rect = normalizedRect(from: start, to: current)
-            drawSelectionBorder(globalRect: rect, color: .white, width: 2, in: context)
+            drawSelectionBorder(globalRect: rect, color: .systemBlue, in: context)
             drawInfoBar(globalRect: rect, in: context)
         }
 
@@ -239,14 +268,16 @@ final class ScreenshotSelectionView: NSView {
         drawCaptureControls(in: context)
     }
 
-    private func drawSelectionBorder(globalRect: CGRect, color: NSColor, width: CGFloat, in context: CGContext) {
+    /// Single-colour hairline border. Stroked on the pixel grid so it stays crisp
+    /// at 1pt instead of blurring across two rows of pixels.
+    private func drawSelectionBorder(
+        globalRect: CGRect,
+        color: NSColor,
+        width: CGFloat = 1,
+        in context: CGContext
+    ) {
         let rect = localRect(for: globalRect).intersection(bounds)
         guard !rect.isNull else { return }
-        let outlineWidth = width + 4
-        NSColor.black.withAlphaComponent(0.75).setStroke()
-        let outline = NSBezierPath(rect: rect.insetBy(dx: outlineWidth / 2, dy: outlineWidth / 2))
-        outline.lineWidth = outlineWidth
-        outline.stroke()
         color.setStroke()
         let path = NSBezierPath(rect: rect.insetBy(dx: width / 2, dy: width / 2))
         path.lineWidth = width
@@ -408,6 +439,9 @@ final class ScreenshotSelectionView: NSView {
                 hideMagnifier()
             }
         }
+        // Must redraw unconditionally: the hover resolution is async and may
+        // resolve to nil (no AX permission, no window hit), in which case
+        // update(state:) never fires and stale pixels would remain on screen.
         needsDisplay = true
     }
 
@@ -543,6 +577,14 @@ final class ScreenshotSelectionView: NSView {
     }
 
     // MARK: - Keyboard Events
+
+    /// AppKit routes ESC here as the standard cancel action. Handling it in addition
+    /// to `keyDown` means cancellation still works when ESC arrives through the
+    /// responder chain rather than as a raw key event.
+    override func cancelOperation(_ sender: Any?) {
+        hideMagnifier()
+        onCancel()
+    }
 
     override func keyDown(with event: NSEvent) {
         switch event.keyCode {

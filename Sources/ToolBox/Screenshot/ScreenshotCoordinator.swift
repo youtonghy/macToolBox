@@ -11,6 +11,9 @@ final class ScreenshotCoordinator {
     private let bringEditorForward: () -> Void
     private let candidateResolver: ScreenshotCandidateResolver?
     private let windowCandidateResolver: ScreenshotWindowCandidateResolver?
+    /// Invoked when the hover/selection phase ends, so providers can release
+    /// per-session state (e.g. restore accessibility opt-in attributes).
+    private let onSelectionSessionEnded: () -> Void
     private let targetActivator: ScrollTargetActivating
     private let scrollControls: ScrollCaptureControlController
     private var frames: [DisplayCaptureFrame] = []
@@ -36,6 +39,7 @@ final class ScreenshotCoordinator {
         },
         candidateResolver: ScreenshotCandidateResolver? = nil,
         windowCandidateResolver: ScreenshotWindowCandidateResolver? = nil,
+        onSelectionSessionEnded: @escaping () -> Void = {},
         targetActivator: ScrollTargetActivating? = nil,
         scrollControls: ScrollCaptureControlController? = nil,
         bringEditorForward: @escaping () -> Void = {},
@@ -48,6 +52,7 @@ final class ScreenshotCoordinator {
         self.compose = compose
         self.candidateResolver = candidateResolver
         self.windowCandidateResolver = windowCandidateResolver
+        self.onSelectionSessionEnded = onSelectionSessionEnded
         self.targetActivator = targetActivator ?? WorkspaceScrollTargetActivation()
         self.scrollControls = scrollControls ?? ScrollCaptureControlController()
         self.bringEditorForward = bringEditorForward
@@ -112,11 +117,16 @@ final class ScreenshotCoordinator {
         }
     }
 
+    private func endSelectionSession() {
+        hoverTask?.cancel()
+        hoverTask = nil
+        onSelectionSessionEnded()
+    }
+
     func cancel() {
         guard state != .idle else { return }
         generation &+= 1
-        hoverTask?.cancel()
-        hoverTask = nil
+        endSelectionSession()
         scrollCoordinator?.cancel()
         scrollTask?.cancel()
         scrollTask = nil
@@ -226,8 +236,7 @@ final class ScreenshotCoordinator {
                 containingWindow: containingWindow
             )
             frames.removeAll()
-            hoverTask?.cancel()
-            hoverTask = nil
+            endSelectionSession()
             overlay.close(cancelled: false)
             state = .longCapturing
 
@@ -312,8 +321,7 @@ final class ScreenshotCoordinator {
         }
         let image = try compose(bounds, frames)
         frames.removeAll()
-        hoverTask?.cancel()
-        hoverTask = nil
+        endSelectionSession()
         overlay.close(cancelled: false)
         state = .previewing
         editorHandoff(image)
@@ -368,6 +376,7 @@ final class ScreenshotCoordinator {
 
     private func fail(_ error: ScreenshotCoordinatorError) {
         frames.removeAll()
+        endSelectionSession()
         selectionState = .empty
         state = .idle
         lastError = error
