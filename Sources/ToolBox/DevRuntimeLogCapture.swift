@@ -75,7 +75,9 @@ final class DevRuntimeLogCapture {
     ) {
         guard watchdog == nil else { return }
         let version = bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
-        guard DevRuntimeLogCapturePolicy.isEnabled(marketingVersion: version) else { return }
+        guard DevRuntimeLogCapturePolicy.isEnabled(marketingVersion: version),
+              processInfo.environment["TOOLBOX_DEV_LOGGING"] == "1"
+        else { return }
 
         do {
             let directory = try logDirectory(fileManager: fileManager)
@@ -91,6 +93,10 @@ final class DevRuntimeLogCapture {
                 executablePath: bundle.executablePath ?? "unknown",
                 date: date
             ).write(to: fileURL, atomically: true, encoding: .utf8)
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: fileURL.path
+            )
 
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/sh")

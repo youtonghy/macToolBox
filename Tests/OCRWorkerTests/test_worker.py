@@ -128,7 +128,7 @@ class WorkerContractTests(unittest.TestCase):
             components = (
                 "layout", "region", "text_det", "text_rec", "table_cls",
                 "table_wired", "table_wireless", "table_cell_wired",
-                "table_cell_wireless", "table_orientation", "formula", "chart",
+                "table_cell_wireless", "table_orientation", "formula",
                 "textline_orientation",
             )
             for component in components:
@@ -179,6 +179,7 @@ class WorkerContractTests(unittest.TestCase):
             captured["wired_table_structure_recognition_model_dir"],
             captured["wireless_table_structure_recognition_model_dir"],
         )
+        self.assertEqual(captured["use_chart_recognition"], False)
 
     def test_missing_component_does_not_fall_back_to_model_root(self):
         with tempfile.TemporaryDirectory() as directory:

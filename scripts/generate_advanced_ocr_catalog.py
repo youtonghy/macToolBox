@@ -28,13 +28,13 @@ REVISIONS = {
     "PaddlePaddle/PP-LCNet_x1_0_doc_ori": "d3b95a6dff5fe8a94f2748e12b61cb26818a0df8",
     "PaddlePaddle/PP-LCNet_x1_0_textline_ori": "cd237a44b0e359d4fe38310a416203cf7403faa5",
     "PaddlePaddle/PP-FormulaNet_plus-L": "0809597a77f735bfb35354edb632f2e6dff606f3",
-    "PaddlePaddle/PP-Chart2Table": "c3b56301c8bd63a82bcc602927e0f797d9f38096",
     "PaddlePaddle/PaddleOCR-VL": "f54aa90d389e98361cf295b7f4544bfb7452996d",
     "PaddlePaddle/PaddleOCR-VL-1.5": "426bf5b6c89670e370e71ce0c51cf2bb458b7db9",
     "PaddlePaddle/PaddleOCR-VL-1.6": "66317acc4c9fc17bd154591ce650735cd2855f3e",
 }
 
 IGNORED_FILES = {".gitattributes", "LICENSE", "README.md"}
+UNSAFE_EXTENSIONS = {".pdparams", ".pkl", ".pickle", ".joblib"}
 
 
 def fetch_json(url: str) -> dict:
@@ -64,6 +64,8 @@ def repo_files(repo: str, destination: str, source_prefix: str = "") -> list[dic
     for sibling in metadata["siblings"]:
         filename = sibling["rfilename"]
         if filename in IGNORED_FILES or filename.startswith("."):
+            continue
+        if Path(filename).suffix.lower() in UNSAFE_EXTENSIONS:
             continue
         if source_prefix:
             prefix = source_prefix.rstrip("/") + "/"
@@ -123,7 +125,6 @@ def main() -> None:
         ("PaddlePaddle/PP-LCNet_x1_0_doc_ori", "table_orientation"),
         ("PaddlePaddle/PP-LCNet_x1_0_textline_ori", "textline_orientation"),
         ("PaddlePaddle/PP-FormulaNet_plus-L", "formula"),
-        ("PaddlePaddle/PP-Chart2Table", "chart"),
     ):
         structure_files.extend(repo_files(repo, destination))
     catalog["models"].append(manifest(

@@ -56,7 +56,7 @@ struct PendingTaskOwnership<Key: Hashable> {
     }
 
     mutating func claim(_ key: Key) -> UInt64? {
-        // P2 Fix: Check for stale ownership and force-release if timed out
+        // Check for stale ownership and force-release if timed out
         if let existingOwner = owners[key],
            let timestamp = timestamps[key] {
             let now = nowProvider()
@@ -176,7 +176,7 @@ final class AudioRoutingService: ObservableObject {
         self.persistenceDelay = persistenceDelay
         self.recentlyActiveWindow = recentlyActiveWindow
         self.nowProvider = now
-        // P2 Fix: Initialize PendingTaskOwnership with timeout and nowProvider
+        // Initialize PendingTaskOwnership with timeout and nowProvider
         self.pendingVolumeTaskOwnership = PendingTaskOwnership(timeout: 5.0, nowProvider: now)
     }
 
@@ -215,6 +215,11 @@ final class AudioRoutingService: ObservableObject {
                 self.watchdogProcesses = processes
                 self.rebuildRows(processes: processes, devices: self.deviceRegistry.snapshot)
                 self.recoverTerminalRouteIfNeeded(
+                    previousProcesses: previousProcesses,
+                    currentProcesses: processes,
+                    session: session
+                )
+                self.reconcileIfOutputAppearedWithoutRoute(
                     previousProcesses: previousProcesses,
                     currentProcesses: processes,
                     session: session
@@ -324,7 +329,7 @@ final class AudioRoutingService: ObservableObject {
         }
     }
     
-    /// P2 Fix: Async stop that waits for engine shutdown to complete before returning.
+    /// Async stop that waits for engine shutdown to complete before returning.
     /// Use this when you need to ensure clean shutdown before starting a new service.
     func stopAndWait() async {
         stop()
@@ -394,7 +399,7 @@ final class AudioRoutingService: ObservableObject {
     /// Throttle slider traffic without debounce starvation: apply the newest value at
     /// most once per display frame, then immediately schedule another pass if it changed.
     private func scheduleVolumeApplication(bundleID: String, session: UInt64) {
-        // P1 Fix: If audio server is restarting, defer the volume change instead of silently dropping it
+        // If audio server is restarting, defer the volume change instead of silently dropping it
         guard audioServerRestartSession == nil else {
             deferredVolumeChanges[bundleID] = rules.first(where: { $0.bundleID == bundleID })?.volumePercent ?? 100
             return
@@ -506,7 +511,7 @@ final class AudioRoutingService: ObservableObject {
             deviceConfigurationGeneration: deviceConfigurationGeneration
         )
         
-        // P1 Fix: Clean up stale terminalRouteFailures for routes no longer in compilation
+        // Clean up stale terminalRouteFailures for routes no longer in compilation
         let currentRouteIDs = Set(compilation.plans.map(\.id))
         terminalRouteFailures = terminalRouteFailures.filter { routeID, _ in
             currentRouteIDs.contains(routeID)
@@ -719,15 +724,47 @@ final class AudioRoutingService: ObservableObject {
             == Set(updated.map { AudioRoutingProcessIdentity(objectID: $0.objectID, bundleID: $0.bundleID) })
     }
 
+    private func reconcileIfOutputAppearedWithoutRoute(
+        previousProcesses: [AudioProcessSnapshot],
+        currentProcesses: [AudioProcessSnapshot],
+        session: UInt64
+    ) {
+        guard !previousProcesses.isEmpty else { return }
+        let previousByIdentity = Dictionary(
+            uniqueKeysWithValues: previousProcesses.map {
+                (AudioRoutingProcessIdentity(objectID: $0.objectID, bundleID: $0.bundleID), $0)
+            }
+        )
+        let outputAppearedBundleIDs = Set(currentProcesses.compactMap { process -> String? in
+            guard process.isRunningOutput else { return nil }
+            let identity = AudioRoutingProcessIdentity(
+                objectID: process.objectID,
+                bundleID: process.bundleID
+            )
+            return previousByIdentity[identity]?.isRunningOutput != true
+                ? process.bundleID
+                : nil
+        })
+        guard !outputAppearedBundleIDs.isEmpty else { return }
+        let routedBundleIDs = Set(appliedPlans.flatMap { $0.sources.map(\.bundleID) })
+        guard outputAppearedBundleIDs.contains(where: { !routedBundleIDs.contains($0) }) else { return }
+        Task { @MainActor [weak self] in
+            guard let self, self.isCurrentSession(session) else { return }
+            await self.reconcile(
+                processes: self.processRegistry.snapshot,
+                devices: self.deviceRegistry.snapshot,
+                defaultOutputUID: self.deviceRegistry.defaultOutputUID,
+                session: session
+            )
+        }
+    }
+
     private func recoverTerminalRouteIfNeeded(
         previousProcesses: [AudioProcessSnapshot],
         currentProcesses: [AudioProcessSnapshot],
         session: UInt64
     ) {
-        guard !terminalRouteFailures.isEmpty,
-              Self.haveSameRoutingProcesses(previousProcesses, currentProcesses) else {
-            return
-        }
+        guard !terminalRouteFailures.isEmpty else { return }
         let previousByIdentity = Dictionary(
             uniqueKeysWithValues: previousProcesses.map {
                 (AudioRoutingProcessIdentity(objectID: $0.objectID, bundleID: $0.bundleID), $0)
@@ -756,7 +793,7 @@ final class AudioRoutingService: ObservableObject {
             deviceConfigurationGeneration: deviceConfigurationGeneration
         )
         
-        // P1 Fix: Check cooldown period and retry count before attempting recovery
+        // Check cooldown period and retry count before attempting recovery
         let now = nowProvider()
         let shouldRecover = recoveryCompilation.plans.contains { plan in
             guard let failure = terminalRouteFailures[plan.id] else { return false }
@@ -961,7 +998,7 @@ final class AudioRoutingService: ObservableObject {
         if audioServerRestartSession == session {
             audioServerRestartSession = nil
             
-            // P1 Fix: Apply deferred volume changes that were blocked during restart
+            // Apply deferred volume changes that were blocked during restart
             if !deferredVolumeChanges.isEmpty {
                 let deferredChanges = deferredVolumeChanges
                 deferredVolumeChanges.removeAll()
@@ -1022,17 +1059,11 @@ final class AudioRoutingService: ObservableObject {
                 producingOutputBundleIDs.contains($0.bundleID)
             }
             // Only count polls that could indicate a broken route. A paused app stops
-            // capture frames indefinitely; counting those would saturate the budget and
-            // trip a false stall on the first poll after playback resumes.
+            // capture frames but should keep advancing output frames while the IOProc is
+            // alive; a stopped output counter is a dead route regardless of HAL activity.
             let didStall = snapshot.map { current in
                 previous.map { previous in
-                    // P0 Fix: Output frame stall should also check isProducingOutput to avoid
-                    // false positives during route startup when buffers are still warming up.
-                    if current.outputFrameCount == previous.outputFrameCount {
-                        return isProducingOutput
-                    }
-                    return isProducingOutput
-                        && current.captureFrameCount == previous.captureFrameCount
+                    current.outputFrameCount == previous.outputFrameCount
                 } ?? false
             } ?? false
             stalledPollCounts[plan.id] = didStall ? (stalledPollCounts[plan.id, default: 0] + 1) : 0
@@ -1064,7 +1095,7 @@ final class AudioRoutingService: ObservableObject {
             switch report.status {
             case .applied, .unchanged:
                 appliedPlans = report.plans
-                // P1 Fix: Record failures with timestamp and retry count
+                // Record failures with timestamp and retry count
                 let now = nowProvider()
                 for (routeID, message) in failedRouteMessages {
                     if let existing = terminalRouteFailures[routeID] {
@@ -1188,7 +1219,7 @@ final class AudioRoutingService: ObservableObject {
                     resolutions: watchdogCompilation.resolutions
                 )
             }
-            // P0 Fix: Reset diagnostics baseline after gain update to prevent watchdog
+            // Reset diagnostics baseline after gain update to prevent watchdog
             // from comparing new snapshots against stale pre-update baseline.
             for plan in report.plans {
                 previousDiagnostics[plan.id] = nil

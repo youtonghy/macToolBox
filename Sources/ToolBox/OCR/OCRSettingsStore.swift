@@ -133,6 +133,7 @@ struct OCRSettingsStore {
             let envelope = try decoder.decode(OCRSettingsVersionEnvelope.self, from: data)
             guard envelope.schemaVersion == 1 || envelope.schemaVersion == 2 else {
                 logger.error("Unknown OCR settings schema \(envelope.schemaVersion, privacy: .public)")
+                CorruptDefaultsBackup.backup(defaults: defaults, key: key)
                 return OCRSettingsLoadResult(
                     settings: .defaults,
                     issue: .unknownSchema(envelope.schemaVersion)
@@ -144,6 +145,7 @@ struct OCRSettingsStore {
             return OCRSettingsLoadResult(settings: settings, issue: nil)
         } catch {
             logger.error("Corrupt OCR settings")
+            CorruptDefaultsBackup.backup(defaults: defaults, key: key)
             return OCRSettingsLoadResult(settings: .defaults, issue: .corruptData)
         }
     }

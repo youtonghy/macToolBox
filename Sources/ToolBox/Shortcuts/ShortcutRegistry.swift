@@ -151,8 +151,9 @@ final class ShortcutRegistry {
         }
         try validate(rules: rules)
 
-        callbackContext.onEvent = { [unowned self] event in
-            handle(event: event)
+        callbackContext.onEvent = { [weak self] event in
+            guard let self else { return OSStatus(eventNotHandledErr) }
+            return self.handle(event: event)
         }
 
         let retainedContext = Unmanaged.passRetained(callbackContext)

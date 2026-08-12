@@ -105,6 +105,7 @@ actor OCRFeatureService: OCRFeatureServing {
         self.catalogLoader = catalogLoader
         self.catalogOverride = catalogOverride
         store = OCRModelStore(rootDirectory: rootDirectory)
+        try? store.removeAbandonedStagingDirectories(maximumAge: 60 * 60)
         downloadManager = OCRModelDownloadManager(store: store, downloader: downloader)
         self.worker = worker ?? (try? OCRWorkerRunning(locator: workerLocator))
     }

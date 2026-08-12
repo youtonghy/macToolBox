@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import ImageIO
 
@@ -96,13 +97,7 @@ actor OCRWorkerRunning {
         process.executableURL = executable.executableURL
         process.arguments = executable.arguments
         process.currentDirectoryURL = sessionDirectory
-        var environment = ProcessInfo.processInfo.environment
-        environment["PADDLE_PDX_CACHE_HOME"] = sessionDirectory
-            .appendingPathComponent("paddlex-cache", isDirectory: true).path
-        environment["HF_HUB_OFFLINE"] = "1"
-        environment["TRANSFORMERS_OFFLINE"] = "1"
-        environment["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
-        process.environment = environment
+        process.environment = Self.sanitizedEnvironment(sessionDirectory: sessionDirectory)
         process.standardInput = input
         process.standardOutput = output
         process.standardError = error
@@ -120,8 +115,7 @@ actor OCRWorkerRunning {
         }
 
         let requestData = try JSONEncoder().encode(request) + Data([0x0A])
-        input.fileHandleForWriting.write(requestData)
-        input.fileHandleForWriting.closeFile()
+        try input.fileHandleForWriting.write(contentsOf: requestData)
 
         let stdoutTask = Task.detached(priority: .userInitiated) {
             try Self.readLimited(output.fileHandleForReading)
@@ -144,6 +138,13 @@ actor OCRWorkerRunning {
                 }
                 group.addTask {
                     try await Task.sleep(for: self.timeout)
+                    Self.terminateProcess(process)
+                    Task {
+                        try? await Task.sleep(for: .seconds(5))
+                        Self.forceTerminate(process)
+                    }
+                    try? output.fileHandleForReading.close()
+                    try? error.fileHandleForReading.close()
                     throw OCRWorkerClientError.timedOut
                 }
                 guard let first = try await group.next() else {
@@ -236,6 +237,32 @@ actor OCRWorkerRunning {
 
     private func terminate(_ process: Process) {
         if process.isRunning { process.terminate() }
+    }
+
+    private static func terminateProcess(_ process: Process) {
+        if process.isRunning { process.terminate() }
+    }
+
+    private static func forceTerminate(_ process: Process) {
+        guard process.isRunning else { return }
+        kill(process.processIdentifier, SIGKILL)
+    }
+
+    private static func sanitizedEnvironment(sessionDirectory: URL) -> [String: String] {
+        let cacheDirectory = sessionDirectory
+            .appendingPathComponent("paddlex-cache", isDirectory: true)
+        return [
+            "PATH": "/usr/bin:/bin",
+            "HOME": NSHomeDirectory(),
+            "TMPDIR": sessionDirectory.path,
+            "LANG": "en_US.UTF-8",
+            "PADDLE_PDX_CACHE_HOME": cacheDirectory.path,
+            "HF_HUB_OFFLINE": "1",
+            "TRANSFORMERS_OFFLINE": "1",
+            "PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK": "True",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "PYTHONNOUSERSITE": "1",
+        ]
     }
 
     private static func readLimited(_ handle: FileHandle) throws -> Data {

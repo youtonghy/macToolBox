@@ -49,6 +49,7 @@ struct AudioRuleStore {
             return AudioRuleLoadResult(rules: canonicalize(document.rules), issue: nil)
         } catch {
             logger.error("Corrupt audio routing rules")
+            CorruptDefaultsBackup.backup(defaults: defaults, key: key)
             return AudioRuleLoadResult(rules: [], issue: .corruptData)
         }
     }

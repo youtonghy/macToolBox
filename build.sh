@@ -70,8 +70,18 @@ elif [ -n "$REQUESTED_IDENTITY" ] && [ "$REQUESTED_IDENTITY" != "-" ]; then
   fi
 elif [ "$REQUESTED_IDENTITY" != "-" ]; then
   SIGN_IDENTITY="$(printf '%s\n' "$IDENTITIES" \
-    | sed -n 's/^[[:space:]]*[0-9]*) \([[:xdigit:]]\{40\}\) "Apple Development:.*$/\1/p' \
+    | sed -n 's/^[[:space:]]*[0-9]*) \([[:xdigit:]]\{40\}\) "Developer ID Application:.*$/\1/p' \
     | head -1)"
+  if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="$(printf '%s\n' "$IDENTITIES" \
+      | sed -n 's/^[[:space:]]*[0-9]*) \([[:xdigit:]]\{40\}\) "Apple Development:.*$/\1/p' \
+      | head -1)"
+  fi
+  if [ -z "$SIGN_IDENTITY" ]; then
+    SIGN_IDENTITY="$(printf '%s\n' "$IDENTITIES" \
+      | sed -n 's/^[[:space:]]*[0-9]*) \([[:xdigit:]]\{40\}\) "youtonghy"$/\1/p' \
+      | head -1)"
+  fi
 fi
 
 if [ -n "$SIGN_IDENTITY" ]; then
@@ -111,6 +121,9 @@ else
   echo "warning: OCR worker bootstrap script is missing; advanced OCR will be unavailable" >&2
 fi
 
+# pytest and local Python runs may create bytecode in the bundled source folder.
+find "$(pwd)/Sources/ToolBoxOCRWorker" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+
 echo "==> xcodegen generate"
 xcodegen generate
 
@@ -140,6 +153,10 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
+if [ "$SIGN_IDENTITY" != "-" ] && [ -x ./scripts/sign_nested_runtime.sh ]; then
+  ./scripts/sign_nested_runtime.sh "$APP" "$SIGN_IDENTITY"
+fi
+
 BUILT_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$BUILT_BUNDLE_ID" != "$BUNDLE_ID" ]; then
   echo "error: unexpected bundle identifier '$BUILT_BUNDLE_ID' in $APP" >&2
@@ -147,6 +164,11 @@ if [ "$BUILT_BUNDLE_ID" != "$BUNDLE_ID" ]; then
 fi
 
 codesign --verify --deep --strict "$APP"
+
+if [ "${SKIP_INSTALL:-0}" = "1" ]; then
+  echo "==> SKIP_INSTALL=1; leaving app at $APP"
+  exit 0
+fi
 
 # Stop the running app only after a valid replacement is ready to install.
 if pgrep -x ToolBox >/dev/null 2>&1; then
@@ -159,16 +181,54 @@ if pgrep -x ToolBox >/dev/null 2>&1; then
   pkill -9 -x ToolBox 2>/dev/null || true
 fi
 
-# Preserve the destination bundle directory itself while replacing its contents.
-mkdir -p "$(dirname "$INSTALL_APP_PATH")" "$INSTALL_APP_PATH"
-/usr/bin/rsync -aE --delete "$APP/" "$INSTALL_APP_PATH/"
+if [ -L "$INSTALL_APP_PATH" ]; then
+  echo "error: refusing to replace symlink destination: $INSTALL_APP_PATH" >&2
+  exit 1
+fi
+
+mkdir -p "$(dirname "$INSTALL_APP_PATH")"
+STAGED_APP="$INSTALL_APP_PATH.new.$$"
+OLD_APP="$INSTALL_APP_PATH.old.$$"
+rm -rf "$STAGED_APP" "$OLD_APP"
+cp -R "$APP" "$STAGED_APP"
+
+INSTALLED_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$STAGED_APP/Contents/Info.plist" 2>/dev/null || true)"
+if [ "$INSTALLED_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+  echo "error: staged bundle identifier verification failed: $STAGED_APP" >&2
+  rm -rf "$STAGED_APP"
+  exit 1
+fi
+codesign --verify --deep --strict "$STAGED_APP"
+
+if [ -d "$INSTALL_APP_PATH" ]; then
+  mv "$INSTALL_APP_PATH" "$OLD_APP"
+fi
+if ! mv "$STAGED_APP" "$INSTALL_APP_PATH"; then
+  if [ -d "$OLD_APP" ]; then
+    mv "$OLD_APP" "$INSTALL_APP_PATH"
+  fi
+  echo "error: failed to install staged app at $INSTALL_APP_PATH" >&2
+  exit 1
+fi
 
 INSTALLED_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$INSTALL_APP_PATH/Contents/Info.plist" 2>/dev/null || true)"
 if [ "$INSTALLED_BUNDLE_ID" != "$BUNDLE_ID" ]; then
+  if [ -d "$OLD_APP" ]; then
+    rm -rf "$INSTALL_APP_PATH"
+    mv "$OLD_APP" "$INSTALL_APP_PATH"
+  fi
   echo "error: installed bundle identifier verification failed: $INSTALL_APP_PATH" >&2
   exit 1
 fi
-codesign --verify --deep --strict "$INSTALL_APP_PATH"
+codesign --verify --deep --strict "$INSTALL_APP_PATH" || {
+  if [ -d "$OLD_APP" ]; then
+    rm -rf "$INSTALL_APP_PATH"
+    mv "$OLD_APP" "$INSTALL_APP_PATH"
+  fi
+  echo "error: installed bundle verification failed: $INSTALL_APP_PATH" >&2
+  exit 1
+}
+rm -rf "$OLD_APP"
 
 echo "==> installed in place: $INSTALL_APP_PATH"
 if [ "$SIGN_IDENTITY" != "-" ]; then

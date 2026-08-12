@@ -25,8 +25,8 @@ jobs:
 
       - name: Validate version
         run: |
-          if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
-            echo "Invalid version: $VERSION" >&2
+          if [[ ! "$VERSION" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || [[ "$VERSION" == DEV* ]] || [[ "$VERSION" == dev* ]]; then
+            echo "Invalid or development version: $VERSION" >&2
             exit 1
           fi
           # Prefer numeric-ish build number for CFBundleVersion; fall back to run id.
@@ -49,8 +49,29 @@ jobs:
           sudo xcode-select -s "$XCODE_APP"
           xcodebuild -version
 
-      - name: Install XcodeGen
-        run: brew install xcodegen
+      - name: Install XcodeGen and uv
+        run: |
+          brew install xcodegen
+          brew install uv
+
+      - name: Import local signing certificate
+        env:
+          YOUTONGHY_P12: ${{ secrets.YOUTONGHY_P12 }}
+          YOUTONGHY_P12_PASSWORD: ${{ secrets.YOUTONGHY_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$YOUTONGHY_P12" ]] || { echo "missing YOUTONGHY_P12 secret for youtonghy signing" >&2; exit 1; }
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          security create-keychain -p release "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          echo "$YOUTONGHY_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -P "$YOUTONGHY_P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -s -k release "$KEYCHAIN" >/dev/null
+          security list-keychains -d user -s "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+
+      - name: Bootstrap OCR worker runtime
+        run: ./scripts/bootstrap_ocr_worker_runtime.sh --bootstrap
 
       - name: Verify tests and audio routing build gates
         run: ./scripts/verify-audio-routing-build.sh
@@ -58,12 +79,15 @@ jobs:
       - name: Build app
         env:
           OPEN: "0"
+          SKIP_INSTALL: "1"
+          CODE_SIGN_IDENTITY: "youtonghy"
         run: ./build.sh
 
       - name: Package app + dmg
         env:
           APP_PATH: build/Build/Products/Release/ToolBox.app
           OUT_DIR: dist
+          REQUIRE_NOTARIZED: "0"
         run: ./scripts/package-release.sh
 
       - name: Collect commits since last release
@@ -99,6 +123,15 @@ jobs:
             echo
           } | tee release-notes.md
 
+      - name: Generate SBOM
+        run: ./scripts/generate_sbom.sh "$GITHUB_WORKSPACE/sbom.cdx.json"
+
+      - name: Clean temporary keychain
+        if: always()
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+
       - name: Create draft release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -124,4 +157,5 @@ jobs:
             --title "$TITLE" \
             --notes-file release-notes.md \
             "dist/ToolBox-${VERSION}.app.zip" \
-            "dist/ToolBox-${VERSION}.dmg"
+            "dist/ToolBox-${VERSION}.dmg" \
+            "sbom.cdx.json"

@@ -401,54 +401,6 @@
           "relativePath": "formula/inference.yml",
           "sha256": "afc92a2737268da0499c37b0b6741da268c369fd7424667fcfeb8fa6c7b22d30",
           "url": "https://huggingface.co/PaddlePaddle/PP-FormulaNet_plus-L/resolve/0809597a77f735bfb35354edb632f2e6dff606f3/inference.yml"
-        },
-        {
-          "byteCount": 183,
-          "relativePath": "chart/added_tokens.json",
-          "sha256": "4e0e1abe8efbae00a41ffb6275402dd0f9796f04398b4d129ad35310f76cb6cc",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/added_tokens.json"
-        },
-        {
-          "byteCount": 944,
-          "relativePath": "chart/config.json",
-          "sha256": "e31c3b52a4616109b5e27d79616b93dd049d2c7efc6db6f45b115bd514620d22",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/config.json"
-        },
-        {
-          "byteCount": 81,
-          "relativePath": "chart/generation_config.json",
-          "sha256": "7dbce14f9095147dabb7968015be1347890fbc1e078d64945b561ef52a6e5dc4",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/generation_config.json"
-        },
-        {
-          "byteCount": 49,
-          "relativePath": "chart/inference.yml",
-          "sha256": "cd8c731994fec64fe4a50a981a6e4e8f5f5ba4f4ce7c6896ed408f8b5460104c",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/inference.yml"
-        },
-        {
-          "byteCount": 1432119141,
-          "relativePath": "chart/model_state.pdparams",
-          "sha256": "84a6990436ddd55e03acdb44048ff6484aa53619f41412eda2e277df79ea2de6",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/model_state.pdparams"
-        },
-        {
-          "byteCount": 2561218,
-          "relativePath": "chart/qwen.tiktoken",
-          "sha256": "b2b1b8dfb5cc5f024bafc373121c6aba3f66f9a5a0269e243470a1de16a33186",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/qwen.tiktoken"
-        },
-        {
-          "byteCount": 149,
-          "relativePath": "chart/special_tokens_map.json",
-          "sha256": "337f1a03344485ec7ea2acd6f7021567feab077fd81f96b72423fcd3f8f5fc09",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/special_tokens_map.json"
-        },
-        {
-          "byteCount": 1920,
-          "relativePath": "chart/tokenizer_config.json",
-          "sha256": "c167bad3fb717234222ea0fc401d797ca4f03c366f18c19c3026ed77777d0129",
-          "url": "https://huggingface.co/PaddlePaddle/PP-Chart2Table/resolve/c3b56301c8bd63a82bcc602927e0f797d9f38096/tokenizer_config.json"
         }
       ],
       "id": "ppstructurev3-default",

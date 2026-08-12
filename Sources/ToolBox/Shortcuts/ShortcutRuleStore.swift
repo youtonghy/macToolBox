@@ -45,6 +45,7 @@ struct ShortcutRuleStore {
             return ShortcutRuleLoadResult(rules: document.rules, issue: nil)
         } catch {
             logger.error("Corrupt shortcut rules")
+            CorruptDefaultsBackup.backup(defaults: defaults, key: key)
             return ShortcutRuleLoadResult(rules: ShortcutRule.defaults, issue: .corruptData)
         }
     }

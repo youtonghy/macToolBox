@@ -57,12 +57,33 @@ grep -q -- '--hash=sha256:' "$REQUIREMENTS_LOCK" || {
   exit 1
 }
 
-python3 -m py_compile "$WORKER_SOURCE/toolbox_ocr_worker.py" "$WORKER_SOURCE/projections.py"
+PYTHONPYCACHEPREFIX="$(mktemp -d "${TMPDIR:-/tmp}/toolbox-worker-pycache.XXXXXX")"
+PYTHONPYCACHEPREFIX="$PYTHONPYCACHEPREFIX" python3 -m py_compile "$WORKER_SOURCE/toolbox_ocr_worker.py" "$WORKER_SOURCE/projections.py"
+rm -rf "$PYTHONPYCACHEPREFIX"
 mkdir -p "$RUNTIME_DIR/bin"
+
+verify_runtime_manifest() {
+  local runtime="$1"
+  local manifest="$runtime/runtime.manifest.sha256"
+  if [[ ! -f "$manifest" ]]; then
+    echo "error: OCR runtime content manifest is missing: $manifest" >&2
+    return 1
+  fi
+  (cd "$runtime" \
+    && find . -type f ! -name runtime.manifest.sha256 -print0 \
+      | sort -z \
+      | xargs -0 shasum -a 256 \
+      | diff - "$manifest" >/dev/null)
+}
 
 if [[ "$mode" == "--verify-only" ]]; then
   if [[ -x "$RUNTIME_DIR/bin/python3" ]]; then
-    PADDLE_PDX_CACHE_HOME="$RUNTIME_DIR/.verify-cache" \
+    if ! verify_runtime_manifest "$RUNTIME_DIR"; then
+      echo "error: OCR runtime content changed; run --bootstrap to rebuild it" >&2
+      exit 1
+    fi
+    PYTHONDONTWRITEBYTECODE=1 \
+      PADDLE_PDX_CACHE_HOME="$RUNTIME_DIR/.verify-cache" \
       HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
       "$RUNTIME_DIR/bin/python3" - <<'PY'
 import paddle
@@ -103,7 +124,8 @@ mkdir -p "$staging_dir/runtime/bin"
 cp -L "$staging_dir/runtime/bin/python3.11" "$staging_dir/runtime/bin/python3.regular"
 mv -f "$staging_dir/runtime/bin/python3.regular" "$staging_dir/runtime/bin/python3"
 chmod 755 "$staging_dir/runtime/bin/python3"
-PADDLE_PDX_CACHE_HOME="$staging_dir/runtime/.verify-cache" \
+PYTHONDONTWRITEBYTECODE=1 \
+  PADDLE_PDX_CACHE_HOME="$staging_dir/runtime/.verify-cache" \
   HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 \
   "$staging_dir/runtime/bin/python3" - <<'PY'
 import paddle
@@ -112,7 +134,18 @@ from PIL import Image
 from paddleocr import PPStructureV3, PaddleOCRVL
 PY
 rm -rf "$staging_dir/runtime/.verify-cache"
-rm -rf "$RUNTIME_DIR"
-mv "$staging_dir/runtime" "$RUNTIME_DIR"
+./scripts/prune_ocr_worker_runtime.sh "$staging_dir/runtime"
+backup_dir="$RUNTIME_DIR.old.$$"
+if [ -e "$RUNTIME_DIR" ] || [ -L "$RUNTIME_DIR" ]; then
+  rm -rf "$backup_dir"
+  mv "$RUNTIME_DIR" "$backup_dir"
+fi
+if ! mv "$staging_dir/runtime" "$RUNTIME_DIR"; then
+  if [ -e "$backup_dir" ]; then
+    mv "$backup_dir" "$RUNTIME_DIR"
+  fi
+  exit 1
+fi
+rm -rf "$backup_dir"
 rm -rf "$staging_dir"
 echo "OCR worker runtime bootstrapped at $RUNTIME_DIR"

@@ -94,12 +94,9 @@ test_locks_identity_and_updates_installed_bundle_in_place() {
   local project="$fixture/project"
   local install_app="$fixture/install/ToolBox.app"
   local identity_file="$fixture/state/signing-identity"
-  local first_inode
-  local second_inode
 
   mkdir -p "$install_app/Contents"
   printf 'stale\n' >"$install_app/Contents/stale.txt"
-  first_inode="$(stat -f '%i' "$install_app")"
 
   PATH="$fixture/bin:$PATH" \
     MOCK_XCODEBUILD_ARGS="$fixture/xcodebuild.args" \
@@ -108,9 +105,8 @@ test_locks_identity_and_updates_installed_bundle_in_place() {
     INSTALL_APP_PATH="$install_app" \
     "$project/build.sh" >"$fixture/output.log" 2>&1
 
-  second_inode="$(stat -f '%i' "$install_app")"
-  [ "$first_inode" = "$second_inode" ] || fail "installed app directory was replaced"
   [ ! -e "$install_app/Contents/stale.txt" ] || fail "stale installed content was not removed"
+  [ -z "$(find "$fixture/install" -maxdepth 1 -name 'ToolBox.app.old.*' -print -quit)" ] || fail "old bundle was not cleaned up"
   [ "$(cat "$install_app/Contents/MacOS/ToolBox")" = "new-build" ] || fail "new app was not installed"
   [ "$(cat "$identity_file")" = "ABCDEF0123456789ABCDEF0123456789ABCDEF01" ] || fail "signing identity was not locked"
   [ "$(cat "$fixture/open.path")" = "$install_app" ] || fail "script did not open the installed app"

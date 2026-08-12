@@ -522,10 +522,19 @@ final class AudioRoutingServiceTests: XCTestCase {
 
     @MainActor
     func testServiceShowsRouteWithAudioFramesWhenHALOutputFlagIsOff() async throws {
-        let harness = try makeServiceHarness(volumePercent: 200, isRunningOutput: false)
+        let harness = try makeServiceHarness(volumePercent: 200, isRunningOutput: true)
         harness.service.start()
         await harness.engine.waitUntilReconcileCount(1)
-        await Task.yield()
+        try XCTUnwrap(harness.processRegistry).setSnapshot([
+            AudioProcessSnapshot(
+                objectID: 42,
+                pid: 1234,
+                bundleID: "us.zoom.xos",
+                name: "zoom.us",
+                isRunningOutput: false
+            )
+        ])
+        try await Task.sleep(for: .milliseconds(20))
 
         XCTAssertEqual(try XCTUnwrap(harness.service.rows.first).state, .starting)
 
@@ -1328,7 +1337,7 @@ final class AudioRoutingServiceTests: XCTestCase {
     }
 
     @MainActor
-    func testVolumeChangeCreatesRouteImmediatelyForExistingSilentProcess() async throws {
+    func testVolumeChangeWaitsForExistingSilentProcessToProduceOutput() async throws {
         let harness = try makeServiceHarness(volumePercent: 100, isRunningOutput: false)
         harness.service.start()
         await harness.engine.waitUntilReconcileCount(1)
@@ -1337,9 +1346,25 @@ final class AudioRoutingServiceTests: XCTestCase {
         await harness.engine.waitUntilReconcileCount(2)
 
         let plans = await harness.engine.currentPlans()
-        XCTAssertEqual(plans.first?.sources.first?.linearGain, 2)
-        XCTAssertEqual(try XCTUnwrap(harness.service.rows.first).state, .starting)
+        XCTAssertTrue(plans.isEmpty)
+        XCTAssertEqual(try XCTUnwrap(harness.service.rows.first).state, .waitingForProcess)
         XCTAssertEqual(harness.service.playingRows.map(\.bundleID), ["us.zoom.xos"])
+
+        try XCTUnwrap(harness.processRegistry).setSnapshot([
+            AudioProcessSnapshot(
+                objectID: 42,
+                pid: 1234,
+                bundleID: "us.zoom.xos",
+                name: "zoom.us",
+                isRunningOutput: true
+            )
+        ])
+        try await Task.sleep(for: .milliseconds(30))
+        await harness.engine.waitUntilReconcileCount(3)
+
+        let restoredPlans = await harness.engine.currentPlans()
+        XCTAssertEqual(restoredPlans.first?.sources.first?.linearGain, 2)
+        XCTAssertEqual(try XCTUnwrap(harness.service.rows.first).state, .starting)
         _ = await harness.service.shutdown()
         harness.cleanup()
     }

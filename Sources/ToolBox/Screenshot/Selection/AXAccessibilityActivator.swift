@@ -31,6 +31,7 @@ struct AXActivationRecord: Equatable, Sendable {
 final class AXAccessibilityActivator: @unchecked Sendable {
     private let lock = NSLock()
     private var records: [pid_t: AXActivationRecord] = [:]
+    private var restoring = false
     private let setAttribute: @Sendable (AXUIElement, String, Bool) -> Bool
     private let readAttribute: @Sendable (AXUIElement, String) -> Bool?
 
@@ -84,27 +85,46 @@ final class AXAccessibilityActivator: @unchecked Sendable {
         }
 
         lock.lock()
-        records[pid] = record
+        let restoreLate = restoring
+        if !restoreLate {
+            records[pid] = record
+        }
         lock.unlock()
+        if restoreLate {
+            restore(record, application: application)
+        }
         return record
     }
 
     /// Restore every attribute this process turned on, and forget all bookkeeping.
     /// Safe to call more than once; the second call is a no-op.
     func restoreAll(applicationForPID: (pid_t) -> AXUIElement?) {
-        lock.lock()
-        let pending = records
-        records.removeAll()
-        lock.unlock()
+        while true {
+            lock.lock()
+            restoring = true
+            let pending = records
+            records.removeAll()
+            lock.unlock()
 
-        for (pid, record) in pending where !record.isEmpty {
-            guard let application = applicationForPID(pid) else { continue }
-            if record.setManualAccessibility {
-                _ = setAttribute(application, Self.manualAccessibilityAttribute, false)
+            for (pid, record) in pending where !record.isEmpty {
+                guard let application = applicationForPID(pid) else { continue }
+                restore(record, application: application)
             }
-            if record.setEnhancedUserInterface {
-                _ = setAttribute(application, Self.enhancedUserInterfaceAttribute, false)
-            }
+
+            lock.lock()
+            let hasNewRecords = !records.isEmpty
+            restoring = false
+            lock.unlock()
+            if !hasNewRecords { return }
+        }
+    }
+
+    private func restore(_ record: AXActivationRecord, application: AXUIElement) {
+        if record.setManualAccessibility {
+            _ = setAttribute(application, Self.manualAccessibilityAttribute, false)
+        }
+        if record.setEnhancedUserInterface {
+            _ = setAttribute(application, Self.enhancedUserInterfaceAttribute, false)
         }
     }
 

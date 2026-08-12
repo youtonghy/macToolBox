@@ -120,8 +120,9 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
 
     private func colors(in image: CGImage) throws -> [TestColor] {
         guard let data = image.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else { throw TestError.image }
-        return (0..<image.height).map { row in
-            let offset = row * image.bytesPerRow
+        return (0..<image.height).map { visualRow in
+            let providerRow = image.height - 1 - visualRow
+            let offset = providerRow * image.bytesPerRow
             return TestColor(r: bytes[offset], g: bytes[offset + 1], b: bytes[offset + 2], luma: 0)
         }
     }

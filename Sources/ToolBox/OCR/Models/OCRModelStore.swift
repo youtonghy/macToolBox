@@ -146,13 +146,21 @@ final class OCRModelStore: @unchecked Sendable {
         }
     }
 
-    func removeAbandonedStagingDirectories() throws {
+    func removeAbandonedStagingDirectories(maximumAge: TimeInterval? = nil) throws {
         guard fileManager.fileExists(atPath: rootDirectory.path) else { return }
+        let now = Date()
         for item in try fileManager.contentsOfDirectory(
             at: rootDirectory,
-            includingPropertiesForKeys: [.isDirectoryKey],
+            includingPropertiesForKeys: [.isDirectoryKey, .contentModificationDateKey],
             options: []
         ) where item.lastPathComponent.hasPrefix(".staging-") {
+            if let maximumAge {
+                let values = try item.resourceValues(forKeys: [.contentModificationDateKey])
+                if let modified = values.contentModificationDate,
+                   now.timeIntervalSince(modified) < maximumAge {
+                    continue
+                }
+            }
             try fileManager.removeItem(at: item)
         }
     }

@@ -68,12 +68,14 @@ struct BrightnessScheduleStore {
             )
         } catch is DecodingError {
             logger.error("Corrupt brightness schedule payload")
+            CorruptDefaultsBackup.backup(defaults: defaults, key: key)
             return BrightnessScheduleLoadResult(
                 configuration: .disabledDefault,
                 issue: .corruptData
             )
         } catch {
             logger.error("Invalid brightness schedule: \(error.localizedDescription, privacy: .public)")
+            CorruptDefaultsBackup.backup(defaults: defaults, key: key)
             return BrightnessScheduleLoadResult(
                 configuration: .disabledDefault,
                 issue: .invalidSchedule

@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import OSLog
 
 /// F1 — 擦屏幕: turns every display fully black for 60s with a centered countdown.
 /// Exit is routed by the app-wide shortcut registry. The overlay fails closed if that
@@ -14,6 +15,8 @@ final class ScreenWipeCoordinator {
     private var remaining = 0
     private var onDone: (() -> Void)?
 
+    private let logger = Logger(subsystem: "ToolBox", category: "ScreenWipe")
+
     private var screenObserver: NSObjectProtocol?
     /// Accessory apps often fail to raise secondary-display overlays; bump to `.regular` while active.
     private var previousActivationPolicy: NSApplication.ActivationPolicy?
@@ -25,7 +28,7 @@ final class ScreenWipeCoordinator {
     ) -> Bool {
         guard blackWindows.isEmpty else { return true }
         guard exitShortcutAvailable else {
-            NSLog("[ToolBox] screen-wipe exit shortcut is unavailable")
+            logger.error("Screen wipe exit shortcut is unavailable")
             return false
         }
 
@@ -68,17 +71,13 @@ final class ScreenWipeCoordinator {
 
     private func createBlackWindows() {
         let screens = NSScreen.screens
-        NSLog("[ToolBox] screen-wipe: \(screens.count) display(s), separateSpaces=\(NSScreen.screensHaveSeparateSpaces)")
+        logger.notice("Screen wipe started on \(screens.count) display(s)")
 
         // Menu-bar accessory apps can fail to bring secondary-display windows forward.
         // Temporarily become a regular app and force activation so every screen overlay shows.
         promoteForOverlay()
 
-        for (index, screen) in screens.enumerated() {
-            NSLog(
-                "[ToolBox] screen-wipe display[\(index)]: name=\(screen.localizedName), frame=\(NSStringFromRect(screen.frame)), visibleFrame=\(NSStringFromRect(screen.visibleFrame)), scale=\(screen.backingScaleFactor)"
-            )
-
+        for screen in screens {
             // Create with a local-to-screen content rect, then pin the frame to the
             // absolute screen frame. Passing `screen.frame` (global origin) together with
             // `screen:` can double-offset secondary displays so the window never appears.
@@ -125,9 +124,6 @@ final class ScreenWipeCoordinator {
             countdownViews.append(view)
             blackWindows.append(w)
 
-            NSLog(
-                "[ToolBox] screen-wipe window[\(index)]: frame=\(NSStringFromRect(w.frame)), screen=\(w.screen?.localizedName ?? "nil"), level=\(w.level.rawValue), collectionBehavior=\(w.collectionBehavior.rawValue)"
-            )
             w.orderFrontRegardless()
         }
 

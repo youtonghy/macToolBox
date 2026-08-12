@@ -4,11 +4,24 @@ import Foundation
 final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable {
     let id: UUID
     let pixelSize: CGSize
-    private(set) var lastReadByteCount = 0
-    private(set) var lastReadOperationCount = 0
+    private var _lastReadByteCount = 0
+    private var _lastReadOperationCount = 0
+
+    var lastReadByteCount: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _lastReadByteCount
+    }
+
+    var lastReadOperationCount: Int {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return _lastReadOperationCount
+    }
 
     private let sessionDirectory: URL
     private let metadata: ScrollCaptureStripMetadata
+    private let stateLock = NSLock()
 
     init(sessionDirectory: URL) throws {
         let metadataURL = sessionDirectory.appendingPathComponent("metadata.json")
@@ -78,7 +91,8 @@ final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable
                 block.withUnsafeBytes { sourceBytes in
                     guard let source = sourceBytes.baseAddress else { return }
                     for row in 0..<intersectingRows {
-                        // Strip files are top-down; CGImage providers expose rows bottom-up when drawn.
+                        // Strip files are top-down; CGImage providers expose rows bottom-up
+                        // when drawn, so restore the provider-row ordering here.
                         let destinationRow = height - 1 - (lower - y + row)
                         destination.advanced(by: destinationRow * bytesPerRow).copyMemory(
                             from: source.advanced(by: row * sourceBytesPerRow),
@@ -88,8 +102,10 @@ final class ScrollCaptureImageSource: ScreenshotImageSource, @unchecked Sendable
                 }
             }
         }
-        lastReadByteCount = output.count
-        lastReadOperationCount = readOperationCount
+        stateLock.lock()
+        _lastReadByteCount = output.count
+        _lastReadOperationCount = readOperationCount
+        stateLock.unlock()
 
         guard let provider = CGDataProvider(data: output as CFData),
               let image = CGImage(

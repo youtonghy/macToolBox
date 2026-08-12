@@ -80,7 +80,12 @@ struct OCRModelCatalogLoader {
         return url
     }
 
-    static let shipped = OCRModelCatalogLoader(
-        publicKey: Data(base64Encoded: "+FkvLxWyIRrfJVGSJ7dqVA9aot6GCvnQxp9ftBcWktM=")!
-    )
+    static let shipped: OCRModelCatalogLoader = {
+        guard let publicKey = Data(
+            base64Encoded: "+FkvLxWyIRrfJVGSJ7dqVA9aot6GCvnQxp9ftBcWktM="
+        ) else {
+            fatalError("Invalid built-in OCR catalog public key")
+        }
+        return OCRModelCatalogLoader(publicKey: publicKey)
+    }()
 }

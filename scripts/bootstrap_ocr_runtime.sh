@@ -36,5 +36,15 @@ cp "${extracted_dir}/lib/libonnxruntime.1.24.3.dylib" "${staging_dir}/lib/"
 ln -s "libonnxruntime.1.24.3.dylib" "${staging_dir}/lib/libonnxruntime.dylib"
 touch "${staging_dir}/.ready-${version}"
 
-rm -rf "${runtime_dir}"
-mv "${staging_dir}" "${runtime_dir}"
+backup_dir="${runtime_dir}.old.$$"
+if [ -e "${runtime_dir}" ] || [ -L "${runtime_dir}" ]; then
+  rm -rf "${backup_dir}"
+  mv "${runtime_dir}" "${backup_dir}"
+fi
+if ! mv "${staging_dir}" "${runtime_dir}"; then
+  if [ -e "${backup_dir}" ]; then
+    mv "${backup_dir}" "${runtime_dir}"
+  fi
+  exit 1
+fi
+rm -rf "${backup_dir}"

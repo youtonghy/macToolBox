@@ -79,6 +79,7 @@ struct DisplayBrightnessMemoryStore: DisplayBrightnessRemembering {
             return document
         } catch {
             logger.error("Failed to decode brightness memory: \(error.localizedDescription, privacy: .public)")
+            CorruptDefaultsBackup.backup(defaults: defaults, key: key)
             return nil
         }
     }

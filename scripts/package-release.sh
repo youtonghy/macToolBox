@@ -32,15 +32,37 @@ if [ ! -x "$WORKER_PYTHON" ]; then
   echo "error: bundled OCR worker Python runtime is missing" >&2
   exit 1
 fi
-python3 -m py_compile "$WORKER_SCRIPT" "$WORKER_PROJECTIONS"
+
+COMPILE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/toolbox-worker-compile.XXXXXX")"
+STAGE="${OUT_DIR}/stage"
+cleanup() {
+  rm -rf "$COMPILE_DIR" "$STAGE"
+}
+trap cleanup EXIT
+cp "$WORKER_SCRIPT" "$COMPILE_DIR/toolbox_ocr_worker.py"
+cp "$WORKER_PROJECTIONS" "$COMPILE_DIR/projections.py"
+python3 -m py_compile "$COMPILE_DIR/toolbox_ocr_worker.py" "$COMPILE_DIR/projections.py"
+if find "$APP_PATH/Contents/Resources" \( -name '__pycache__' -o -name '*.pyc' \) -print -quit | grep -q .; then
+  echo "error: signed app bundle already contains Python bytecode" >&2
+  exit 1
+fi
 codesign --verify --deep --strict "$APP_PATH"
 
 mkdir -p "$OUT_DIR"
-STAGE="$OUT_DIR/stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
 
 cp -R "$APP_PATH" "$STAGE/ToolBox.app"
+if find "$STAGE/ToolBox.app/Contents/Resources" \( -name '__pycache__' -o -name '*.pyc' \) -print -quit | grep -q .; then
+  echo "error: staged bundle contains Python bytecode" >&2
+  exit 1
+fi
+codesign --verify --deep --strict "$STAGE/ToolBox.app"
+
+if [ "${REQUIRE_NOTARIZED:-0}" = "1" ]; then
+  spctl --assess --type execute --verbose "$STAGE/ToolBox.app"
+  stapler validate "$STAGE/ToolBox.app"
+fi
 
 APP_ZIP="$OUT_DIR/ToolBox-${VERSION}.app.zip"
 DMG="$OUT_DIR/ToolBox-${VERSION}.dmg"

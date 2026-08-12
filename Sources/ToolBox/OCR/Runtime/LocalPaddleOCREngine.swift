@@ -98,9 +98,10 @@ actor LocalPaddleOCREngine {
     init(
         modelDirectory: URL,
         provider: OCRExecutionProvider,
-        tilePlanner: PaddleOCRTilePlanner = try! PaddleOCRTilePlanner(),
+        tilePlanner: PaddleOCRTilePlanner? = nil,
         minimumRecognitionConfidence: Float = 0.35
     ) throws {
+        let resolvedTilePlanner = try tilePlanner ?? PaddleOCRTilePlanner()
         configuration = try PaddleOCRModelConfiguration(modelDirectory: modelDirectory)
         detectionSession = try PaddleOCRInferenceSession(
             modelURL: modelDirectory.appendingPathComponent("det/inference.onnx"),
@@ -110,7 +111,7 @@ actor LocalPaddleOCREngine {
             modelURL: modelDirectory.appendingPathComponent("rec/inference.onnx"),
             provider: provider
         )
-        self.tilePlanner = tilePlanner
+        self.tilePlanner = resolvedTilePlanner
         self.minimumRecognitionConfidence = minimumRecognitionConfidence
     }
 

@@ -91,7 +91,6 @@ def construct_pipeline(pipeline: str, variant: str, root: Path) -> Any:
         table_orientation_dir = required_model_dir(root, "table_orientation")
         textline_orientation_dir = required_model_dir(root, "textline_orientation")
         formula_dir = required_model_dir(root, "formula")
-        chart_dir = required_model_dir(root, "chart")
         return PPStructureV3(
             layout_detection_model_name="PP-DocLayout_plus-L",
             layout_detection_model_dir=str(layout_dir),
@@ -115,10 +114,9 @@ def construct_pipeline(pipeline: str, variant: str, root: Path) -> Any:
             textline_orientation_model_dir=str(textline_orientation_dir),
             formula_recognition_model_name="PP-FormulaNet_plus-L",
             formula_recognition_model_dir=str(formula_dir),
-            chart_recognition_model_dir=str(chart_dir),
             use_table_recognition=True,
             use_formula_recognition=True,
-            use_chart_recognition=True,
+            use_chart_recognition=False,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,

@@ -139,10 +139,11 @@ final class OCRSettingsStoreTests: XCTestCase {
             deviceClass: .intel
         )
 
-        XCTAssertEqual(arm, [.ppOCRv6, .ppStructureV3, .paddleOCRVL])
-        XCTAssertTrue(intel.isEmpty)
+        XCTAssertEqual(arm, [.ppOCRv6, .ppStructureV3, .paddleOCRVL, .systemVision])
+        XCTAssertEqual(intel, [.systemVision])
         XCTAssertTrue(arm.contains(.ppStructureV3))
         XCTAssertTrue(arm.contains(.paddleOCRVL))
+        XCTAssertTrue(arm.contains(.systemVision))
     }
 
     private func makeStore(

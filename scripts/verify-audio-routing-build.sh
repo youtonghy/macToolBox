@@ -9,6 +9,12 @@ TEST_DATA="$VERIFY_ROOT/tests"
 echo "==> Bootstrap verified ONNX Runtime"
 ./scripts/bootstrap_ocr_runtime.sh
 
+if [ -x ./.build/ocr-worker-runtime/bin/python3 ]; then
+  ./scripts/bootstrap_ocr_worker_runtime.sh --verify-only
+else
+  ./scripts/bootstrap_ocr_worker_runtime.sh --bootstrap
+fi
+
 echo "==> Generate Xcode project"
 xcodegen generate
 

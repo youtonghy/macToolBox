@@ -104,7 +104,7 @@ final class RoutePlanCompilerTests: XCTestCase {
         XCTAssertEqual(plans, [])
     }
 
-    func testExistingSilentProcessCreatesRouteSoGainAppliesBeforeNextAudioFrame() {
+    func testExistingSilentProcessWaitsForOutputBeforeCreatingGainRoute() {
         let silent = [
             AudioProcessSnapshot(
                 objectID: 42,
@@ -115,25 +115,20 @@ final class RoutePlanCompilerTests: XCTestCase {
             )
         ]
 
-        let plans = RoutePlanCompiler.compile(
+        let compilation = RoutePlanCompiler.compile(
             rules: [AppAudioRule(bundleID: "us.zoom.xos", volumePercent: 200)],
             processes: silent,
             devices: devices,
             defaultOutputUID: "speakers"
-        ).plans
+        )
 
+        XCTAssertEqual(compilation.plans, [])
         XCTAssertEqual(
-            plans,
+            compilation.resolutions,
             [
-                AudioRoutePlan(
-                    outputDeviceUID: "speakers",
-                    sources: [
-                        AudioRouteSource(
-                            bundleID: "us.zoom.xos",
-                            processObjectID: 42,
-                            linearGain: 2
-                        )
-                    ]
+                AudioRuleResolution(
+                    bundleID: "us.zoom.xos",
+                    state: .waiting(.processNotProducingOutput)
                 )
             ]
         )
@@ -158,6 +153,26 @@ final class RoutePlanCompilerTests: XCTestCase {
         XCTAssertEqual(plans.count, 1)
         XCTAssertEqual(plans[0].sources.map(\.processObjectID), [42, 43])
         XCTAssertEqual(plans[0].sources.map(\.linearGain), [1.5, 1.5])
+    }
+
+    func testGainRouteFiltersInactiveSiblingProcesses() {
+        let helper = AudioProcessSnapshot(
+            objectID: 43,
+            pid: 1235,
+            bundleID: "us.zoom.xos",
+            name: "Zoom Helper",
+            isRunningOutput: false
+        )
+
+        let plans = RoutePlanCompiler.compile(
+            rules: [AppAudioRule(bundleID: "us.zoom.xos", volumePercent: 150)],
+            processes: processes + [helper],
+            devices: devices,
+            defaultOutputUID: "speakers"
+        ).plans
+
+        XCTAssertEqual(plans.count, 1)
+        XCTAssertEqual(plans[0].sources.map(\.processObjectID), [42])
     }
 
     func testGainOnlyChangePreservesRouteTopology() {
@@ -237,7 +252,7 @@ final class RoutePlanCompilerTests: XCTestCase {
         )
     }
 
-    func testExistingSilentProcessReturnsPlannedResolution() {
+    func testExistingSilentProcessReturnsWaitingResolution() {
         let silent = [
             AudioProcessSnapshot(
                 objectID: 42,
@@ -255,13 +270,13 @@ final class RoutePlanCompilerTests: XCTestCase {
             defaultOutputUID: "speakers"
         )
 
-        XCTAssertEqual(compilation.plans.count, 1)
+        XCTAssertEqual(compilation.plans, [])
         XCTAssertEqual(
             compilation.resolutions,
             [
                 AudioRuleResolution(
                     bundleID: "us.zoom.xos",
-                    state: .planned(routeID: "speakers")
+                    state: .waiting(.processNotProducingOutput)
                 )
             ]
         )
