@@ -4,32 +4,64 @@ import XCTest
 @testable import ToolBox
 
 final class MenuPanelLayoutTests: XCTestCase {
-    func testPanelFrameFitsWithinShortVisibleScreen() {
+    func testPanelFrameScalesProportionallyInsteadOfClipping() {
+        let preferred = NSSize(width: 560, height: 830)
         let visibleFrame = NSRect(x: 0, y: 0, width: 1_440, height: 800)
-        let anchorFrame = NSRect(x: 1_380, y: 780, width: 28, height: 20)
-
-        let frame = MenuPanelLayout.panelFrame(
-            preferredSize: NSSize(width: 560, height: 830),
-            anchorFrame: anchorFrame,
+        let placement = MenuPanelLayout.placement(
+            preferredSize: preferred,
+            anchorFrame: NSRect(x: 1_380, y: 780, width: 28, height: 20),
             visibleFrame: visibleFrame
         )
 
-        XCTAssertEqual(frame.height, 780)
-        XCTAssertGreaterThanOrEqual(frame.minX, visibleFrame.minX + 10)
-        XCTAssertLessThanOrEqual(frame.maxX, visibleFrame.maxX - 10)
-        XCTAssertGreaterThanOrEqual(frame.minY, visibleFrame.minY + 10)
-        XCTAssertLessThanOrEqual(frame.maxY, visibleFrame.maxY - 10)
+        XCTAssertEqual(placement.scale, MenuPanelLayout.designScale)
+        XCTAssertEqual(placement.frame.width, preferred.width * MenuPanelLayout.designScale)
+        XCTAssertEqual(placement.frame.height, preferred.height * MenuPanelLayout.designScale)
+        XCTAssertEqual(
+            placement.frame.width / placement.frame.height,
+            preferred.width / preferred.height,
+            accuracy: 0.000_1
+        )
+        XCTAssertGreaterThanOrEqual(placement.frame.minX, visibleFrame.minX + 10)
+        XCTAssertLessThanOrEqual(placement.frame.maxX, visibleFrame.maxX - 10)
+        XCTAssertGreaterThanOrEqual(placement.frame.minY, visibleFrame.minY + 10)
+        XCTAssertEqual(placement.frame.maxY, visibleFrame.maxY - MenuPanelLayout.verticalGap)
     }
 
-    func testPanelFramePreservesPreferredSizeWhenItFits() {
-        let frame = MenuPanelLayout.panelFrame(
-            preferredSize: NSSize(width: 560, height: 600),
-            anchorFrame: NSRect(x: 900, y: 1_000, width: 28, height: 20),
-            visibleFrame: NSRect(x: 0, y: 0, width: 1_920, height: 1_080)
+    func testPanelFrameShrinksFurtherOnVeryShortScreen() {
+        let preferred = NSSize(width: 560, height: 830)
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_280, height: 600)
+        let scale = MenuPanelLayout.presentationScale(
+            preferredSize: preferred,
+            visibleFrame: visibleFrame
+        )
+        let placement = MenuPanelLayout.placement(
+            preferredSize: preferred,
+            anchorFrame: NSRect(x: 640, y: 575, width: 28, height: 22),
+            visibleFrame: visibleFrame
         )
 
-        XCTAssertEqual(frame.size, NSSize(width: 560, height: 600))
-        XCTAssertEqual(frame.maxY, 1_070)
+        XCTAssertEqual(scale, (600 - MenuPanelLayout.screenMargin * 2) / 830, accuracy: 0.000_1)
+        XCTAssertLessThan(scale, MenuPanelLayout.designScale)
+        XCTAssertEqual(placement.scale, scale)
+        XCTAssertEqual(
+            placement.frame.width / placement.frame.height,
+            preferred.width / preferred.height,
+            accuracy: 0.000_1
+        )
+        XCTAssertEqual(placement.frame.maxY, visibleFrame.maxY - MenuPanelLayout.verticalGap)
+    }
+
+    func testPanelFramePreservesDesignScaleWhenItFits() {
+        let preferred = NSSize(width: 560, height: 600)
+        let visibleFrame = NSRect(x: 0, y: 0, width: 1_920, height: 1_080)
+        let frame = MenuPanelLayout.panelFrame(
+            preferredSize: preferred,
+            anchorFrame: NSRect(x: 900, y: 1_000, width: 28, height: 20),
+            visibleFrame: visibleFrame
+        )
+
+        XCTAssertEqual(frame.size, MenuPanelLayout.scaledSize(preferred, scale: MenuPanelLayout.designScale))
+        XCTAssertEqual(frame.maxY, visibleFrame.maxY - MenuPanelLayout.verticalGap)
     }
 
     func testPanelFrameUsesMenuBarLowerEdgeWhenAnchorFrameIsBelowIt() {
@@ -42,7 +74,79 @@ final class MenuPanelLayoutTests: XCTestCase {
             visibleFrame: visibleFrame
         )
 
-        XCTAssertEqual(frame.maxY, visibleFrame.maxY - 10)
+        XCTAssertEqual(frame.maxY, visibleFrame.maxY - MenuPanelLayout.verticalGap)
+    }
+
+    func testPanelTopEdgeStaysFixedAcrossResolutions() {
+        let preferred = NSSize(width: 560, height: 600)
+        let screens: [(anchor: NSRect, visible: NSRect)] = [
+            (
+                NSRect(x: 700, y: 875, width: 28, height: 22),
+                NSRect(x: 0, y: 0, width: 1_440, height: 875)
+            ),
+            (
+                NSRect(x: 960, y: 1_050, width: 28, height: 22),
+                NSRect(x: 0, y: 0, width: 1_920, height: 1_050)
+            ),
+            (
+                NSRect(x: 1_200, y: 1_570, width: 28, height: 22),
+                NSRect(x: 0, y: 0, width: 2_560, height: 1_570)
+            ),
+        ]
+
+        for screen in screens {
+            let frame = MenuPanelLayout.panelFrame(
+                preferredSize: preferred,
+                anchorFrame: screen.anchor,
+                visibleFrame: screen.visible
+            )
+            XCTAssertEqual(frame.maxY, screen.visible.maxY - MenuPanelLayout.verticalGap)
+            XCTAssertEqual(frame.midX, screen.anchor.midX, accuracy: 0.001)
+        }
+    }
+
+    func testUnstableZeroAnchorIsRejected() {
+        XCTAssertFalse(
+            MenuPanelLayout.isStableMenuBarAnchor(
+                .zero,
+                screenFrame: NSRect(x: 0, y: 0, width: 1_440, height: 900),
+                visibleFrame: NSRect(x: 0, y: 0, width: 1_440, height: 875)
+            )
+        )
+    }
+
+    func testDesktopOriginAnchorIsRejected() {
+        XCTAssertFalse(
+            MenuPanelLayout.isStableMenuBarAnchor(
+                NSRect(x: 0, y: 0, width: 28, height: 22),
+                screenFrame: NSRect(x: 0, y: 0, width: 1_440, height: 900),
+                visibleFrame: NSRect(x: 0, y: 0, width: 1_440, height: 875)
+            )
+        )
+    }
+
+    func testMenuBarAnchorOnPrimaryDisplayIsStable() {
+        XCTAssertTrue(
+            MenuPanelLayout.isStableMenuBarAnchor(
+                NSRect(x: 1_380, y: 875, width: 28, height: 22),
+                screenFrame: NSRect(x: 0, y: 0, width: 1_440, height: 900),
+                visibleFrame: NSRect(x: 0, y: 0, width: 1_440, height: 875)
+            )
+        )
+    }
+
+    func testMenuBarAnchorOnSecondaryDisplayWithNegativeOriginIsStable() {
+        let screen = NSRect(x: 1_440, y: -100, width: 1_920, height: 1_080)
+        let visible = NSRect(x: 1_440, y: -100, width: 1_920, height: 1_055)
+        let anchor = NSRect(x: 3_200, y: 955, width: 28, height: 22)
+
+        XCTAssertTrue(
+            MenuPanelLayout.isStableMenuBarAnchor(
+                anchor,
+                screenFrame: screen,
+                visibleFrame: visible
+            )
+        )
     }
 
     func testPanelFrameUsesScreenContainingMenuBarAnchor() throws {
@@ -57,14 +161,21 @@ final class MenuPanelLayoutTests: XCTestCase {
             )
         ]
 
+        let preferred = NSSize(width: 560, height: 600)
         let frame = try XCTUnwrap(MenuPanelLayout.panelFrame(
-            preferredSize: NSSize(width: 560, height: 600),
+            preferredSize: preferred,
+            anchorFrame: NSRect(x: 2_920, y: 875, width: 28, height: 25),
+            screens: screens
+        ))
+        let placement = try XCTUnwrap(MenuPanelLayout.placement(
+            preferredSize: preferred,
             anchorFrame: NSRect(x: 2_920, y: 875, width: 28, height: 25),
             screens: screens
         ))
 
-        XCTAssertEqual(frame, NSRect(x: 2_430, y: 265, width: 560, height: 600))
-        XCTAssertLessThan(frame.maxY, 875)
+        XCTAssertEqual(placement.scale, MenuPanelLayout.designScale)
+        XCTAssertEqual(frame, placement.frame)
+        XCTAssertEqual(frame.maxY, 875 - MenuPanelLayout.verticalGap)
         XCTAssertGreaterThanOrEqual(frame.minX, 1_450)
         XCTAssertLessThanOrEqual(frame.maxX, 2_990)
     }

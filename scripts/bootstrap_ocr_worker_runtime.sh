@@ -69,11 +69,24 @@ verify_runtime_manifest() {
     echo "error: OCR runtime content manifest is missing: $manifest" >&2
     return 1
   fi
+
+  local current sorted_manifest
+  current="$(mktemp "${TMPDIR:-/tmp}/toolbox-ocr-current.XXXXXX")"
+  sorted_manifest="$(mktemp "${TMPDIR:-/tmp}/toolbox-ocr-expected.XXXXXX")"
+
   (cd "$runtime" \
     && find . -type f ! -name runtime.manifest.sha256 -print0 \
-      | sort -z \
+      | LC_ALL=C sort -z \
       | xargs -0 shasum -a 256 \
-      | diff - "$manifest" >/dev/null)
+      | LC_ALL=C sort >"$current")
+  LC_ALL=C sort "$manifest" >"$sorted_manifest"
+
+  if diff -q "$sorted_manifest" "$current" >/dev/null; then
+    rm -f "$current" "$sorted_manifest"
+    return 0
+  fi
+  rm -f "$current" "$sorted_manifest"
+  return 1
 }
 
 if [[ "$mode" == "--verify-only" ]]; then

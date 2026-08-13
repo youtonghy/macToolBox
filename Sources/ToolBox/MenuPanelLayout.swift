@@ -5,6 +5,12 @@ struct MenuPanelScreenGeometry {
     let visibleFrame: NSRect
 }
 
+struct MenuPanelPlacement: Equatable {
+    var frame: NSRect
+    var scale: CGFloat
+    var designSize: NSSize
+}
+
 enum MenuPanelLayout {
     static let size = NSSize(
         width: 560,
@@ -17,6 +23,11 @@ enum MenuPanelLayout {
     )
     static let contentInsets = NSEdgeInsets(top: 14, left: 14, bottom: 14, right: 14)
     static let cornerRadius: CGFloat = 22
+    /// Keeps the original compact design, then shrinks it proportionally.
+    static let designScale: CGFloat = 0.86
+    static let minimumScale: CGFloat = 0.62
+    static let screenMargin: CGFloat = 10
+    static let verticalGap: CGFloat = 8
 
     static let outerSpacing: CGFloat = 12
     static let contentSpacing: CGFloat = 10
@@ -145,12 +156,24 @@ enum MenuPanelLayout {
         anchorFrame: NSRect,
         screens: [MenuPanelScreenGeometry]
     ) -> NSRect? {
+        placement(
+            preferredSize: preferredSize,
+            anchorFrame: anchorFrame,
+            screens: screens
+        )?.frame
+    }
+
+    static func placement(
+        preferredSize: NSSize,
+        anchorFrame: NSRect,
+        screens: [MenuPanelScreenGeometry]
+    ) -> MenuPanelPlacement? {
         let anchorPoint = NSPoint(x: anchorFrame.midX, y: anchorFrame.midY)
         guard let screen = screens.first(where: { $0.frame.contains(anchorPoint) }) else {
             return nil
         }
 
-        return panelFrame(
+        return placement(
             preferredSize: preferredSize,
             anchorFrame: anchorFrame,
             visibleFrame: screen.visibleFrame
@@ -161,15 +184,31 @@ enum MenuPanelLayout {
         preferredSize: NSSize,
         anchorFrame: NSRect,
         visibleFrame: NSRect,
-        margin: CGFloat = 10,
-        verticalOffset: CGFloat = 8
+        margin: CGFloat = screenMargin,
+        verticalOffset: CGFloat = verticalGap
     ) -> NSRect {
-        let availableWidth = max(0, visibleFrame.width - margin * 2)
-        let availableHeight = max(0, visibleFrame.height - margin * 2)
-        let size = NSSize(
-            width: min(max(0, preferredSize.width), availableWidth),
-            height: min(max(0, preferredSize.height), availableHeight)
+        placement(
+            preferredSize: preferredSize,
+            anchorFrame: anchorFrame,
+            visibleFrame: visibleFrame,
+            margin: margin,
+            verticalOffset: verticalOffset
+        ).frame
+    }
+
+    static func placement(
+        preferredSize: NSSize,
+        anchorFrame: NSRect,
+        visibleFrame: NSRect,
+        margin: CGFloat = screenMargin,
+        verticalOffset: CGFloat = verticalGap
+    ) -> MenuPanelPlacement {
+        let scale = presentationScale(
+            preferredSize: preferredSize,
+            visibleFrame: visibleFrame,
+            margin: margin
         )
+        let size = scaledSize(preferredSize, scale: scale)
 
         let minimumX = visibleFrame.minX + margin
         let maximumX = max(minimumX, visibleFrame.maxX - size.width - margin)
@@ -177,15 +216,62 @@ enum MenuPanelLayout {
         let originX = min(max(proposedX, minimumX), maximumX)
 
         let minimumY = visibleFrame.minY + margin
-        let maximumY = max(minimumY, visibleFrame.maxY - size.height - margin)
-        // A status-item button can straddle the visible-frame boundary while its
-        // window is being laid out. Keep the panel's top edge tied to the
-        // menu-bar lower edge in that case instead of dropping it into the
-        // middle of the screen.
-        let anchorBottom = max(anchorFrame.minY, visibleFrame.maxY)
-        let proposedY = anchorBottom - size.height - verticalOffset
-        let originY = min(max(proposedY, minimumY), maximumY)
+        // Pin the top edge to the menu-bar lower edge. Status-item frames can
+        // report a stale Y on the first open, which previously shifted the panel
+        // down into the desktop.
+        let proposedY = visibleFrame.maxY - size.height - verticalOffset
+        let originY = max(proposedY, minimumY)
 
-        return NSRect(origin: NSPoint(x: originX, y: originY), size: size)
+        return MenuPanelPlacement(
+            frame: NSRect(origin: NSPoint(x: originX, y: originY), size: size),
+            scale: scale,
+            designSize: preferredSize
+        )
+    }
+
+    static func presentationScale(
+        preferredSize: NSSize,
+        visibleFrame: NSRect,
+        margin: CGFloat = screenMargin
+    ) -> CGFloat {
+        let availableWidth = max(1, visibleFrame.width - margin * 2)
+        let availableHeight = max(1, visibleFrame.height - margin * 2)
+        let widthScale = availableWidth / max(preferredSize.width, 1)
+        let heightScale = availableHeight / max(preferredSize.height, 1)
+        return min(max(min(designScale, widthScale, heightScale), minimumScale), designScale)
+    }
+
+    static func scaledSize(_ preferredSize: NSSize, scale: CGFloat) -> NSSize {
+        NSSize(
+            width: preferredSize.width * scale,
+            height: preferredSize.height * scale
+        )
+    }
+
+    static func scaledInsets(_ insets: NSEdgeInsets, scale: CGFloat) -> NSEdgeInsets {
+        NSEdgeInsets(
+            top: insets.top * scale,
+            left: insets.left * scale,
+            bottom: insets.bottom * scale,
+            right: insets.right * scale
+        )
+    }
+
+    static func isStableMenuBarAnchor(
+        _ anchorFrame: NSRect,
+        screenFrame: NSRect,
+        visibleFrame: NSRect
+    ) -> Bool {
+        guard anchorFrame.width >= 8, anchorFrame.height >= 8 else { return false }
+        guard screenFrame.intersects(anchorFrame) else { return false }
+
+        let menuBarHeight = max(22, screenFrame.maxY - visibleFrame.maxY)
+        let strip = NSRect(
+            x: screenFrame.minX,
+            y: visibleFrame.maxY - 4,
+            width: screenFrame.width,
+            height: menuBarHeight + 8
+        )
+        return strip.intersects(anchorFrame)
     }
 }

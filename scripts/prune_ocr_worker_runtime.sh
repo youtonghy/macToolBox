@@ -25,8 +25,9 @@ if find "$RUNTIME_ROOT" -type d -name tests -print -quit | grep -q .; then
 fi
 
 # Record a content digest so later builds can reject a stale or modified cache.
+# C locale keeps the file order stable across machines and macOS collations.
 cd "$RUNTIME_ROOT"
 find . -type f ! -name runtime.manifest.sha256 -print0 \
-  | sort -z \
+  | LC_ALL=C sort -z \
   | xargs -0 shasum -a 256 \
   > runtime.manifest.sha256
