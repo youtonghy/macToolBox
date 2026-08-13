@@ -30,6 +30,12 @@ exit 0
 EOF
   chmod +x "$fixture/project/scripts/bootstrap_ocr_runtime.sh"
 
+  cat >"$fixture/project/scripts/sign_nested_runtime.sh" <<'EOF'
+#!/bin/bash
+printf '%s\n' "$*" >"${MOCK_SIGN_NESTED_ARGS:?MOCK_SIGN_NESTED_ARGS is required}"
+EOF
+  chmod +x "$fixture/project/scripts/sign_nested_runtime.sh"
+
   cat >"$fixture/bin/security" <<'EOF'
 #!/bin/bash
 if [ "${MOCK_SECURITY_HAS_IDENTITY:-1}" = "1" ]; then
@@ -100,6 +106,7 @@ test_locks_identity_and_updates_installed_bundle_in_place() {
 
   PATH="$fixture/bin:$PATH" \
     MOCK_XCODEBUILD_ARGS="$fixture/xcodebuild.args" \
+    MOCK_SIGN_NESTED_ARGS="$fixture/sign-nested.args" \
     MOCK_OPEN_PATH="$fixture/open.path" \
     SIGN_IDENTITY_FILE="$identity_file" \
     INSTALL_APP_PATH="$install_app" \
@@ -110,6 +117,7 @@ test_locks_identity_and_updates_installed_bundle_in_place() {
   [ "$(cat "$install_app/Contents/MacOS/ToolBox")" = "new-build" ] || fail "new app was not installed"
   [ "$(cat "$identity_file")" = "ABCDEF0123456789ABCDEF0123456789ABCDEF01" ] || fail "signing identity was not locked"
   [ "$(cat "$fixture/open.path")" = "$install_app" ] || fail "script did not open the installed app"
+  assert_contains "$fixture/sign-nested.args" "Resources/ToolBox.entitlements"
   assert_contains "$fixture/xcodebuild.args" "CODE_SIGN_IDENTITY=ABCDEF0123456789ABCDEF0123456789ABCDEF01"
   assert_contains "$fixture/xcodebuild.args" "CODE_SIGN_STYLE=Manual"
   assert_contains "$fixture/xcodebuild.args" "DEVELOPMENT_TEAM="
@@ -145,6 +153,7 @@ test_self_signed_identity_disables_library_validation() {
   PATH="$fixture/bin:$PATH" \
     MOCK_IDENTITY_NAME=youtonghy \
     MOCK_XCODEBUILD_ARGS="$fixture/xcodebuild.args" \
+    MOCK_SIGN_NESTED_ARGS="$fixture/sign-nested.args" \
     MOCK_OPEN_PATH="$fixture/open.path" \
     SIGN_IDENTITY_FILE="$fixture/state/signing-identity" \
     INSTALL_APP_PATH="$fixture/install/ToolBox.app" \
@@ -153,6 +162,7 @@ test_self_signed_identity_disables_library_validation() {
     "$fixture/project/build.sh" >"$fixture/output.log" 2>&1
 
   assert_contains "$fixture/xcodebuild.args" "CODE_SIGN_ENTITLEMENTS=Resources/ToolBox-AdHoc.entitlements"
+  assert_contains "$fixture/sign-nested.args" "Resources/ToolBox-AdHoc.entitlements"
 }
 
 test_defaults_to_system_applications_directory() {

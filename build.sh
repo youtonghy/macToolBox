@@ -154,7 +154,7 @@ if [ ! -d "$APP" ]; then
 fi
 
 if [ "$SIGN_IDENTITY" != "-" ] && [ -x ./scripts/sign_nested_runtime.sh ]; then
-  ./scripts/sign_nested_runtime.sh "$APP" "$SIGN_IDENTITY"
+  ./scripts/sign_nested_runtime.sh "$APP" "$SIGN_IDENTITY" "$ENTITLEMENTS"
 fi
 
 BUILT_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Contents/Info.plist" 2>/dev/null || true)"

@@ -1,11 +1,37 @@
 import AppKit
 import SwiftUI
 
+private struct HostedMenuContent<Content: View>: View {
+    var scale: CGFloat
+    var designContentSize: CGSize
+    var content: Content
+
+    var body: some View {
+        content
+            .frame(
+                width: designContentSize.width,
+                height: designContentSize.height,
+                alignment: .topLeading
+            )
+            .scaleEffect(scale, anchor: .topLeading)
+            .frame(
+                width: designContentSize.width * scale,
+                height: designContentSize.height * scale,
+                alignment: .topLeading
+            )
+    }
+}
+
 class GlassHostingViewController<Content: View>: NSViewController {
     private let rootView: Content
-    private var contentSize: NSSize
+    private var designSize: NSSize
+    private var scale: CGFloat = 1
     private let contentInsets: NSEdgeInsets
-    private var hostingController: NSHostingController<Content>?
+    private var hostingController: NSHostingController<HostedMenuContent<Content>>?
+    private var hostedLeadingConstraint: NSLayoutConstraint?
+    private var hostedTrailingConstraint: NSLayoutConstraint?
+    private var hostedTopConstraint: NSLayoutConstraint?
+    private var hostedBottomConstraint: NSLayoutConstraint?
 
     init(
         rootView: Content,
@@ -13,7 +39,7 @@ class GlassHostingViewController<Content: View>: NSViewController {
         contentInsets: NSEdgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
     ) {
         self.rootView = rootView
-        self.contentSize = contentSize
+        self.designSize = contentSize
         self.contentInsets = contentInsets
         super.init(nibName: nil, bundle: nil)
         preferredContentSize = contentSize
@@ -24,14 +50,14 @@ class GlassHostingViewController<Content: View>: NSViewController {
     }
 
     override func loadView() {
-        view = GlassContainerView(frame: NSRect(origin: .zero, size: contentSize))
+        view = GlassContainerView(frame: NSRect(origin: .zero, size: presentedSize))
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         (view as? GlassContainerView)?.refreshAppearance()
 
-        let hostingController = NSHostingController(rootView: rootView)
+        let hostingController = NSHostingController(rootView: makeHostedContent())
         addChild(hostingController)
 
         let hostedView = hostingController.view
@@ -40,14 +66,18 @@ class GlassHostingViewController<Content: View>: NSViewController {
         hostedView.layer?.backgroundColor = NSColor.clear.cgColor
 
         view.addSubview(hostedView)
-        NSLayoutConstraint.activate([
-            hostedView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: contentInsets.left),
-            hostedView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -contentInsets.right),
-            hostedView.topAnchor.constraint(equalTo: view.topAnchor, constant: contentInsets.top),
-            hostedView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -contentInsets.bottom)
-        ])
+        let leading = hostedView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: contentInsets.left)
+        let trailing = hostedView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -contentInsets.right)
+        let top = hostedView.topAnchor.constraint(equalTo: view.topAnchor, constant: contentInsets.top)
+        let bottom = hostedView.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -contentInsets.bottom)
+        NSLayoutConstraint.activate([leading, trailing, top, bottom])
 
+        hostedLeadingConstraint = leading
+        hostedTrailingConstraint = trailing
+        hostedTopConstraint = top
+        hostedBottomConstraint = bottom
         self.hostingController = hostingController
+        applyPresentationMetrics()
     }
 
     override func viewDidAppear() {
@@ -59,18 +89,64 @@ class GlassHostingViewController<Content: View>: NSViewController {
     }
 
     func updateContentSize(_ size: NSSize) {
-        guard size != contentSize else { return }
-        contentSize = size
-        preferredContentSize = size
-        if isViewLoaded {
-            view.setFrameSize(size)
-            view.needsLayout = true
-            view.layoutSubtreeIfNeeded()
+        updatePresentation(designSize: size, scale: scale)
+    }
+
+    func updatePresentation(designSize: NSSize, scale: CGFloat) {
+        let clampedScale = max(scale, 0.01)
+        guard designSize != self.designSize || abs(clampedScale - self.scale) > 0.000_1 else {
+            return
         }
+
+        self.designSize = designSize
+        self.scale = clampedScale
+        preferredContentSize = presentedSize
+        applyPresentationMetrics()
+    }
+
+    private var presentedSize: NSSize {
+        MenuPanelLayout.scaledSize(designSize, scale: scale)
+    }
+
+    private var designContentSize: CGSize {
+        CGSize(
+            width: max(0, designSize.width - contentInsets.left - contentInsets.right),
+            height: max(0, designSize.height - contentInsets.top - contentInsets.bottom)
+        )
+    }
+
+    private func makeHostedContent() -> HostedMenuContent<Content> {
+        HostedMenuContent(
+            scale: scale,
+            designContentSize: designContentSize,
+            content: rootView
+        )
+    }
+
+    private func applyPresentationMetrics() {
+        guard isViewLoaded else { return }
+
+        let insets = MenuPanelLayout.scaledInsets(contentInsets, scale: scale)
+        hostedLeadingConstraint?.constant = insets.left
+        hostedTrailingConstraint?.constant = -insets.right
+        hostedTopConstraint?.constant = insets.top
+        hostedBottomConstraint?.constant = -insets.bottom
+        hostingController?.rootView = makeHostedContent()
+        (view as? GlassContainerView)?.cornerRadius = MenuPanelLayout.cornerRadius * scale
+        view.setFrameSize(presentedSize)
+        view.needsLayout = true
+        view.layoutSubtreeIfNeeded()
     }
 }
 
 final class GlassContainerView: NSView {
+    var cornerRadius: CGFloat = MenuPanelLayout.cornerRadius {
+        didSet {
+            guard abs(oldValue - cornerRadius) > 0.000_1 else { return }
+            needsLayout = true
+        }
+    }
+
     private let backgroundEffectView = NSVisualEffectView()
     private let glowEffectView = NSVisualEffectView()
     private let tintLayer = CALayer()
@@ -99,29 +175,34 @@ final class GlassContainerView: NSView {
 
         let outerPath = roundedPath(
             in: bounds.insetBy(dx: 0.5, dy: 0.5),
-            radius: MenuPanelLayout.cornerRadius
+            radius: cornerRadius
         )
         borderLayer.path = outerPath.cgPath
 
         let innerRect = bounds.insetBy(dx: 1.5, dy: 1.5)
         let innerPath = roundedPath(
             in: innerRect,
-            radius: MenuPanelLayout.cornerRadius - 2
+            radius: max(0, cornerRadius - 2)
         )
         highlightLayer.path = innerPath.cgPath
 
         let glowRect = bounds.insetBy(dx: 10, dy: 10)
         let glowPath = roundedPath(
             in: glowRect,
-            radius: MenuPanelLayout.cornerRadius - 8
+            radius: max(0, cornerRadius - 8)
         )
         innerGlowLayer.path = glowPath.cgPath
+
+        layer?.cornerRadius = cornerRadius
+        glowEffectView.layer?.cornerRadius = cornerRadius
+        backgroundEffectView.layer?.cornerRadius = cornerRadius
+        tintLayer.cornerRadius = cornerRadius
     }
 
     private func configureView() {
         wantsLayer = true
         layer?.cornerCurve = .continuous
-        layer?.cornerRadius = MenuPanelLayout.cornerRadius
+        layer?.cornerRadius = cornerRadius
         layer?.masksToBounds = true
         layer?.shadowOpacity = 0
 
@@ -130,7 +211,7 @@ final class GlassContainerView: NSView {
         glowEffectView.state = .active
         glowEffectView.alphaValue = 0.38
         glowEffectView.wantsLayer = true
-        glowEffectView.layer?.cornerRadius = MenuPanelLayout.cornerRadius
+        glowEffectView.layer?.cornerRadius = cornerRadius
         glowEffectView.layer?.masksToBounds = true
 
         backgroundEffectView.material = .popover
@@ -138,10 +219,10 @@ final class GlassContainerView: NSView {
         backgroundEffectView.state = .active
         backgroundEffectView.isEmphasized = true
         backgroundEffectView.wantsLayer = true
-        backgroundEffectView.layer?.cornerRadius = MenuPanelLayout.cornerRadius
+        backgroundEffectView.layer?.cornerRadius = cornerRadius
         backgroundEffectView.layer?.masksToBounds = true
 
-        tintLayer.cornerRadius = MenuPanelLayout.cornerRadius
+        tintLayer.cornerRadius = cornerRadius
         tintLayer.cornerCurve = .continuous
         tintLayer.backgroundColor = NSColor.windowBackgroundColor.withAlphaComponent(0.16).cgColor
 

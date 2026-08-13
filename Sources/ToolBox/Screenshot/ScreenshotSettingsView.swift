@@ -6,9 +6,7 @@ struct ScreenshotSettingsView: View {
     @AppStorage("screenshot.scrollCapture.automatic") private var automaticScroll = true
     @AppStorage("screenshot.scrollCapture.stepPixels") private var scrollStep = 160.0
     @State private var ocrSettings = OCRSettingsStore().load().settings
-    @State private var availableOCRSelections = PPOCRv6Profile.allCases.map {
-        OCRModelSelection(pipeline: .ppOCRv6, variantID: $0.rawValue)
-    }
+    @State private var availableOCRSelections = Self.initialOCRSelections()
     @State private var ocrModelState: OCRModelState = .notInstalled
     @State private var ocrDownloadSize: Int64 = 0
     @State private var isDownloadingOCR = false
@@ -134,6 +132,17 @@ struct ScreenshotSettingsView: View {
             if !granted { Button("授权", action: request) }
         }
         .padding(12)
+    }
+
+    private static func initialOCRSelections() -> [OCRModelSelection] {
+        let storedSelection = OCRSettingsStore().load().settings.selection
+        var selections = PPOCRv6Profile.allCases.map {
+            OCRModelSelection(pipeline: .ppOCRv6, variantID: $0.rawValue)
+        }
+        if !selections.contains(storedSelection) {
+            selections.insert(storedSelection, at: 0)
+        }
+        return selections
     }
 
     private func saveOCRSettings() {

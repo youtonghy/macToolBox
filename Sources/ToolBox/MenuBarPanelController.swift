@@ -35,7 +35,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
         panel.isFloatingPanel = true
         panel.level = .statusBar
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient, .ignoresCycle]
-        panel.animationBehavior = .utilityWindow
+        panel.animationBehavior = .none
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
@@ -44,6 +44,8 @@ final class MenuBarPanelController<Content: View>: NSObject {
         panel.titlebarAppearsTransparent = true
         panel.isMovable = false
         panel.isMovableByWindowBackground = false
+        panel.alphaValue = 0
+        panel.ignoresMouseEvents = true
         panel.setContentSize(panelSize)
     }
 
@@ -52,7 +54,7 @@ final class MenuBarPanelController<Content: View>: NSObject {
     }
 
     var isShown: Bool {
-        panel.isVisible && !isClosing
+        panel.isVisible && !isClosing && panel.alphaValue > 0
     }
 
     func toggle(relativeTo button: NSStatusBarButton) {
@@ -66,29 +68,17 @@ final class MenuBarPanelController<Content: View>: NSObject {
     func show(relativeTo button: NSStatusBarButton) {
         anchorButton = button
         isClosing = false
-        button.layoutSubtreeIfNeeded()
+        panel.alphaValue = 0
+        panel.ignoresMouseEvents = true
+        prepareAnchor(button)
 
-        guard showPositionedPanel(relativeTo: button) else {
-            DispatchQueue.main.async { [weak self, weak button] in
-                guard let self, let button, self.anchorButton === button, !self.panel.isVisible else {
-                    return
-                }
-                button.layoutSubtreeIfNeeded()
-                _ = self.showPositionedPanel(relativeTo: button)
-            }
+        if applyPlacement(relativeTo: button, reveal: false) {
+            panel.orderFrontRegardless()
+            schedulePresentation(relativeTo: button)
             return
         }
-    }
 
-    private func showPositionedPanel(relativeTo button: NSStatusBarButton) -> Bool {
-        guard let frame = targetPanelFrame(relativeTo: button) else { return false }
-        applyPanelFrame(frame)
-        panel.alphaValue = 1
-        panel.makeKeyAndOrderFront(nil)
-        panel.orderFrontRegardless()
-        panel.invalidateShadow()
-        startMonitoring()
-        return true
+        schedulePresentation(relativeTo: button)
     }
 
     func close() {
@@ -96,7 +86,8 @@ final class MenuBarPanelController<Content: View>: NSObject {
         isClosing = true
         stopMonitoring()
         panel.orderOut(nil)
-        panel.alphaValue = 1
+        panel.alphaValue = 0
+        panel.ignoresMouseEvents = true
         isClosing = false
     }
 
@@ -104,16 +95,52 @@ final class MenuBarPanelController<Content: View>: NSObject {
         guard newSize != preferredPanelSize else { return }
         preferredPanelSize = newSize
         guard isShown, let anchorButton else { return }
-        guard let frame = targetPanelFrame(relativeTo: anchorButton) else { return }
-        applyPanelFrame(frame)
+        _ = applyPlacement(relativeTo: anchorButton, reveal: false)
     }
 
-    private func applyPanelFrame(_ frame: NSRect) {
-        contentController.updateContentSize(frame.size)
-        guard panel.frame != frame else { return }
-        panel.setFrame(frame, display: true)
-        panel.setContentSize(frame.size)
+    private func schedulePresentation(relativeTo button: NSStatusBarButton) {
+        DispatchQueue.main.async { [weak self, weak button] in
+            guard let self, let button, self.anchorButton === button, !self.isClosing else {
+                return
+            }
+
+            self.prepareAnchor(button)
+            _ = self.applyPlacement(relativeTo: button, reveal: true)
+        }
+    }
+
+    private func applyPlacement(relativeTo button: NSStatusBarButton, reveal: Bool) -> Bool {
+        guard let placement = targetPlacement(relativeTo: button) else { return false }
+        apply(placement)
+        if reveal {
+            revealPanel()
+        }
+        return true
+    }
+
+    private func apply(_ placement: MenuPanelPlacement) {
+        contentController.updatePresentation(
+            designSize: placement.designSize,
+            scale: placement.scale
+        )
+
+        NSAnimationContext.beginGrouping()
+        NSAnimationContext.current.duration = 0
+        NSAnimationContext.current.allowsImplicitAnimation = false
+        if panel.frame != placement.frame {
+            panel.setFrame(placement.frame, display: true)
+        }
+        NSAnimationContext.endGrouping()
         panel.invalidateShadow()
+    }
+
+    private func revealPanel() {
+        panel.ignoresMouseEvents = false
+        panel.alphaValue = 1
+        panel.makeKeyAndOrderFront(nil)
+        panel.orderFrontRegardless()
+        panel.invalidateShadow()
+        startMonitoring()
     }
 
     private func startMonitoring() {
@@ -164,35 +191,54 @@ final class MenuBarPanelController<Content: View>: NSObject {
         close()
     }
 
-    private func targetPanelFrame(relativeTo button: NSStatusBarButton) -> NSRect? {
+    private func targetPlacement(relativeTo button: NSStatusBarButton) -> MenuPanelPlacement? {
         guard let buttonFrame = screenRect(for: button) else { return nil }
 
         // The status-item window owns the authoritative screen assignment. A
         // center-point lookup across NSScreen.screens can select an adjacent
         // display while the menu bar is moving or its button is being laid out.
-        let anchorPoint = NSPoint(x: buttonFrame.midX, y: buttonFrame.midY)
-        guard let visibleFrame = button.window?.screen?.visibleFrame
-            ?? NSScreen.screens
-                .first(where: { $0.frame.contains(anchorPoint) })?
-                .visibleFrame
-            ?? NSScreen.screens
-                .first(where: { $0.frame.intersects(buttonFrame) })?
-                .visibleFrame,
-            !visibleFrame.isEmpty else {
+        guard let screen = button.window?.screen
+            ?? screenContaining(point: NSPoint(x: buttonFrame.midX, y: buttonFrame.midY))
+            ?? NSScreen.screens.first(where: { $0.frame.intersects(buttonFrame) }),
+            !screen.visibleFrame.isEmpty else {
             return nil
         }
 
-        return MenuPanelLayout.panelFrame(
+        guard MenuPanelLayout.isStableMenuBarAnchor(
+            buttonFrame,
+            screenFrame: screen.frame,
+            visibleFrame: screen.visibleFrame
+        ) else {
+            return nil
+        }
+
+        return MenuPanelLayout.placement(
             preferredSize: preferredPanelSize,
             anchorFrame: buttonFrame,
-            visibleFrame: visibleFrame
+            visibleFrame: screen.visibleFrame
         )
+    }
+
+    private func screenContaining(point: NSPoint) -> NSScreen? {
+        NSScreen.screens.first(where: { $0.frame.contains(point) })
+    }
+
+    private func prepareAnchor(_ button: NSStatusBarButton) {
+        button.window?.layoutIfNeeded()
+        button.layoutSubtreeIfNeeded()
     }
 
     private func screenRect(for button: NSStatusBarButton) -> NSRect? {
         guard let window = button.window else { return nil }
+        let windowFrame = window.frame
+        if windowFrame.width > 0, windowFrame.height > 0 {
+            return windowFrame
+        }
+
         let rectInWindow = button.convert(button.bounds, to: nil)
-        return window.convertToScreen(rectInWindow)
+        let screenRect = window.convertToScreen(rectInWindow)
+        guard screenRect.width > 0, screenRect.height > 0 else { return nil }
+        return screenRect
     }
 
     private func screenPoint(for event: NSEvent) -> NSPoint {
