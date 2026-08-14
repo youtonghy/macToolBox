@@ -69,6 +69,12 @@ jobs:
           printf '%s' "$YOUTONGHY_P12" | base64 --decode > "$CERT"
           [[ -s "$CERT" ]] || { echo "YOUTONGHY_P12 did not decode to a p12 file" >&2; exit 1; }
 
+          PEM="$RUNNER_TEMP/imported.pem"
+          openssl pkcs12 -in "$CERT" -clcerts -nokeys \
+            -passin "pass:${YOUTONGHY_P12_PASSWORD:-}" \
+            -out "$PEM"
+          [[ -s "$PEM" ]] || { echo "p12 did not contain a certificate" >&2; exit 1; }
+
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
@@ -87,15 +93,24 @@ jobs:
 
           security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
 
+          # p12 export does not include local trust settings. A self-signed
+          # codesigning cert is therefore present but "invalid" until trusted.
+          sudo security add-trusted-cert -d -r unspecified -p codeSign \
+            -k /Library/Keychains/System.keychain "$PEM"
+          rm -f "$PEM"
+
           USER_KEYCHAINS="$(security list-keychains -d user | sed -E 's/^[[:space:]]*"//;s/"[[:space:]]*$//')"
           security list-keychains -d user -s "$KEYCHAIN" $USER_KEYCHAINS
           security default-keychain -d user -s "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
 
-          echo "Imported codesigning identities:"
-          security find-identity -v -p codesigning
+          echo "All codesigning identities (including untrusted):"
+          security find-identity -p codesigning || true
+          echo "Valid codesigning identities:"
+          security find-identity -v -p codesigning || true
           if ! security find-identity -v -p codesigning | grep -Eq '[[:xdigit:]]{40} "youtonghy"$'; then
-            echo "error: imported p12 does not contain a codesigning identity named youtonghy" >&2
+            echo "error: no valid codesigning identity named youtonghy" >&2
+            echo "error: export My Certificates → youtonghy as .p12 (must include the private key)" >&2
             exit 1
           fi
 
