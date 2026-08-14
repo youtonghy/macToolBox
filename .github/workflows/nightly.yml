@@ -1,0 +1,248 @@
+name: Nightly
+
+on:
+  schedule:
+    # 00:00 Asia/Shanghai
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  meta:
+    name: Version
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.meta.outputs.should_build }}
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      title: ${{ steps.meta.outputs.title }}
+      build_number: ${{ steps.meta.outputs.build_number }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute Beta stamp
+        id: meta
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          STAMP="$(TZ=Asia/Shanghai date +%y%m%d)"
+          VERSION="Beta${STAMP}"
+          TAG="beta-${STAMP}"
+          TITLE="ToolBox Beta ${STAMP}"
+          {
+            echo "version=$VERSION"
+            echo "tag=$TAG"
+            echo "title=$TITLE"
+            echo "build_number=$STAMP"
+          } >> "$GITHUB_OUTPUT"
+
+          SHOULD=true
+          if [ "$EVENT_NAME" = "schedule" ]; then
+            PREV="$(git tag -l 'beta-*' | grep -v "^${TAG}$" | sort | tail -1 || true)"
+            if [ -n "$PREV" ] && [ -z "$(git log "${PREV}..HEAD" --oneline)" ]; then
+              echo "No commits since $PREV; skipping scheduled nightly"
+              SHOULD=false
+            fi
+          fi
+          echo "should_build=$SHOULD" >> "$GITHUB_OUTPUT"
+          echo "Nightly $TITLE (tag $TAG) should_build=$SHOULD"
+
+  nightly:
+    name: Build and publish pre-release
+    needs: meta
+    if: needs.meta.outputs.should_build == 'true'
+    runs-on: macos-15
+    env:
+      VERSION: ${{ needs.meta.outputs.version }}
+      BUILD_NUMBER: ${{ needs.meta.outputs.build_number }}
+      RELEASE_TAG: ${{ needs.meta.outputs.tag }}
+      RELEASE_TITLE: ${{ needs.meta.outputs.title }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Select latest Xcode
+        run: |
+          set -euo pipefail
+          XCODE_APP="$(ls -d /Applications/Xcode*.app 2>/dev/null | sort -V | tail -1)"
+          if [ -z "$XCODE_APP" ]; then
+            echo "No Xcode.app found under /Applications" >&2
+            exit 1
+          fi
+          echo "Using $XCODE_APP"
+          sudo xcode-select -s "$XCODE_APP"
+          xcodebuild -version
+
+      - name: Install XcodeGen and uv
+        run: |
+          brew install xcodegen
+          brew install uv
+
+      - name: Import local signing certificate
+        env:
+          YOUTONGHY_P12: ${{ secrets.YOUTONGHY_P12 }}
+          YOUTONGHY_P12_PASSWORD: ${{ secrets.YOUTONGHY_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          [[ -n "$YOUTONGHY_P12" ]] || { echo "missing YOUTONGHY_P12 secret for youtonghy signing" >&2; exit 1; }
+
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          CERT="$RUNNER_TEMP/cert.p12"
+
+          printf '%s' "$YOUTONGHY_P12" | base64 --decode > "$CERT"
+          [[ -s "$CERT" ]] || { echo "YOUTONGHY_P12 did not decode to a p12 file" >&2; exit 1; }
+
+          PEM="$RUNNER_TEMP/imported.pem"
+          CER="$RUNNER_TEMP/imported.cer"
+          openssl pkcs12 -in "$CERT" -clcerts -nokeys \
+            -passin "pass:${YOUTONGHY_P12_PASSWORD:-}" \
+            -out "$PEM"
+          [[ -s "$PEM" ]] || { echo "p12 did not contain a certificate" >&2; exit 1; }
+          openssl x509 -in "$PEM" -out "$CER"
+          openssl x509 -in "$CER" -noout -subject -issuer -dates \
+            -ext basicConstraints,extendedKeyUsage || true
+          rm -f "$PEM"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          security import "$CERT" \
+            -P "${YOUTONGHY_P12_PASSWORD:-}" \
+            -A \
+            -f pkcs12 \
+            -k "$KEYCHAIN" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/productbuild
+          rm -f "$CERT"
+
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+
+          sudo security authorizationdb write com.apple.trust-settings.admin allow || true
+          security add-trusted-cert -r trustAsRoot -p basic -p codeSign \
+            -k "$KEYCHAIN" "$CER" || true
+          sudo security add-trusted-cert -d -r trustAsRoot -p basic -p codeSign \
+            -k /Library/Keychains/System.keychain "$CER" || true
+          rm -f "$CER"
+
+          USER_KEYCHAINS="$(security list-keychains -d user | sed -E 's/^[[:space:]]*"//;s/"[[:space:]]*$//')"
+          security list-keychains -d user -s "$KEYCHAIN" $USER_KEYCHAINS
+          security default-keychain -d user -s "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+          echo "Imported codesigning identities:"
+          security find-identity -p codesigning || true
+          if ! security find-identity -p codesigning | grep -Eq '[[:xdigit:]]{40} "youtonghy"'; then
+            echo "error: imported p12 does not contain identity named youtonghy" >&2
+            exit 1
+          fi
+
+      - name: Bootstrap OCR worker runtime
+        run: ./scripts/bootstrap_ocr_worker_runtime.sh --bootstrap
+
+      - name: Verify tests and audio routing build gates
+        run: ./scripts/verify-audio-routing-build.sh
+
+      - name: Build app
+        env:
+          OPEN: "0"
+          SKIP_INSTALL: "1"
+          CODE_SIGN_IDENTITY: "youtonghy"
+        run: ./build.sh
+
+      - name: Package app + dmg
+        env:
+          APP_PATH: build/Build/Products/Release/ToolBox.app
+          OUT_DIR: dist
+          REQUIRE_NOTARIZED: "0"
+        run: ./scripts/package-release.sh
+
+      - name: Collect commits since previous nightly
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          PREV="$(git tag -l 'beta-*' | grep -v "^${RELEASE_TAG}$" | sort | tail -1 || true)"
+          if [ -n "$PREV" ]; then
+            echo "Previous nightly tag: $PREV"
+            COMMITS="$(git log "${PREV}..HEAD" --pretty=format:'- %s' --no-merges || true)"
+          else
+            echo "No previous nightly tag; using commits since last non-draft release"
+            LAST_STABLE="$(
+              gh release list \
+                --exclude-drafts \
+                --limit 20 \
+                --json tagName,isPrerelease \
+                --jq '[.[] | select(.isPrerelease == false)][0].tagName // empty'
+            )"
+            if [ -n "$LAST_STABLE" ]; then
+              COMMITS="$(git log "${LAST_STABLE}..HEAD" --pretty=format:'- %s' --no-merges || true)"
+            else
+              COMMITS="$(git log -50 --pretty=format:'- %s' --no-merges || true)"
+            fi
+          fi
+
+          {
+            echo "### Nightly ${RELEASE_TITLE}"
+            echo
+            echo "Pre-release build for $(TZ=Asia/Shanghai date +%Y-%m-%d)."
+            echo
+            echo "### Changes"
+            echo
+            if [ -n "$COMMITS" ]; then
+              printf '%s\n' "$COMMITS"
+            else
+              echo "- No commits since the previous nightly"
+            fi
+            echo
+          } | tee release-notes.md
+
+      - name: Generate SBOM
+        run: ./scripts/generate_sbom.sh "$GITHUB_WORKSPACE/sbom.cdx.json"
+
+      - name: Clean temporary keychain
+        if: always()
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/release.keychain-db"
+          security delete-keychain "$KEYCHAIN" 2>/dev/null || true
+
+      - name: Publish pre-release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          TITLE="$RELEASE_TITLE"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            IS_PRERELEASE="$(gh release view "$TAG" --json isPrerelease --jq '.isPrerelease')"
+            if [ "$IS_PRERELEASE" = "true" ]; then
+              echo "Replacing existing pre-release $TAG"
+              gh release delete "$TAG" --yes --cleanup-tag
+            else
+              echo "Release $TAG already exists and is not a pre-release" >&2
+              exit 1
+            fi
+          fi
+
+          gh release create "$TAG" \
+            --prerelease \
+            --title "$TITLE" \
+            --notes-file release-notes.md \
+            "dist/ToolBox-${VERSION}.app.zip" \
+            "dist/ToolBox-${VERSION}.dmg" \
+            "sbom.cdx.json"
