@@ -39,10 +39,10 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
         let root = temporaryRoot()
         defer { try? FileManager.default.removeItem(at: root) }
         let automatic = FakeScrollDriver(results: [.manualRequired])
-        let manual = FakeScrollDriver(results: [.waitingForManualMovement, .waitingForManualMovement, .waitingForManualMovement])
+        let manual = FakeScrollDriver(results: Array(repeating: .waitingForManualMovement, count: 64))
         let stable = sample(rows: [.red, .green, .blue, .yellow], time: 1)
         let coordinator = ScrollCaptureCoordinator(
-            frameProvider: FakeScrollFrameProvider(samples: [stable, stable, stable, stable]),
+            frameProvider: FakeScrollFrameProvider(samples: Array(repeating: stable, count: 64)),
             automaticDriver: automatic,
             manualDriver: manual,
             rootDirectory: root,
@@ -55,7 +55,8 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
         let task = Task { try await coordinator.capture(target: target()) }
         let deadline = Date().addingTimeInterval(2)
         while Date() < deadline, coordinator.mode != .manual {
-            try await Task.sleep(for: .milliseconds(10))
+            await Task.yield()
+            try await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertEqual(coordinator.mode, .manual)
         coordinator.finishPartial()
