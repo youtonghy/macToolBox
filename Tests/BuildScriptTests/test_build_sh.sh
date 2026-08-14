@@ -38,9 +38,20 @@ EOF
 
   cat >"$fixture/bin/security" <<'EOF'
 #!/bin/bash
+valid_only=0
+for arg in "$@"; do
+  [ "$arg" = "-v" ] && valid_only=1
+done
 if [ "${MOCK_SECURITY_HAS_IDENTITY:-1}" = "1" ]; then
-  printf '  1) ABCDEF0123456789ABCDEF0123456789ABCDEF01 "%s"\n' "${MOCK_IDENTITY_NAME:-Apple Development: Test User (TEAMID1234)}"
-  printf '     1 valid identities found\n'
+  if [ "${MOCK_IDENTITY_UNTRUSTED:-0}" = "1" ] && [ "$valid_only" = "1" ]; then
+    printf '     0 valid identities found\n'
+  elif [ "${MOCK_IDENTITY_UNTRUSTED:-0}" = "1" ]; then
+    printf '  1) ABCDEF0123456789ABCDEF0123456789ABCDEF01 "%s" (CSSMERR_TP_NOT_TRUSTED)\n' "${MOCK_IDENTITY_NAME:-Apple Development: Test User (TEAMID1234)}"
+    printf '     1 identity found\n'
+  else
+    printf '  1) ABCDEF0123456789ABCDEF0123456789ABCDEF01 "%s"\n' "${MOCK_IDENTITY_NAME:-Apple Development: Test User (TEAMID1234)}"
+    printf '     1 valid identities found\n'
+  fi
 else
   printf '     0 valid identities found\n'
 fi
@@ -165,6 +176,27 @@ test_self_signed_identity_disables_library_validation() {
   assert_contains "$fixture/sign-nested.args" "Resources/ToolBox-AdHoc.entitlements"
 }
 
+test_uses_untrusted_self_signed_identity_when_requested() {
+  local fixture
+  fixture="$(make_fixture untrusted-self-signed)"
+
+  PATH="$fixture/bin:$PATH" \
+    MOCK_IDENTITY_NAME=youtonghy \
+    MOCK_IDENTITY_UNTRUSTED=1 \
+    MOCK_XCODEBUILD_ARGS="$fixture/xcodebuild.args" \
+    MOCK_SIGN_NESTED_ARGS="$fixture/sign-nested.args" \
+    MOCK_OPEN_PATH="$fixture/open.path" \
+    SIGN_IDENTITY_FILE="$fixture/state/signing-identity" \
+    INSTALL_APP_PATH="$fixture/install/ToolBox.app" \
+    CODE_SIGN_IDENTITY=youtonghy \
+    OPEN=0 \
+    "$fixture/project/build.sh" >"$fixture/output.log" 2>&1
+
+  assert_contains "$fixture/output.log" "ABCDEF0123456789ABCDEF0123456789ABCDEF01 (youtonghy)"
+  assert_contains "$fixture/xcodebuild.args" "CODE_SIGN_IDENTITY=ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+  assert_contains "$fixture/xcodebuild.args" "CODE_SIGN_ENTITLEMENTS=Resources/ToolBox-AdHoc.entitlements"
+}
+
 test_defaults_to_system_applications_directory() {
   assert_contains "$ROOT_DIR/build.sh" 'INSTALL_APP_PATH="${INSTALL_APP_PATH:-/Applications/ToolBox.app}"'
 }
@@ -172,5 +204,6 @@ test_defaults_to_system_applications_directory() {
 test_locks_identity_and_updates_installed_bundle_in_place
 test_refuses_implicit_ad_hoc_signing
 test_self_signed_identity_disables_library_validation
+test_uses_untrusted_self_signed_identity_when_requested
 test_defaults_to_system_applications_directory
 echo "PASS: build.sh behavior"

@@ -14,28 +14,55 @@ SIGN_IDENTITY_FILE="${SIGN_IDENTITY_FILE:-$HOME/Library/Application Support/Tool
 ALLOW_ADHOC="${ALLOW_ADHOC:-0}"
 ENTITLEMENTS="Resources/ToolBox-AdHoc.entitlements"
 
-IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+VALID_IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+ALL_IDENTITIES="$(security find-identity -p codesigning 2>/dev/null || true)"
+IDENTITIES="$VALID_IDENTITIES"
 REQUESTED_IDENTITY="${CODE_SIGN_IDENTITY:-}"
 SIGN_IDENTITY=""
 
-identity_hash_for() {
-  local requested="$1"
+lookup_identity_hash() {
+  local haystack="$1"
+  local requested="$2"
 
   if [[ "$requested" =~ ^[[:xdigit:]]{40}$ ]]; then
-    printf '%s\n' "$IDENTITIES" | awk -v hash="$requested" '$2 == hash { print $2; exit }'
+    printf '%s\n' "$haystack" | awk -v hash="$requested" '
+      match($0, /[[:xdigit:]]{40}/) {
+        h = substr($0, RSTART, RLENGTH)
+        if (h == hash) { print h; exit }
+      }'
   else
-    printf '%s\n' "$IDENTITIES" \
-      | sed -n 's/^[[:space:]]*[0-9]*) \([[:xdigit:]]\{40\}\) "\(.*\)"$/\1|\2/p' \
-      | awk -F '|' -v name="$requested" '$2 == name { print $1; exit }'
+    printf '%s\n' "$haystack" | awk -v name="$requested" '
+      match($0, /[[:xdigit:]]{40}/) { h = substr($0, RSTART, RLENGTH) }
+      match($0, /"[^"]+"/) {
+        n = substr($0, RSTART + 1, RLENGTH - 2)
+        if (n == name) { print h; exit }
+      }'
   fi
+}
+
+identity_hash_for() {
+  local requested="$1"
+  local found
+
+  found="$(lookup_identity_hash "$VALID_IDENTITIES" "$requested")"
+  if [ -n "$found" ]; then
+    printf '%s\n' "$found"
+    return
+  fi
+  # Explicit / locked identities remain usable when the cert is present but
+  # not yet trusted (CSSMERR_TP_NOT_TRUSTED on a fresh CI keychain).
+  lookup_identity_hash "$ALL_IDENTITIES" "$requested"
 }
 
 identity_name_for_hash() {
   local hash="$1"
 
-  printf '%s\n' "$IDENTITIES" \
-    | sed -n 's/^[[:space:]]*[0-9]*) \([[:xdigit:]]\{40\}\) "\(.*\)"$/\1|\2/p' \
-    | awk -F '|' -v requested_hash="$hash" '$1 == requested_hash { print substr($0, index($0, "|") + 1); exit }'
+  printf '%s\n' "$ALL_IDENTITIES" | awk -v requested_hash="$hash" '
+    match($0, /[[:xdigit:]]{40}/) { h = substr($0, RSTART, RLENGTH) }
+    match($0, /"[^"]+"/) {
+      n = substr($0, RSTART + 1, RLENGTH - 2)
+      if (h == requested_hash) { print n; exit }
+    }'
 }
 
 if [ -f "$SIGN_IDENTITY_FILE" ]; then
