@@ -113,8 +113,10 @@ final class CoreWLANWiFiProvider: WiFiSnapshotProviding {
         case .mode11n: return "802.11n"
         case .mode11ac: return "802.11ac"
         case .mode11ax: return "802.11ax"
-        case .mode11be: return "802.11be"
-        default: return nil
+        default:
+            // kCWPHYMode11be = 7; the Swift case is missing from older Xcode 26 SDKs.
+            if value.rawValue == 7 { return "802.11be" }
+            return nil
         }
     }
 
