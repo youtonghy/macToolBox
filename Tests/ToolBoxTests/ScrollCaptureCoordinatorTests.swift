@@ -53,9 +53,11 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
         )
 
         let task = Task { try await coordinator.capture(target: target()) }
-        for _ in 0..<100 where manual.callCount == 0 {
-            await Task.yield()
+        let deadline = Date().addingTimeInterval(2)
+        while Date() < deadline, coordinator.mode != .manual {
+            try await Task.sleep(for: .milliseconds(10))
         }
+        XCTAssertEqual(coordinator.mode, .manual)
         coordinator.finishPartial()
         _ = try await task.value
 

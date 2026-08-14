@@ -13,6 +13,7 @@ final class AXRegionProjectionTests: XCTestCase {
         let provider = AXRegionProvider(
             ownPID: 99,
             primaryScreenTop: { 1_000 },
+            visibleScreenFrames: axTestScreenFrames,
             currentGeneration: { 7 },
             lookup: { _ in .success(records) }
         )
@@ -33,6 +34,7 @@ final class AXRegionProjectionTests: XCTestCase {
         let provider = AXRegionProvider(
             ownPID: 99,
             primaryScreenTop: { 100 },
+            visibleScreenFrames: axTestScreenFrames,
             currentGeneration: { 1 },
             lookup: { _ in .success(records) }
         )
@@ -95,6 +97,7 @@ final class AXRegionProjectionTests: XCTestCase {
         let provider = AXRegionProvider(
             ownPID: 99,
             primaryScreenTop: { 1_000 },
+            visibleScreenFrames: axTestScreenFrames,
             currentGeneration: { 7 },
             lookup: { request in
                 capturedRequest.set(request)
@@ -183,6 +186,7 @@ final class AXRegionProjectionTests: XCTestCase {
         let provider = AXRegionProvider(
             ownPID: 99,
             primaryScreenTop: { 1_000 },
+            visibleScreenFrames: axTestScreenFrames,
             currentGeneration: { 7 },
             lookup: { _ in .success(records) }
         )
@@ -203,6 +207,7 @@ final class AXRegionProjectionTests: XCTestCase {
         let provider = AXRegionProvider(
             ownPID: 99,
             primaryScreenTop: { 1_000 },
+            visibleScreenFrames: axTestScreenFrames,
             currentGeneration: { 7 },
             lookup: { _ in .success(records) }
         )
@@ -341,6 +346,10 @@ final class AXRegionProjectionTests: XCTestCase {
         XCTAssertEqual(candidate?.title, "Front")
         XCTAssertEqual(candidate?.globalRect, CGRect(x: 20, y: 80, width: 100, height: 100))
     }
+}
+
+private let axTestScreenFrames: () -> [CGRect] = {
+    [CGRect(x: 0, y: 0, width: 4_000, height: 4_000)]
 }
 
 private final class LockedAXLookupRequest: @unchecked Sendable {
