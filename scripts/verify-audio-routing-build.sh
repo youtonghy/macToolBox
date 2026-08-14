@@ -46,9 +46,9 @@ for config in Debug Release; do
   test -x "$binary"
   plutil -lint "$app/Contents/Info.plist"
   codesign --verify --deep --strict "$app"
-  codesign -d --entitlements :- "$app" 2>&1 | sed -n '/^<?xml/,$p' \
-    | plutil -p - \
-    | grep -Fqx '  "com.apple.security.cs.disable-library-validation" => true'
+  entitlements_xml="$(codesign -d --entitlements :- "$app" 2>&1 | sed -n '/^<?xml/,$p')"
+  printf '%s\n' "$entitlements_xml" | grep -Fq 'com.apple.security.cs.disable-library-validation'
+  printf '%s\n' "$entitlements_xml" | grep -A1 'com.apple.security.cs.disable-library-validation' | grep -Fq '<true/>'
   dependencies="$(otool -L "$dependency_binary")"
   grep -q '/CoreAudio.framework/' <<< "$dependencies"
 done
