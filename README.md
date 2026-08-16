@@ -78,7 +78,7 @@ GitHub Actions 工作流 [Release](.github/workflows/release.yml) 为手动触�
 4. 打包 `ToolBox-<version>.app.zip` 与 `ToolBox-<version>.dmg`，并生成 CycloneDX SBOM `sbom.cdx.json`
 5. 创建 **Draft** Release，描述为上一正式 Release 之后的全部 commit message，附件包含 zip、dmg 和 SBOM
 
-[Nightly](.github/workflows/nightly.yml) 每天北京时间 00:00 自动构建 **Pre-release**。版本形如 `Beta 260814`（应用内和市场文件名为 `Beta260814`，tag 为 `beta-260814`）。若当天没有新 commit 则跳过；同一天重跑会覆盖当天的 beta。也可在 Actions → **Nightly** → **Run workflow** 手动触发。
+[Nightly](.github/workflows/nightly.yml) 每天北京时间 00:00 **检查**是否需要发 **Pre-release**，而不是每晚都构建。仅当 `main` 相对上一份 Beta 有新 commit 时才编译并发布；内容与上次相同则不发 Beta、也不占用 macOS runner。版本形如 `Beta 260814`（应用内和市场文件名为 `Beta260814`，tag 为 `beta-260814`）。Actions → **Nightly** → **Run workflow** 可手动强制构建；同一天重跑会覆盖当天的 beta。
 
 本地打包（需已构建 `.app`）：
 
