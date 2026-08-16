@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   meta:
-    name: Version
+    name: Check
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.meta.outputs.should_build }}
@@ -23,22 +23,26 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       title: ${{ steps.meta.outputs.title }}
       build_number: ${{ steps.meta.outputs.build_number }}
+      skip_reason: ${{ steps.meta.outputs.skip_reason }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
-      - name: Compute Beta stamp
+      - name: Check for new commits since last beta
         id: meta
         env:
           EVENT_NAME: ${{ github.event_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           STAMP="$(TZ=Asia/Shanghai date +%y%m%d)"
           VERSION="Beta${STAMP}"
           TAG="beta-${STAMP}"
           TITLE="ToolBox Beta ${STAMP}"
+          HEAD_SHA="$(git rev-parse HEAD)"
           {
             echo "version=$VERSION"
             echo "tag=$TAG"
@@ -46,16 +50,53 @@ jobs:
             echo "build_number=$STAMP"
           } >> "$GITHUB_OUTPUT"
 
-          SHOULD=true
-          if [ "$EVENT_NAME" = "schedule" ]; then
-            PREV="$(git tag -l 'beta-*' | grep -v "^${TAG}$" | sort | tail -1 || true)"
-            if [ -n "$PREV" ] && [ -z "$(git log "${PREV}..HEAD" --oneline)" ]; then
-              echo "No commits since $PREV; skipping scheduled nightly"
-              SHOULD=false
-            fi
+          # Latest published beta, including today's tag if it already exists.
+          # Do not exclude today's stamp: a scheduled re-run of the same HEAD
+          # must not rebuild or re-post the same content.
+          PREV="$(
+            gh release list --exclude-drafts --limit 100 \
+              --json tagName,isPrerelease \
+              --jq '[.[] | select(.isPrerelease == true and (.tagName | startswith("beta-")))][0].tagName // empty'
+          )"
+          if [ -z "$PREV" ]; then
+            PREV="$(git tag -l 'beta-*' | sort | tail -1 || true)"
           fi
-          echo "should_build=$SHOULD" >> "$GITHUB_OUTPUT"
-          echo "Nightly $TITLE (tag $TAG) should_build=$SHOULD"
+
+          SHOULD=true
+          SKIP_REASON=""
+          if [ "$EVENT_NAME" = "schedule" ] && [ -n "$PREV" ]; then
+            if ! git rev-parse -q --verify "${PREV}^{commit}" >/dev/null; then
+              git fetch origin "refs/tags/${PREV}:refs/tags/${PREV}"
+            fi
+            NEW_COMMITS="$(git rev-list --count "${PREV}..HEAD")"
+            PREV_SHA="$(git rev-parse "${PREV}^{commit}")"
+            echo "HEAD=$HEAD_SHA last_beta=$PREV ($PREV_SHA) new_commits=$NEW_COMMITS"
+            if [ "$NEW_COMMITS" -eq 0 ]; then
+              SHOULD=false
+              SKIP_REASON="No new commits since ${PREV}; not publishing a beta"
+            fi
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            echo "No previous beta found; publishing the first scheduled beta"
+          else
+            echo "Manual run; publishing even if HEAD matches the last beta"
+          fi
+
+          {
+            echo "should_build=$SHOULD"
+            echo "skip_reason=$SKIP_REASON"
+          } >> "$GITHUB_OUTPUT"
+          echo "Nightly $TITLE (tag $TAG) should_build=$SHOULD ${SKIP_REASON}"
+
+  skip:
+    name: No new commits
+    needs: meta
+    if: needs.meta.outputs.should_build != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Skip publish
+        run: |
+          echo "${{ needs.meta.outputs.skip_reason }}"
+          echo "Nightly check only: beta is not posted unless main has a new commit."
 
   nightly:
     name: Build and publish pre-release
@@ -72,6 +113,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          fetch-tags: true
 
       - name: Select latest Xcode
         run: |
