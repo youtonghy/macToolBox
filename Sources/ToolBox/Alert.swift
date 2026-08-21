@@ -9,17 +9,19 @@ enum AppAlert {
     ///   - title: Bold headline (`messageText`).
     ///   - message: Detail body (`informativeText`).
     ///   - primaryButton: Optional leading button (e.g. "打开系统设置") with an action run on click.
-    ///   A trailing "好" button is always added.
+    ///   A trailing secondary button is always added.
     static func show(title: String,
                      message: String,
-                     primaryButton: (title: String, action: (() -> Void)?)? = nil) {
+                     primaryButton: (title: String, action: (() -> Void)?)? = nil,
+                     secondaryButtonTitle: String = "好") {
         let present = {
+            NSApp.activate(ignoringOtherApps: true)
             let alert = NSAlert()
             alert.alertStyle = .warning
             alert.messageText = title
             alert.informativeText = message
             if let primaryButton { alert.addButton(withTitle: primaryButton.title) }
-            alert.addButton(withTitle: "好")
+            alert.addButton(withTitle: secondaryButtonTitle)
             let response = alert.runModal()
             if response == .alertFirstButtonReturn, let primaryButton { primaryButton.action?() }
         }

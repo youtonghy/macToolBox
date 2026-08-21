@@ -67,6 +67,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let audioRouting = AudioRoutingService()
     private let wifiSignal = WiFiSignalModel()
     private let shortcutRegistry = ShortcutRegistry()
+    private let appUpdater = AppUpdateCoordinator()
     private lazy var shortcutSettings = ShortcutSettingsModel(registry: shortcutRegistry)
     private let screenshotWindowProvider = WindowRegionProvider()
     private lazy var screenshotAXProvider = AXRegionProvider()
@@ -193,6 +194,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         focusMode.start()
         observePanelSizeChanges()
         refreshPanelSize()
+        appUpdater.start()
     }
 
     private func observePanelSizeChanges() {
@@ -373,7 +375,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 audioRouting: audioRouting,
                 focusMode: focusMode,
                 wifiSignal: wifiSignal,
-                shortcutSettings: shortcutSettings
+                shortcutSettings: shortcutSettings,
+                updater: appUpdater
             ),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)

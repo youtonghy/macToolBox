@@ -10,6 +10,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case screenshot
     case shortcuts
     case general
+    case about
 
     var id: String { rawValue }
 
@@ -31,6 +32,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "快捷键"
         case .general:
             return "通用"
+        case .about:
+            return "关于"
         }
     }
 
@@ -52,6 +55,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "keyboard"
         case .general:
             return "switch.2"
+        case .about:
+            return "info.circle"
         }
     }
 
@@ -73,6 +78,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemBlue)
         case .general:
             return Color(nsColor: .systemOrange)
+        case .about:
+            return Color(nsColor: .systemBlue)
         }
     }
 }
@@ -86,6 +93,7 @@ struct SettingsView: View {
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
     @ObservedObject var shortcutSettings: ShortcutSettingsModel
+    @ObservedObject var updater: AppUpdateCoordinator
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
     @StateObject private var launchAtLogin = LaunchAtLoginController()
 
@@ -154,6 +162,8 @@ struct SettingsView: View {
                     ShortcutSettingsView(model: shortcutSettings)
                 case .general:
                     GeneralSettingsView(launchAtLogin: launchAtLogin)
+                case .about:
+                    AppUpdateSettingsView(updater: updater)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
