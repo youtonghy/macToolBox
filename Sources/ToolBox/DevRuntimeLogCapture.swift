@@ -44,8 +44,8 @@ enum DevRuntimeLogCapturePolicy {
 }
 
 @MainActor
-final class DevRuntimeLogCapture {
-    static let shared = DevRuntimeLogCapture()
+public final class DevRuntimeLogCapture {
+    public static let shared = DevRuntimeLogCapture()
 
     private static let watchdogScript = """
     target_pid="$1"
@@ -67,7 +67,7 @@ final class DevRuntimeLogCapture {
     private var watchdog: Process?
     private(set) var logFileURL: URL?
 
-    func start(
+    public func start(
         bundle: Bundle = .main,
         processInfo: ProcessInfo = .processInfo,
         fileManager: FileManager = .default,
@@ -118,7 +118,7 @@ final class DevRuntimeLogCapture {
         }
     }
 
-    func stop() {
+    public func stop() {
         guard let watchdog else { return }
         self.watchdog = nil
         logger.notice("Stopping DEV runtime logging")

@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 @MainActor
 final class ScreenshotCoordinatorTests: XCTestCase {

@@ -39,21 +39,31 @@ for config in Debug Release; do
 
   app="$config_data/Build/Products/$config/ToolBox.app"
   binary="$app/Contents/MacOS/ToolBox"
+  cli="$app/Contents/Helpers/toolbox"
+  ./scripts/sign_nested_runtime.sh "$app" - Resources/ToolBox-AdHoc.entitlements
   dependency_binary="$binary"
   if [[ -f "$app/Contents/MacOS/ToolBox.debug.dylib" ]]; then
     dependency_binary="$app/Contents/MacOS/ToolBox.debug.dylib"
   fi
   test -x "$binary"
+  test -x "$cli"
   plutil -lint "$app/Contents/Info.plist"
+  codesign --verify --strict "$cli"
   codesign --verify --deep --strict "$app"
+  "$cli" --help >/dev/null
   entitlements_xml="$(codesign -d --entitlements :- "$app" 2>&1 | sed -n '/^<?xml/,$p')"
   printf '%s\n' "$entitlements_xml" | grep -Fq 'com.apple.security.cs.disable-library-validation'
   printf '%s\n' "$entitlements_xml" | grep -A1 'com.apple.security.cs.disable-library-validation' | grep -Fq '<true/>'
+  cli_entitlements="$(codesign -d --entitlements :- "$cli" 2>&1 | sed -n '/^<?xml/,$p')"
+  if grep -Fq '<key>' <<< "$cli_entitlements"; then
+    echo "error: CLI helper must not carry app entitlements" >&2
+    exit 1
+  fi
   dependencies="$(otool -L "$dependency_binary")"
   grep -q '/CoreAudio.framework/' <<< "$dependencies"
 done
 
-plutil -lint Resources/Info.plist Resources/ToolBox.entitlements Resources/ToolBox-AdHoc.entitlements
+plutil -lint Resources/Info.plist Resources/ToolBox.entitlements Resources/ToolBox-AdHoc.entitlements Resources/ToolBoxCLI.entitlements
 git diff --check
 
 echo "==> Audio routing verification passed"

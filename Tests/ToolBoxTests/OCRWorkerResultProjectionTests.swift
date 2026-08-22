@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class OCRWorkerResultProjectionTests: XCTestCase {
     func testProjectsStructureBlocksAsTypedBlocks() throws {

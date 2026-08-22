@@ -2,7 +2,7 @@ import CoreGraphics
 import Foundation
 import ImageIO
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class PaddleOCRRuntimeIntegrationTests: XCTestCase {
     @MainActor

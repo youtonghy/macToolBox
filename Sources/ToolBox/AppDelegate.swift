@@ -2,6 +2,7 @@ import AppKit
 import SwiftUI
 import Combine
 import OSLog
+import ToolBoxControlProtocol
 
 @MainActor
 final class TerminationShutdownCoordinator {
@@ -46,7 +47,7 @@ final class TerminationShutdownCoordinator {
 }
 
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private lazy var menuBarPanelController = MenuBarPanelController(
         rootView: PopoverContent(
@@ -68,6 +69,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let wifiSignal = WiFiSignalModel()
     private let shortcutRegistry = ShortcutRegistry()
     private let appUpdater = AppUpdateCoordinator()
+    private let launchAtLogin = LaunchAtLoginController()
     private lazy var shortcutSettings = ShortcutSettingsModel(registry: shortcutRegistry)
     private let screenshotWindowProvider = WindowRegionProvider()
     private lazy var screenshotAXProvider = AXRegionProvider()
@@ -128,6 +130,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var isTerminating = false
     private var terminationShutdownCoordinator: TerminationShutdownCoordinator?
+    private var controlTransport: ToolBoxControlTransport?
+    private lazy var commandRouter = ToolBoxCommandRouter(
+        displayControl: displayControl,
+        audioRouting: audioRouting,
+        focusMode: focusMode,
+        awake: awake,
+        state: state,
+        launchAtLogin: launchAtLogin
+    )
 
     private var currentPanelSize: NSSize {
         MenuPanelLayout.panelSize(
@@ -143,7 +154,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let screenWipe = ScreenWipeCoordinator()
     let awake = AwakeCoordinator()
 
-    func applicationDidFinishLaunching(_ notification: Notification) {
+    public override init() {
+        super.init()
+    }
+
+    public func applicationDidFinishLaunching(_ notification: Notification) {
         // Belt-and-suspenders with Info.plist LSUIElement.
         NSApp.setActivationPolicy(.accessory)
         screenshotPreview.onClose = { [weak self] in
@@ -195,6 +210,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         observePanelSizeChanges()
         refreshPanelSize()
         appUpdater.start()
+        do {
+            let transport = ToolBoxControlTransport { [weak self] request in
+                guard let self else {
+                    throw ToolBoxCommandRouterError.applicationUnavailable
+                }
+                return try await self.commandRouter.handle(request)
+            }
+            try transport.start()
+            controlTransport = transport
+        } catch {
+            logger.error("Failed to start CLI control transport: \(String(describing: error), privacy: .public)")
+        }
     }
 
     private func observePanelSizeChanges() {
@@ -217,7 +244,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menuBarPanelController.updatePanelSize(currentPanelSize)
     }
 
-    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateLater }
         isTerminating = true
         stopNonAudioServices()
@@ -234,7 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return .terminateLater
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    public func applicationWillTerminate(_ notification: Notification) {
         DevRuntimeLogCapture.shared.stop()
         guard !isTerminating else { return }
         stopNonAudioServices()
@@ -242,6 +269,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func stopNonAudioServices() {
+        controlTransport?.stop()
+        controlTransport = nil
         screenWipe.stop()
         screenshotCoordinator.cancel()
         screenshotPreview.close()
@@ -376,7 +405,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 focusMode: focusMode,
                 wifiSignal: wifiSignal,
                 shortcutSettings: shortcutSettings,
-                updater: appUpdater
+                updater: appUpdater,
+                launchAtLogin: launchAtLogin
             ),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)
@@ -424,7 +454,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func applyAwake(_ on: Bool) {
-        if on { awake.start() } else { awake.stop() }
+        if on {
+            do {
+                _ = try awake.start()
+            } catch {
+                state.awakeOn = false
+                logger.error("Failed to enable awake mode: \(String(describing: error), privacy: .public)")
+            }
+        } else {
+            awake.stop()
+        }
     }
 
     private func handleShortcutAction(_ action: ShortcutAction) -> Bool {

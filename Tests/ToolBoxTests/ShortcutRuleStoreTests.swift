@@ -1,6 +1,6 @@
 import Carbon.HIToolbox
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class ShortcutRuleStoreTests: XCTestCase {
     private var defaults: UserDefaults!

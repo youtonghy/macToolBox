@@ -180,7 +180,7 @@ if [ ! -d "$APP" ]; then
   exit 1
 fi
 
-if [ "$SIGN_IDENTITY" != "-" ] && [ -x ./scripts/sign_nested_runtime.sh ]; then
+if [ -x ./scripts/sign_nested_runtime.sh ]; then
   ./scripts/sign_nested_runtime.sh "$APP" "$SIGN_IDENTITY" "$ENTITLEMENTS"
 fi
 

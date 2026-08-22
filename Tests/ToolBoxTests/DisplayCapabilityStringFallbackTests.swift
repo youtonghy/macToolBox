@@ -1,5 +1,5 @@
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class DisplayCapabilityStringFallbackTests: XCTestCase {
     func testU2723QEFallbackParsesAndAdvertisesE2PresetValues() throws {

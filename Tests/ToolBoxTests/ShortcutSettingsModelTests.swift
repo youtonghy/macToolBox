@@ -1,6 +1,6 @@
 import Carbon.HIToolbox
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 @MainActor
 final class ShortcutSettingsModelTests: XCTestCase {

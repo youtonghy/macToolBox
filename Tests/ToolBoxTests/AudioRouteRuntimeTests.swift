@@ -1,7 +1,7 @@
 import CoreAudio
 import Foundation
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioRouteRuntimeTests: XCTestCase {
     func testSameIntentAndObservationIsIdempotent() throws {

@@ -1,7 +1,7 @@
 import CoreAudio
 import XCTest
 
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioRouteRealtimeTests: XCTestCase {
     private enum KernelCreationError: Error {

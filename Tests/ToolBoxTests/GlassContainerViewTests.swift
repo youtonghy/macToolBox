@@ -1,6 +1,6 @@
 import AppKit
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class GlassContainerViewTests: XCTestCase {
     func testRootLayerOwnsClippingButNotExteriorShadow() throws {

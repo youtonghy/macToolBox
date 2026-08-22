@@ -1,6 +1,6 @@
 import CryptoKit
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class OCRModelDownloadManagerTests: XCTestCase {
     func testRequiresConsentThenDownloadsEveryFileAndPublishes() async throws {

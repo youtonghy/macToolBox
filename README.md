@@ -49,6 +49,42 @@ VERSION=1.2.3 BUILD_NUMBER=42 OPEN=0 ./build.sh
 
 > 只想构建不自动打开：`OPEN=0 ./build.sh`
 
+## 命令行工具
+
+ToolBox.app 内含签名的 `toolbox` 命令行程序。首次安装应用后，可将它链接到当前用户的
+`~/.local/bin`；该命令不会使用 `sudo`、覆盖其他文件或修改 shell 配置：
+
+```bash
+/Applications/ToolBox.app/Contents/Helpers/toolbox install
+toolbox --help
+```
+
+若 `~/.local/bin` 尚未加入 `PATH`，按命令输出将它加入当前 shell 后重新打开终端。
+`toolbox uninstall` 只删除由 ToolBox 创建并仍指向当前应用的链接。
+
+常用命令：
+
+```bash
+toolbox status
+toolbox display list
+toolbox display get --display-id 1
+toolbox display set --display-id 1 --brightness 55
+toolbox focus set --enabled true --opacity 55
+toolbox audio apps
+toolbox audio devices
+toolbox audio set --bundle-id com.apple.Music --volume 120
+toolbox awake on
+toolbox launch-at-login on
+```
+
+查询命令可加 `--json` 输出稳定的英文字段。控制命令在 ToolBox 未运行时会在后台启动应用，
+因为显示器、音频、聚焦模式、TCC 和登录项仍由签名的 GUI 应用统一管理；加 `--no-launch`
+可要求应用未运行时立即失败。`--help`、`--version` 和参数校验不会启动应用。
+
+CLI 只开放 ToolBox 已有的控制能力，不接受任意 `defaults` key、shell 命令或提权操作。
+显示器和音频一次只修改一个参数，避免多项硬件操作部分成功。退出码为：`0` 成功、`64`
+参数错误、`69` 应用或控制协议不可用、`77` 权限不足、`1` 硬件或领域操作失败。
+
 `build.sh` 固定使用 Bundle ID `com.youtonghy.toolbox`。首次构建会按顺序选择钥匙串中的第一张
 `Developer ID Application`、`Apple Development` 或名为 `youtonghy` 的证书，并将其 SHA-1 identity 锁定在
 `~/Library/Application Support/ToolBox/build-signing-identity`；后续构建若找不到同一张证书会
@@ -111,6 +147,9 @@ NOTARY_APPLE_ID=... NOTARY_PASSWORD=... TEAM_ID=... ./scripts/notarize.sh /Appli
 | `build.sh` | 锁定签名身份，引导 OCR 运行时，执行 `xcodegen` / `xcodebuild`，原位更新并启动固定路径下的应用 |
 | `Sources/ToolBox/ToolBoxApp.swift` | `@main` SwiftUI App + AppDelegate adaptor |
 | `Sources/ToolBox/AppDelegate.swift` | 状态栏图标 + 菜单浮层/右键菜单 + 硬件数据启动/停止 + 开关联动 |
+| `Sources/ToolBoxCLI/*` | `toolbox` 参数解析、输出、安装和 XPC 客户端 |
+| `Sources/ToolBoxControlProtocol/*` | GUI 与 CLI 共用的版本化控制协议和结构化响应 |
+| `Sources/ToolBox/CLI/*` | 应用侧受认证 XPC 服务和命令路由 |
 | `Sources/ToolBox/MenuBarPanelController.swift` / `GlassHostingViewController.swift` / `GlassPopoverViewController.swift` | AppKit 自定义菜单浮层控制器 / 通用液态玻璃容器 / 菜单弹窗封装 |
 | `Sources/ToolBox/PopoverContent.swift` / `FeatureState.swift` | 弹窗内容 UI / 开关状态 |
 | `Sources/ToolBox/HardwareData/*` | 菜单硬件模型与 AppKit 绘制视图 |

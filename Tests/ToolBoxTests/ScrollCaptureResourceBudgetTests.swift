@@ -1,5 +1,5 @@
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class ScrollCaptureResourceBudgetTests: XCTestCase {
     func testHeightLimitOneRowBeforeAtAndAfter() throws {

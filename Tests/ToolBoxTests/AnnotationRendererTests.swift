@@ -2,7 +2,7 @@ import AppKit
 import CoreGraphics
 import ImageIO
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AnnotationRendererTests: XCTestCase {
     func testRenderPreservesBaseAndAppliesAnnotationsInZOrder() throws {

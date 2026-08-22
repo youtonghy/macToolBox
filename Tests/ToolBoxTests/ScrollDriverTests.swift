@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class ScrollDriverTests: XCTestCase {
     func testAutomaticDriverPostsPixelStepAtROICenter() async throws {

@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import ToolBoxCore
 
 @main
 struct ToolBoxApp: App {

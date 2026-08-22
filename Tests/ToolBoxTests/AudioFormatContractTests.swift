@@ -1,7 +1,7 @@
 import AudioToolbox
 import XCTest
 
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioFormatContractTests: XCTestCase {
     func testSupportedFormatMatrixUsesOutputRateAndStereoCanonicalLayout() throws {

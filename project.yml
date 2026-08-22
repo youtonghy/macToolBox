@@ -7,6 +7,9 @@ options:
   groupSortPosition: top
 
 packages:
+  ArgumentParser:
+    url: https://github.com/apple/swift-argument-parser.git
+    exactVersion: 1.7.0
   Yams:
     url: https://github.com/jpsim/Yams.git
     exactVersion: 5.0.6
@@ -26,7 +29,7 @@ targets:
     type: application
     platform: macOS
     sources:
-      - Sources/ToolBox
+      - Sources/ToolBox/ToolBoxApp.swift
       - path: Sources/ToolBoxOCRWorker
         buildPhase: resources
         type: folder
@@ -37,7 +40,14 @@ targets:
       - path: Resources/OCRModels
         buildPhase: resources
     dependencies:
-      - package: Yams
+      - target: ToolBoxCore
+      - target: ToolBoxControlProtocol
+      - target: ToolBoxCLI
+        link: false
+        embed: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Helpers
       - framework: .build/ocr-runtime/lib/libonnxruntime.1.24.3.dylib
         embed: true
         codeSign: true
@@ -45,6 +55,7 @@ targets:
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: CoreWLAN.framework
+      - sdk: Security.framework
     info:
       path: Resources/Info.plist
       properties:
@@ -62,12 +73,48 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox
         PRODUCT_NAME: ToolBox
+        DEFINES_MODULE: YES
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         # Xcode launches use ad-hoc signing by default; production signing overrides this in build.sh.
         CODE_SIGN_ENTITLEMENTS: Resources/ToolBox-AdHoc.entitlements
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_HARDENED_RUNTIME: YES
         COMBINE_HIDPI_IMAGES: YES
+        LD_RUNPATH_SEARCH_PATHS:
+          - "$(inherited)"
+          - "@executable_path/../Frameworks"
+        LIBRARY_SEARCH_PATHS:
+          - "$(inherited)"
+          - "$(PROJECT_DIR)/.build/ocr-runtime/lib"
+        FRAMEWORK_SEARCH_PATHS:
+          - "$(inherited)"
+          - /System/Library/Frameworks
+    scheme:
+      testTargets:
+        - ToolBoxTests
+        - ToolBoxCLITests
+  ToolBoxCore:
+    type: library.static
+    platform: macOS
+    sources:
+      - path: Sources/ToolBox
+        excludes:
+          - ToolBoxApp.swift
+    dependencies:
+      - target: ToolBoxControlProtocol
+      - package: Yams
+      - framework: .build/ocr-runtime/lib/libonnxruntime.1.24.3.dylib
+      - sdk: CoreDisplay.framework
+      - sdk: CoreAudio.framework
+      - sdk: AudioToolbox.framework
+      - sdk: CoreWLAN.framework
+      - sdk: Security.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.core
+        PRODUCT_NAME: ToolBoxCore
+        DEFINES_MODULE: YES
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
         SWIFT_OBJC_BRIDGING_HEADER: Sources/ToolBox/DisplayControl/Darwin/DisplayControlBridgingHeader.h
         CLANG_CXX_LANGUAGE_STANDARD: c++17
         HEADER_SEARCH_PATHS:
@@ -77,12 +124,35 @@ targets:
         LIBRARY_SEARCH_PATHS:
           - "$(inherited)"
           - "$(PROJECT_DIR)/.build/ocr-runtime/lib"
-        LD_RUNPATH_SEARCH_PATHS:
-          - "$(inherited)"
-          - "@executable_path/../Frameworks"
         FRAMEWORK_SEARCH_PATHS:
           - "$(inherited)"
           - /System/Library/Frameworks
+  ToolBoxCLI:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/ToolBoxCLI
+    dependencies:
+      - target: ToolBoxControlProtocol
+      - package: ArgumentParser
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.cli
+        PRODUCT_NAME: toolbox
+        CODE_SIGN_ENTITLEMENTS: Resources/ToolBoxCLI.entitlements
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        ENABLE_HARDENED_RUNTIME: YES
+  ToolBoxControlProtocol:
+    type: library.static
+    platform: macOS
+    sources:
+      - Sources/ToolBoxControlProtocol
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.control-protocol
+        PRODUCT_NAME: ToolBoxControlProtocol
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
   ToolBoxTests:
     type: bundle.unit-test
     platform: macOS
@@ -94,3 +164,29 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.tests
         GENERATE_INFOPLIST_FILE: YES
+  ToolBoxCLITests:
+    type: bundle.unit-test
+    platform: macOS
+    sources:
+      - Tests/ToolBoxCLITests
+      - path: Sources/ToolBoxCLI
+        excludes:
+          - Main.swift
+    dependencies:
+      - target: ToolBoxControlProtocol
+      - package: ArgumentParser
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.cli.tests
+        GENERATE_INFOPLIST_FILE: YES
+
+schemes:
+  ToolBoxCLI:
+    build:
+      targets:
+        ToolBoxCLI: all
+    test:
+      targets:
+        - name: ToolBoxCLITests
+          parallelizable: true
+          randomExecutionOrder: false

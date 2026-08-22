@@ -1,6 +1,6 @@
 import Combine
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioRoutingServiceTests: XCTestCase {
     @MainActor

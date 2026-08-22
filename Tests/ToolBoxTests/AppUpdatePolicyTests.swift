@@ -1,6 +1,6 @@
 import Foundation
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AppUpdatePolicyTests: XCTestCase {
     func testStableChannelIgnoresDraftsBetasAndNonAppAssets() {

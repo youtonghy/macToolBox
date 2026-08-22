@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 @MainActor
 final class ScrollCaptureCoordinatorTests: XCTestCase {
@@ -56,7 +56,6 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
         let deadline = Date().addingTimeInterval(2)
         while Date() < deadline, coordinator.mode != .manual {
             await Task.yield()
-            try await Task.sleep(for: .milliseconds(5))
         }
         XCTAssertEqual(coordinator.mode, .manual)
         coordinator.finishPartial()

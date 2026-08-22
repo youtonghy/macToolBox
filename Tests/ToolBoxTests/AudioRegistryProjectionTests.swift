@@ -1,6 +1,6 @@
 import CoreAudio
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioRegistryProjectionTests: XCTestCase {
     @MainActor

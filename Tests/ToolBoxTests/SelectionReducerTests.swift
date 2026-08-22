@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class SelectionReducerTests: XCTestCase {
     func testCaptureModeDefaultsToStaticAndCanSwitchToScroll() throws {

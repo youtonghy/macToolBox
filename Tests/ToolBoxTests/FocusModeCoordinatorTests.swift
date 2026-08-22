@@ -1,7 +1,7 @@
 import CoreGraphics
 import ApplicationServices
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 @MainActor
 final class FocusModeCoordinatorTests: XCTestCase {

@@ -82,7 +82,6 @@ final class AppUpdateCoordinator: ObservableObject {
                    pending.version != currentVersion {
                     pendingUpdate = pending
                     state = .ready(version: pending.version)
-                    presentReadyAlert(version: pending.version)
                     return
                 }
             } catch {
@@ -107,7 +106,7 @@ final class AppUpdateCoordinator: ObservableObject {
         guard let release = latestRelease else { return }
         operation?.cancel()
         operation = Task { [weak self] in
-            await self?.performDownload(release)
+            await self?.performDownload(release, showAlert: true)
         }
     }
 
@@ -148,9 +147,11 @@ final class AppUpdateCoordinator: ObservableObject {
             }
             latestRelease = release
             state = .available(version: version)
-            presentAvailableAlert(release: release)
+            if userInitiated {
+                presentAvailableAlert(release: release)
+            }
             if automaticallyDownloads && !isDevelopmentBuild {
-                await performDownload(release)
+                await performDownload(release, showAlert: false)
             }
         } catch is CancellationError {
             return
@@ -162,7 +163,7 @@ final class AppUpdateCoordinator: ObservableObject {
         }
     }
 
-    private func performDownload(_ release: AppRelease) async {
+    private func performDownload(_ release: AppRelease, showAlert: Bool) async {
         guard !isDevelopmentBuild, let version = release.version else { return }
         state = .downloading(version: version)
         do {
@@ -170,7 +171,9 @@ final class AppUpdateCoordinator: ObservableObject {
             try Task.checkCancellation()
             pendingUpdate = pending
             state = .ready(version: pending.version)
-            presentReadyAlert(version: pending.version)
+            if showAlert {
+                presentReadyAlert(version: pending.version)
+            }
         } catch is CancellationError {
             state = .available(version: version)
         } catch {

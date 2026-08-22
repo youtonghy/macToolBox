@@ -1,7 +1,7 @@
 import AppKit
 import Carbon.HIToolbox
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class ShortcutRecorderTests: XCTestCase {
     func testEscapeCancelsRecording() {

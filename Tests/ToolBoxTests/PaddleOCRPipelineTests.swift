@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class PaddleOCRPipelineTests: XCTestCase {
     func testParsesModelConfigurationWithStructuredYAML() throws {

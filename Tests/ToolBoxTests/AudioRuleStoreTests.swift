@@ -1,5 +1,5 @@
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioRuleStoreTests: XCTestCase {
     private var defaults: UserDefaults!

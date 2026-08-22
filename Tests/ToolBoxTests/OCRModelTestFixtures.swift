@@ -1,5 +1,5 @@
 import Foundation
-@testable import ToolBox
+@testable import ToolBoxCore
 
 func makeOCRManifest(files: [OCRModelFileManifest]? = nil) throws -> OCRModelManifest {
     OCRModelManifest(

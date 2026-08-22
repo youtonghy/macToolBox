@@ -14,6 +14,14 @@ if [ ! -d "$APP_PATH" ]; then
   exit 1
 fi
 
+CLI_HELPER="$APP_PATH/Contents/Helpers/toolbox"
+if [ ! -x "$CLI_HELPER" ]; then
+  echo "error: bundled CLI helper is missing or not executable" >&2
+  exit 1
+fi
+codesign --verify --strict "$CLI_HELPER"
+"$CLI_HELPER" --help >/dev/null
+
 WORKER_SCRIPT="$APP_PATH/Contents/Resources/ToolBoxOCRWorker/toolbox_ocr_worker.py"
 WORKER_PROJECTIONS="$APP_PATH/Contents/Resources/ToolBoxOCRWorker/projections.py"
 if [ ! -f "$WORKER_SCRIPT" ]; then

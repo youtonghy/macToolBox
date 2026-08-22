@@ -1,7 +1,7 @@
 import CoreGraphics
 import Foundation
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class OCRWorkerClientTests: XCTestCase {
     func testRunsBundledProtocolExecutableAndProjectsDocumentResult() async throws {

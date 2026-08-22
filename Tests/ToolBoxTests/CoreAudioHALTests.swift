@@ -2,7 +2,7 @@ import CoreAudio
 import Foundation
 import XCTest
 
-@testable import ToolBox
+@testable import ToolBoxCore
 
 @available(macOS 14.2, *)
 final class CoreAudioHALTests: XCTestCase {

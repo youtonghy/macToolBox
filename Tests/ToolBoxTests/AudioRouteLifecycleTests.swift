@@ -2,7 +2,7 @@ import CoreAudio
 import Darwin
 import XCTest
 
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AudioRouteLifecycleTests: XCTestCase {
     func testMissingAudioObjectCompletesIOProcTeardown() throws {

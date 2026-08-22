@@ -1,6 +1,6 @@
 import ApplicationServices
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class AXAccessibilityActivatorTests: XCTestCase {
     /// Records every write so tests can assert exactly what was touched.

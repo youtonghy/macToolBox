@@ -1,6 +1,6 @@
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class DarwinDisplayColorPresetProviderTests: XCTestCase {
     func testAdvertisedCapabilityProjectsAllDDPMNamedOptions() async throws {

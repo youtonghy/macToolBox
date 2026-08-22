@@ -94,8 +94,8 @@ struct SettingsView: View {
     @ObservedObject var wifiSignal: WiFiSignalModel
     @ObservedObject var shortcutSettings: ShortcutSettingsModel
     @ObservedObject var updater: AppUpdateCoordinator
+    @ObservedObject var launchAtLogin: LaunchAtLoginController
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
-    @StateObject private var launchAtLogin = LaunchAtLoginController()
 
     private var currentTab: SettingsTab {
         SettingsTab(rawValue: selectedTab) ?? .home

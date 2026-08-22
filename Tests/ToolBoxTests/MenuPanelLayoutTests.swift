@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class MenuPanelLayoutTests: XCTestCase {
     func testPanelFrameScalesProportionallyInsteadOfClipping() {

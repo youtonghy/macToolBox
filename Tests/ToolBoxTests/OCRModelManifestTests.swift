@@ -1,5 +1,5 @@
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class OCRModelManifestTests: XCTestCase {
     func testValidCatalogRequiresImmutableHTTPSFilesAndUniqueModels() throws {

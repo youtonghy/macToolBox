@@ -1,7 +1,7 @@
 import Combine
 import CoreGraphics
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 @MainActor
 final class BrightnessScheduleCoordinatorTests: XCTestCase {

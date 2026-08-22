@@ -16,11 +16,7 @@ final class LaunchAtLoginController: ObservableObject {
 
     func setEnabled(_ enabled: Bool) {
         do {
-            if enabled {
-                try SMAppService.mainApp.register()
-            } else {
-                try SMAppService.mainApp.unregister()
-            }
+            try setEnabledOrThrow(enabled)
             refresh()
         } catch {
             refresh()
@@ -32,5 +28,14 @@ final class LaunchAtLoginController: ObservableObject {
                 })
             )
         }
+    }
+
+    func setEnabledOrThrow(_ enabled: Bool) throws {
+        if enabled {
+            try SMAppService.mainApp.register()
+        } else {
+            try SMAppService.mainApp.unregister()
+        }
+        refresh()
     }
 }

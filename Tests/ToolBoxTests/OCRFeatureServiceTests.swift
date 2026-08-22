@@ -2,7 +2,7 @@ import CoreGraphics
 import CryptoKit
 import Foundation
 import XCTest
-@testable import ToolBox
+@testable import ToolBoxCore
 
 final class OCRFeatureServiceTests: XCTestCase {
     func testDescriptorReportsSignedCatalogSizeAndAbsentState() async throws {
