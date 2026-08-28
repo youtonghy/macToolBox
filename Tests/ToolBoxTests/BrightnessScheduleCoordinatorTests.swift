@@ -145,6 +145,44 @@ final class BrightnessScheduleCoordinatorTests: XCTestCase {
         }
     }
 
+    func testManualOverrideSurvivesSleepWakeTopologyReset() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [31], hour: 8)
+        let coordinator = BrightnessScheduleCoordinator(
+            service: harness.service,
+            store: BrightnessScheduleStore(defaults: defaults, key: storeKey),
+            clock: harness.clock,
+            observesSystemEvents: true
+        )
+        coordinator.start()
+        defer { coordinator.stop() }
+
+        try await waitForWrite(provider: harness.provider, value: 0.8)
+        harness.service.writeBrightness(
+            displayID: 31,
+            normalizedValue: 0.2,
+            smooth: false,
+            policy: .manual
+        )
+        try await waitForWrite(provider: harness.provider, value: 0.2)
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        harness.service.setSnapshotForTesting(
+            DisplayControlSnapshot(timestamp: Date(), displays: [])
+        )
+
+        workspace.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        harness.service.setSnapshotForTesting(
+            makeSnapshot(displayIDs: [31], timestamp: Date().addingTimeInterval(1))
+        )
+        try await waitForWrite(provider: harness.provider, value: 0.2)
+
+        let brightnessValues = await harness.provider.recordedWrites()
+            .filter { $0.0 == .brightness }
+            .map(\.1)
+        XCTAssertEqual(brightnessValues.last ?? -1, 0.2, accuracy: 0.0001)
+    }
+
     func testCommitDisableCancelsWritesAndTimer() async throws {
         let harness = try makeEnabledHarness(displayIDs: [9], hour: 8)
         harness.coordinator.start()

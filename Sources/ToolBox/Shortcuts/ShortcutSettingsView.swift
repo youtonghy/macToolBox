@@ -227,6 +227,7 @@ private extension ShortcutActionID {
         switch self {
         case .captureRegion: "区域截图"
         case .screenWipeExit: "退出擦屏幕"
+        case .clipboardHistory: "剪贴板历史"
         }
     }
 
@@ -234,6 +235,7 @@ private extension ShortcutActionID {
         switch self {
         case .captureRegion: "camera.viewfinder"
         case .screenWipeExit: "rectangle.inset.filled"
+        case .clipboardHistory: "doc.on.clipboard"
         }
     }
 
@@ -241,8 +243,9 @@ private extension ShortcutActionID {
         switch self {
         case .captureRegion: Color(nsColor: .systemBlue)
         case .screenWipeExit: Color(nsColor: .systemIndigo)
+        case .clipboardHistory: Color(nsColor: .systemCyan)
         }
     }
 
-    var canDisable: Bool { self == .captureRegion }
+    var canDisable: Bool { self == .captureRegion || self == .clipboardHistory }
 }

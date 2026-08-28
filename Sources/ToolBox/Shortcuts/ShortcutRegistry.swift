@@ -103,6 +103,8 @@ extension ShortcutActionID {
             1
         case .screenWipeExit:
             2
+        case .clipboardHistory:
+            3
         }
     }
 }

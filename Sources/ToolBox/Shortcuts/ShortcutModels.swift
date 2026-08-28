@@ -3,6 +3,7 @@ import Carbon.HIToolbox
 enum ShortcutActionID: String, Codable, CaseIterable, Sendable {
     case captureRegion
     case screenWipeExit
+    case clipboardHistory
 }
 
 struct ShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
@@ -38,6 +39,14 @@ struct ShortcutRule: Codable, Equatable, Sendable {
             binding: ShortcutBinding(
                 keyCode: UInt32(kVK_Escape),
                 modifiers: [.control, .option, .command]
+            ),
+            isEnabled: true
+        ),
+        ShortcutRule(
+            id: .clipboardHistory,
+            binding: ShortcutBinding(
+                keyCode: UInt32(kVK_ANSI_V),
+                modifiers: [.control, .option]
             ),
             isEnabled: true
         ),

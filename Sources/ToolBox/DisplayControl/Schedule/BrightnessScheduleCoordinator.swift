@@ -264,14 +264,22 @@ final class BrightnessScheduleCoordinator: ObservableObject {
                 wakeFallbackWorkItem?.cancel()
                 wakeFallbackWorkItem = nil
                 isSleepSuspended = false
+                // The first settled snapshot is authoritative for display
+                // presence; discard overrides for displays that did not return.
+                let liveIDs = Set(snapshot.displays.map(\.id))
+                overrides = overrides.filter { liveIDs.contains($0.key) }
                 reconcile(reason: .wake)
             }
             return
         }
 
-        // Drop removed display overrides.
-        let liveIDs = Set(snapshot.displays.map(\.id))
-        overrides = overrides.filter { liveIDs.contains($0.key) }
+        // During sleep, CoreGraphics can publish an empty/intermediate topology.
+        // Keep overrides until the first settled post-wake snapshot so that the
+        // effective value is restored instead of falling back to the schedule.
+        if !isSleepSuspended {
+            let liveIDs = Set(snapshot.displays.map(\.id))
+            overrides = overrides.filter { liveIDs.contains($0.key) }
+        }
         reconcile(reason: .snapshot)
     }
 

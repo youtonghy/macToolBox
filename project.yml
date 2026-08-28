@@ -23,6 +23,10 @@ settings:
     MARKETING_VERSION: "DEV0.0.0"
     CURRENT_PROJECT_VERSION: "0"
     ALWAYS_SEARCH_USER_PATHS: NO
+    # The bundled ONNX Runtime release is Apple Silicon-only. Keep every
+    # target on the same architecture so Release does not attempt an
+    # unsupported x86_64 link.
+    ARCHS: arm64
 
 targets:
   ToolBox:
@@ -37,6 +41,12 @@ targets:
         buildPhase: resources
         type: folder
       - Resources/Assets.xcassets
+      - path: Resources/en.lproj
+        buildPhase: resources
+      - path: Resources/zh-Hans.lproj
+        buildPhase: resources
+      - path: Resources/zh-Hant.lproj
+        buildPhase: resources
       - path: Resources/OCRModels
         buildPhase: resources
     dependencies:
@@ -66,6 +76,11 @@ targets:
         LSUIElement: true
         LSMinimumSystemVersion: "14.0"
         NSHumanReadableCopyright: ""
+        CFBundleDevelopmentRegion: en
+        CFBundleLocalizations:
+          - en
+          - zh-Hans
+          - zh-Hant
         # Helps TCC surface a proper Input Monitoring purpose string and list entry.
         NSInputMonitoringUsageDescription: "ToolBox 需要输入监控权限，以便拦截亮度 / 音量媒体键并转发给外接显示器。"
         NSAudioCaptureUsageDescription: "ToolBox 需要系统音频捕获权限，以便为不同应用调整音量并路由到指定输出设备。"

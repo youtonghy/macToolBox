@@ -2,6 +2,11 @@ import Carbon.HIToolbox
 import XCTest
 @testable import ToolBoxCore
 
+private struct ShortcutRuleDocumentV1: Codable {
+    let schemaVersion: Int
+    let rules: [ShortcutRule]
+}
+
 final class ShortcutRuleStoreTests: XCTestCase {
     private var defaults: UserDefaults!
     private var suiteName: String!
@@ -48,6 +53,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
                 ),
                 isEnabled: true
             ),
+            .init(
+                id: .clipboardHistory,
+                binding: .init(
+                    keyCode: UInt32(kVK_ANSI_V),
+                    modifiers: [.control, .option]
+                ),
+                isEnabled: true
+            ),
         ])
     }
 
@@ -58,6 +71,73 @@ final class ShortcutRuleStoreTests: XCTestCase {
         XCTAssertThrowsError(try store.save(rules)) {
             XCTAssertEqual($0 as? ShortcutRuleStoreError, .protectedRuleDisabled)
         }
+    }
+
+    func testMigrationBackfillsMissingActions() throws {
+        // Save old rules missing clipboardHistory
+        let oldRules = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_ANSI_S),
+                    modifiers: [.control, .option]
+                ),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_Escape),
+                    modifiers: [.control, .option, .command]
+                ),
+                isEnabled: true
+            ),
+        ]
+
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(ShortcutRuleDocumentV1(schemaVersion: 1, rules: oldRules))
+        defaults.set(data, forKey: suiteName)
+
+        // Load should backfill missing clipboardHistory
+        let result = store.load()
+
+        XCTAssertNil(result.issue)
+        XCTAssertEqual(result.rules.count, 3)
+        XCTAssertTrue(result.rules.contains(where: { $0.id == .clipboardHistory }))
+    }
+
+    func testMigrationDisablesConflictingBinding() throws {
+        // Save old rules with captureRegion using the default clipboardHistory binding
+        let oldRules = [
+            ShortcutRule(
+                id: .captureRegion,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_ANSI_V),
+                    modifiers: [.control, .option]
+                ),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .screenWipeExit,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_Escape),
+                    modifiers: [.control, .option, .command]
+                ),
+                isEnabled: true
+            ),
+        ]
+
+        let encoder = JSONEncoder()
+        let data = try encoder.encode(ShortcutRuleDocumentV1(schemaVersion: 1, rules: oldRules))
+        defaults.set(data, forKey: suiteName)
+
+        // Load should add clipboardHistory but disabled due to conflict
+        let result = store.load()
+
+        XCTAssertNil(result.issue)
+        let clipboardRule = result.rules.first(where: { $0.id == .clipboardHistory })
+        XCTAssertNotNil(clipboardRule)
+        XCTAssertFalse(clipboardRule?.isEnabled ?? true, "Conflicting rule should be disabled")
     }
 
     func testRoundTripPreservesRules() throws {
@@ -75,6 +155,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
                 binding: ShortcutBinding(
                     keyCode: UInt32(kVK_Escape),
                     modifiers: [.control, .option, .command]
+                ),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .clipboardHistory,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_ANSI_V),
+                    modifiers: [.control, .option]
                 ),
                 isEnabled: true
             ),
@@ -234,6 +322,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
                 binding: ShortcutBinding(
                     keyCode: UInt32(kVK_Escape),
                     modifiers: [.control, .option, .command]
+                ),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .clipboardHistory,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_ANSI_V),
+                    modifiers: [.control, .option]
                 ),
                 isEnabled: true
             ),

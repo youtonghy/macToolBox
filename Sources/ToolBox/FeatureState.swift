@@ -6,4 +6,5 @@ import Combine
 final class FeatureState: ObservableObject {
     @Published var wipeOn = false
     @Published var awakeOn = false
+    @Published var clipboardOn = false
 }

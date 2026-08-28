@@ -40,8 +40,8 @@ struct DisplayControlPanel: View {
     @ObservedObject var model: DisplayControlMenuModel
 
     var body: some View {
-        if model.hasExternalDisplay {
-            VStack(alignment: .leading, spacing: MenuPanelLayout.controlRowSpacing) {
+        VStack(alignment: .leading, spacing: MenuPanelLayout.controlRowSpacing) {
+            if model.hasExternalDisplay {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("外接显示器")
                         .font(.headline)
@@ -49,6 +49,23 @@ struct DisplayControlPanel: View {
                     Text(model.selectedDisplayName)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
+                }
+
+                HStack(spacing: 8) {
+                    Image(systemName: "display")
+                        .foregroundStyle(.secondary)
+                    Text(model.selectedDisplayStatusText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Button {
+                        model.openSystemDisplaySettings()
+                    } label: {
+                        Label("系统显示设置", systemImage: "arrow.up.right.square")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("打开 macOS 系统显示设置")
                 }
 
                 HStack(alignment: .center, spacing: 10) {
@@ -77,9 +94,32 @@ struct DisplayControlPanel: View {
                         controlRow(row)
                     }
                 }
+            } else {
+                HStack(spacing: 8) {
+                    Image(systemName: "display.trianglebadge.exclamationmark")
+                        .foregroundStyle(.secondary)
+                    Text("未检测到外接显示器")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 4)
+                    Button {
+                        model.openSystemDisplaySettings()
+                    } label: {
+                        Label("系统显示设置", systemImage: "arrow.up.right.square")
+                    }
+                    .buttonStyle(.borderless)
+                    .help("打开 macOS 系统显示设置")
+                }
             }
-            .padding(DisplayControlPanelLayout.panelPadding)
+
+            if let errorText = model.systemSettingsErrorText {
+                Text(errorText)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(1)
+            }
         }
+        .padding(DisplayControlPanelLayout.panelPadding)
     }
 
     private var selectionBinding: Binding<CGDirectDisplayID?> {

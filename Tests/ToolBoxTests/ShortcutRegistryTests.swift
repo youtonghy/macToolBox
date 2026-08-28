@@ -55,9 +55,10 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
 
         XCTAssertEqual(recorder.installHandlerCalls, 1)
-        XCTAssertEqual(recorder.registerCalls.count, 2)
+        XCTAssertEqual(recorder.registerCalls.count, 3)
         XCTAssertTrue(registry.isRegistered(.captureRegion))
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
+        XCTAssertTrue(registry.isRegistered(.clipboardHistory))
     }
 
     func testUnknownEventIDIsNotHandled() throws {
@@ -109,7 +110,8 @@ final class ShortcutRegistryTests: XCTestCase {
 
         XCTAssertFalse(registry.isRegistered(.captureRegion))
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
-        XCTAssertEqual(recorder.activeRegistrationCount, 1)
+        XCTAssertTrue(registry.isRegistered(.clipboardHistory))
+        XCTAssertEqual(recorder.activeRegistrationCount, 2)
     }
 
     func testProtectedRuleCannotBeDisabled() throws {
@@ -149,7 +151,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertThrowsError(try registry.apply(rule: capture)) {
             XCTAssertEqual($0 as? ShortcutRegistryError, .duplicateBinding)
         }
-        XCTAssertEqual(recorder.registerCalls.count, 2)
+        XCTAssertEqual(recorder.registerCalls.count, 3)
     }
 
     func testApplyRuleSetCanSwapBindingsAndKeepsStableIDs() throws {
@@ -167,6 +169,11 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutRule.defaults[0].binding,
                 isEnabled: true
             ),
+            ShortcutRule(
+                id: .clipboardHistory,
+                binding: ShortcutRule.defaults[2].binding,
+                isEnabled: true
+            ),
         ]
 
         try registry.apply(rules: swapped)
@@ -179,7 +186,11 @@ final class ShortcutRegistryTests: XCTestCase {
             recorder.activeBinding(id: ShortcutActionID.screenWipeExit.carbonID),
             swapped[1].binding
         )
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(
+            recorder.activeBinding(id: ShortcutActionID.clipboardHistory.carbonID),
+            swapped[2].binding
+        )
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
     }
 
     func testApplyRuleSetRegistrationFailureRestoresPreviousRules() throws {
@@ -197,8 +208,13 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutBinding(keyCode: 2, modifiers: [.command]),
                 isEnabled: true
             ),
+            ShortcutRule(
+                id: .clipboardHistory,
+                binding: ShortcutBinding(keyCode: 3, modifiers: [.command]),
+                isEnabled: true
+            ),
         ]
-        recorder.registerStatusQueue = [noErr, OSStatus(eventHotKeyExistsErr)]
+        recorder.registerStatusQueue = [noErr, noErr, OSStatus(eventHotKeyExistsErr)]
 
         XCTAssertThrowsError(try registry.apply(rules: proposed)) {
             XCTAssertEqual(
@@ -215,7 +231,11 @@ final class ShortcutRegistryTests: XCTestCase {
             recorder.activeBinding(id: ShortcutActionID.screenWipeExit.carbonID),
             ShortcutRule.defaults[1].binding
         )
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(
+            recorder.activeBinding(id: ShortcutActionID.clipboardHistory.carbonID),
+            ShortcutRule.defaults[2].binding
+        )
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
     }
 
     func testApplyRuleSetCleanupFailureDoesNotDispatchProposedAction() throws {
@@ -235,9 +255,15 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutBinding(keyCode: 2, modifiers: [.command]),
                 isEnabled: true
             ),
+            ShortcutRule(
+                id: .clipboardHistory,
+                binding: ShortcutBinding(keyCode: 3, modifiers: [.command]),
+                isEnabled: true
+            ),
         ]
-        recorder.registerStatusQueue = [noErr, OSStatus(eventHotKeyExistsErr)]
+        recorder.registerStatusQueue = [noErr, noErr, OSStatus(eventHotKeyExistsErr)]
         recorder.unregisterStatusQueue = [
+            noErr,
             noErr,
             noErr,
             OSStatus(eventInternalErr),
@@ -277,9 +303,15 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutBinding(keyCode: 2, modifiers: [.command]),
                 isEnabled: true
             ),
+            ShortcutRule(
+                id: .clipboardHistory,
+                binding: ShortcutBinding(keyCode: 3, modifiers: [.command]),
+                isEnabled: true
+            ),
         ]
         recorder.registerStatusQueue = [
             OSStatus(eventHotKeyExistsErr),
+            noErr,
             noErr,
             OSStatus(eventHotKeyExistsErr),
         ]
@@ -325,7 +357,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertNil(registry.stop())
         XCTAssertNil(registry.stop())
 
-        XCTAssertEqual(recorder.unregisterCalls.count, 2)
+        XCTAssertEqual(recorder.unregisterCalls.count, 3)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
         XCTAssertEqual(recorder.activeRegistrationCount, 0)
     }
@@ -393,7 +425,7 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
 
         XCTAssertEqual(recorder.installHandlerCalls, 2)
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
     }
 
     func testPartialStartFailureRollsBackAndCanBeRetried() throws {
@@ -406,7 +438,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
 
         try registry.start(rules: ShortcutRule.defaults)
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
         XCTAssertEqual(recorder.installHandlerCalls, 2)
     }
 
@@ -429,9 +461,10 @@ final class ShortcutRegistryTests: XCTestCase {
 
         registry.stop()
         try registry.start(rules: ShortcutRule.defaults)
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
         XCTAssertTrue(registry.isRegistered(.captureRegion))
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
+        XCTAssertTrue(registry.isRegistered(.clipboardHistory))
     }
 
     func testOldUnregistrationFailureKeepsOldBinding() throws {
@@ -455,7 +488,7 @@ final class ShortcutRegistryTests: XCTestCase {
             recorder.activeBinding(id: ShortcutActionID.captureRegion.carbonID),
             ShortcutRule.defaults[0].binding
         )
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
     }
 
     func testRollbackFailureDoesNotDispatchReplacementAction() throws {
@@ -500,7 +533,7 @@ final class ShortcutRegistryTests: XCTestCase {
         }
 
         XCTAssertNil(weakRegistry)
-        XCTAssertEqual(recorder.unregisterCalls.count, 2)
+        XCTAssertEqual(recorder.unregisterCalls.count, 3)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
     }
 }

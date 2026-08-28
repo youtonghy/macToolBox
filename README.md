@@ -21,6 +21,10 @@
 
 ## 构建
 
+### 界面语言
+
+ToolBox 会按 macOS 的首选语言自动选择界面语言。目前提供简体中文、繁体中文和英语；未匹配到这三种语言时使用英语。语言选择跟随系统设置，重启应用后生效。
+
 ```bash
 brew install xcodegen        # 仅需一次
 ./build.sh                   # 校验 OCR 运行时 + 生成工程 + Release 构建 + 启动
@@ -185,7 +189,7 @@ NOTARY_APPLE_ID=... NOTARY_PASSWORD=... TEAM_ID=... ./scripts/notarize.sh /Appli
 ## 已知限制
 
 - **后台干合盖**：`caffeinate -s` 仅在 **AC 电源** 有效；电池下合盖仍可能睡眠。
-- **外接显示器 DDC**：Apple Silicon 路径依赖 macOS 私有 `IOAVService` / `CoreDisplay` 符号，系统版本变化时可能降级为不可用；部分显示器只能写入、不能可靠读取 VCP，此时菜单会显示 `DDC write-only`。应用会优先使用硬件实时读值；读值失败时，带序列号的显示器会恢复上次成功读取或写入的亮度百分比，没有可用记忆时才显示估算值。滑杆按显示器报告的 VCP 原始范围量化（例如 20 档对应 5% 步进），写入期间会保持用户目标值，不会被滞后的回读值拉回。部分显示器不支持音量或静音 VCP，会在菜单中显示为不可用。
+- **外接显示器 DDC**：Apple Silicon 路径依赖 macOS 私有 `IOAVService` / `CoreDisplay` 符号，系统版本变化时可能降级为不可用；部分显示器只能写入、不能可靠读取 VCP，此时菜单会显示 `DDC write-only`。应用会优先使用硬件实时读值；读值失败时，带序列号的显示器会恢复上次成功读取或写入的亮度百分比，没有可用记忆时才显示估算值。滑杆按显示器报告的 VCP 原始范围量化（例如 20 档对应 5% 步进），写入期间会保持用户目标值，不会被滞后的回读值拉回。部分显示器不支持音量或静音 VCP，会在菜单中显示为不可用。菜单和设置页的「系统显示设置」按钮会打开 macOS 原生显示设置，用于排列、分辨率和刷新率等系统级选项。
 - **色彩预设**：只在 Capability String 广告了 `0xE2(...)` 或 `0x14(...)` 枚举子集时出现；名称来自 DDPM 兼容对照表，未知值显示为 `Preset 0xXX`。写入必须是已广告值，写后读回确认；读回失败或 mismatch 会显示错误，不会把 UI 标成已切换。切换预设可能改变亮度、对比度和 RGB Gain；当前版本不写入 RGB Gain，也不处理 ICC / ColorSync / HDR。实时 `0xF3` 读取失败时，仅对已验证型号使用回退 Capability String（当前为 Dell U2723QE 固件 M2T105）。
 - **定时亮度**：应用未运行时不会改写显示器；无独立守护进程。计划写入为离散跳变（`smooth: false`），强制绕过 write-only 缓存去重。无序列号的显示器不做持久身份绑定。
 - **聚焦模式遮罩**：只在软件层覆盖其他显示器，不会修改 DDC / 硬件背光，也不会降低显示器功耗。单显示器时不会显示遮罩；不提供手动指定焦点屏幕。
@@ -202,7 +206,7 @@ NOTARY_APPLE_ID=... NOTARY_PASSWORD=... TEAM_ID=... ./scripts/notarize.sh /Appli
 完整自动验证可运行 `./scripts/verify-audio-routing-build.sh`；真机输出矩阵见 [`docs/testing/per-app-audio-acceptance.md`](docs/testing/per-app-audio-acceptance.md)。色彩预设验收记录见 [`docs/testing/display-color-preset-poc-acceptance.md`](docs/testing/display-color-preset-poc-acceptance.md)。
 
 - **后台干**：开关 ON 后 `pmset -g assertions` 可见 `PreventUserIdleSystemSleep` 由 ToolBox 持有；`pgrep caffeinate` 命中 `caffeinate -s`；空闲过屏幕休眠计时→屏幕熄灭但系统不睡。
-- **外接显示器控制**：连接支持 DDC/VCP 的外接屏后，菜单中选择该屏幕，亮度 / 对比度 / 音量滑杆应可写回显示器；若显示 `DDC write-only`，设置一个非 100% 亮度后断开并重连，确认带序列号显示器恢复上次百分比且连续拖动不会频闪。系统亮度、音量和静音键保持由 macOS 处理。
+- **外接显示器控制**：连接支持 DDC/VCP 的外接屏后，菜单中选择该屏幕，亮度 / 对比度 / 音量滑杆应可写回显示器；若显示 `DDC write-only`，设置一个非 100% 亮度后断开并重连，确认带序列号显示器恢复上次百分比且连续拖动不会频闪。系统亮度、音量和静音键保持由 macOS 处理。需要排列、分辨率或刷新率时，使用「系统显示设置」按钮；ToolBox 不模拟控制中心内部菜单。
 - **色彩预设**：菜单或设置 → 显示器出现「色彩预设」后，切换到另一个已广告值，确认 OSD / 读回一致；读回失败时应显示错误而不是把该项标为当前。切换后检查亮度/对比度是否被显示器一并改写。
 - **定时亮度**：设置 → 显示器 → 开启「定时亮度」，确认当前时段写入所有可控外接屏；拖动滑杆后仅该屏被覆盖直至下个边界；改时段或重启应用后按当前本地时间重新应用。
 - **聚焦模式**：连接两台显示器，开启辅助功能权限后在不同屏幕的应用窗口间切换键盘焦点，确认非焦点屏变暗且仍可点击；撤销权限后跨屏移动鼠标，确认功能保持开启并即时切换清晰屏。还需覆盖上下排列、全屏/空间切换、热插拔、睡眠唤醒、重启恢复，以及与擦屏幕同时开启。

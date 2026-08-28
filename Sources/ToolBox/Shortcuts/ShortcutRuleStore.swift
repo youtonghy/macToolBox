@@ -38,11 +38,39 @@ struct ShortcutRuleStore {
                 )
             }
             let document = try decoder.decode(ShortcutRuleDocumentV1.self, from: data)
-            guard Self.validationError(for: document.rules) == nil else {
+
+            // Migration: backfill missing actions
+            let loadedActions = Set(document.rules.map(\.id))
+            let missingActions = Set(ShortcutActionID.allCases).subtracting(loadedActions)
+
+            var migratedRules = document.rules
+            if !missingActions.isEmpty {
+                logger.info("Migrating shortcut rules: adding \(missingActions.count) missing actions")
+
+                for action in missingActions {
+                    guard let defaultRule = ShortcutRule.defaults.first(where: { $0.id == action }) else {
+                        continue
+                    }
+
+                    // Check if binding conflicts with existing enabled rules
+                    let hasConflict = migratedRules.contains { existing in
+                        existing.isEnabled && existing.binding == defaultRule.binding
+                    }
+
+                    // Add rule, disabled if conflict exists
+                    migratedRules.append(ShortcutRule(
+                        id: action,
+                        binding: defaultRule.binding,
+                        isEnabled: !hasConflict
+                    ))
+                }
+            }
+
+            guard Self.validationError(for: migratedRules) == nil else {
                 logger.error("Shortcut rules do not satisfy the registry invariants")
                 return ShortcutRuleLoadResult(rules: ShortcutRule.defaults, issue: .corruptData)
             }
-            return ShortcutRuleLoadResult(rules: document.rules, issue: nil)
+            return ShortcutRuleLoadResult(rules: migratedRules, issue: nil)
         } catch {
             logger.error("Corrupt shortcut rules")
             CorruptDefaultsBackup.backup(defaults: defaults, key: key)

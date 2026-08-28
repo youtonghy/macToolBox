@@ -50,14 +50,15 @@ final class TerminationShutdownCoordinator {
 public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private lazy var menuBarPanelController = MenuBarPanelController(
-        rootView: PopoverContent(
+        rootView: AnyView(PopoverContent(
             state: state,
             hardware: hardware,
             displayControl: displayControlMenu,
             audioRouting: audioRouting,
             focusMode: focusMode,
             wifiSignal: wifiSignal
-        ),
+        )
+        .environment(\.locale, AppLanguage.current.locale)),
         panelSize: currentPanelSize
     )
     private var settingsWindowController: NSWindowController?
@@ -153,6 +154,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     // Feature coordinators.
     let screenWipe = ScreenWipeCoordinator()
     let awake = AwakeCoordinator()
+    let clipboardCoordinator = ClipboardCoordinator()
 
     public override init() {
         super.init()
@@ -186,6 +188,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             .dropFirst().removeDuplicates()
             .receive(on: RunLoop.main)
             .sink { [weak self] on in self?.applyAwake(on) }
+            .store(in: &cancellables)
+        state.$clipboardOn
+            .dropFirst().removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] on in self?.applyClipboard(on) }
             .store(in: &cancellables)
 
         shortcutRegistry.onRoutedAction = { [weak self] action in
@@ -329,14 +336,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
 
         menu.addItem(NSMenuItem(
-            title: "打开面板",
+            title: L10n.openPanel,
             action: #selector(openMainPanel(_:)),
             keyEquivalent: ""
         ))
         menu.addItem(.separator())
 
         let wipeItem = NSMenuItem(
-            title: "擦屏幕",
+            title: L10n.wipeScreen,
             action: #selector(toggleWipeFromMenu(_:)),
             keyEquivalent: ""
         )
@@ -344,7 +351,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(wipeItem)
 
         let awakeItem = NSMenuItem(
-            title: "后台干",
+            title: L10n.backgroundWork,
             action: #selector(toggleAwakeFromMenu(_:)),
             keyEquivalent: ""
         )
@@ -353,12 +360,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
-            title: "设置",
+            title: L10n.settings,
             action: #selector(openSettingsWindow(_:)),
             keyEquivalent: ","
         ))
         menu.addItem(NSMenuItem(
-            title: "退出",
+            title: L10n.quit,
             action: #selector(quitApplication(_:)),
             keyEquivalent: "q"
         ))
@@ -396,7 +403,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private func makeSettingsWindowController() -> NSWindowController {
         let windowSize = NSSize(width: 840, height: 560)
         let hostingController = GlassHostingViewController(
-            rootView: SettingsView(
+            rootView: AnyView(SettingsView(
                 hardware: hardware,
                 displayControl: displayControlMenu,
                 shortcutRegistry: shortcutRegistry,
@@ -405,14 +412,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 focusMode: focusMode,
                 wifiSignal: wifiSignal,
                 shortcutSettings: shortcutSettings,
+                clipboardCoordinator: clipboardCoordinator,
                 updater: appUpdater,
                 launchAtLogin: launchAtLogin
-            ),
+            )
+            .environmentObject(state)
+            .environment(\.locale, AppLanguage.current.locale)),
             contentSize: windowSize,
             contentInsets: NSEdgeInsets(top: 52, left: 20, bottom: 20, right: 20)
         )
         let window = NSWindow(contentViewController: hostingController)
-        window.title = "设置"
+        window.title = L10n.settings
         window.setContentSize(windowSize)
         window.minSize = NSSize(width: 760, height: 500)
         window.styleMask.insert(.titled)
@@ -466,6 +476,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func applyClipboard(_ on: Bool) {
+        if on {
+            clipboardCoordinator.start()
+        } else {
+            clipboardCoordinator.stop()
+        }
+    }
+
     private func handleShortcutAction(_ action: ShortcutAction) -> Bool {
         switch action {
         case .hotKey(.captureRegion):
@@ -474,6 +492,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         case .hotKey(.screenWipeExit):
             state.wipeOn = false
             screenWipe.stop()
+            return true
+        case .hotKey(.clipboardHistory):
+            clipboardCoordinator.showPanel()
             return true
         case .mediaKey(let event):
             return displayControlKeys.handle(event: event)

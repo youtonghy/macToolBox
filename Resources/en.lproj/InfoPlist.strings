@@ -1,0 +1,2 @@
+"NSInputMonitoringUsageDescription" = "ToolBox needs Input Monitoring permission to intercept brightness and volume media keys and forward them to external displays.";
+"NSAudioCaptureUsageDescription" = "ToolBox needs system audio capture permission to adjust per-app volume and route audio to selected output devices.";

@@ -45,7 +45,7 @@ enum MenuPanelLayout {
     static let sectionChromeHeight: CGFloat = 44
     static let hardwareSectionHeight = chartHeight + sectionChromeHeight
     static let cableSectionHeight = cableRowHeight + sectionChromeHeight
-    static let displaySectionHeight: CGFloat = 154
+    static let displaySectionHeight: CGFloat = 186
     static let displayPresetSectionHeight: CGFloat = 232
     static let audioRowHeight: CGFloat = 30
     static let audioRowSpacing: CGFloat = 6

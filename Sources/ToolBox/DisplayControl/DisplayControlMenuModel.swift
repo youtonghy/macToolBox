@@ -40,9 +40,11 @@ final class DisplayControlMenuModel: ObservableObject {
     @Published private(set) var selectedPresetRawValue: UInt8?
     @Published private(set) var presetAvailable = false
     @Published private(set) var presetErrorText: String?
+    @Published private(set) var systemSettingsErrorText: String?
     @Published var selectedDisplayID: CGDirectDisplayID?
 
     private let service: DisplayControlService
+    private let displaySettingsOpener: any DisplaySettingsOpening
     private let pendingValueLifetimeNanos: UInt64
     private var cancellables = Set<AnyCancellable>()
     private var pendingValues: [DisplayControlPendingKey: Double] = [:]
@@ -55,10 +57,12 @@ final class DisplayControlMenuModel: ObservableObject {
 
     init(
         service: DisplayControlService,
-        pendingValueLifetimeNanos: UInt64 = 750_000_000
+        pendingValueLifetimeNanos: UInt64 = 750_000_000,
+        displaySettingsOpener: any DisplaySettingsOpening = SystemDisplaySettingsLauncher()
     ) {
         self.service = service
         self.pendingValueLifetimeNanos = pendingValueLifetimeNanos
+        self.displaySettingsOpener = displaySettingsOpener
     }
 
     var hasExternalDisplay: Bool {
@@ -117,6 +121,27 @@ final class DisplayControlMenuModel: ObservableObject {
     func toggleMute() {
         guard let displayID = selectedDisplayID else { return }
         service.toggleMute(displayID: displayID)
+    }
+
+    @discardableResult
+    func openSystemDisplaySettings() -> Bool {
+        let opened = displaySettingsOpener.openDisplaySettings()
+        systemSettingsErrorText = opened ? nil : "无法打开系统显示设置"
+        return opened
+    }
+
+    var selectedDisplayStatusText: String {
+        guard let selectedDisplayID,
+              let display = service.snapshot.displays.first(where: { $0.id == selectedDisplayID }) else {
+            return "等待显示器"
+        }
+        if display.supportsHardwareDDC {
+            if display.controls.contains(where: { $0.status == .writeOnly }) {
+                return "DDC 只写 · 当前值为估算"
+            }
+            return display.backendName ?? "DDC 可用"
+        }
+        return display.unavailableReason ?? "DDC 不可用"
     }
 
     func stepSelected(kind: DisplayControlKind, delta: Double) {

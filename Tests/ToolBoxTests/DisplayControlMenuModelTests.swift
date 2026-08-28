@@ -4,6 +4,37 @@ import XCTest
 
 @MainActor
 final class DisplayControlMenuModelTests: XCTestCase {
+    func testOpenSystemDisplaySettingsReportsSuccess() {
+        let opener = RecordingDisplaySettingsOpener(result: true)
+        let service = DisplayControlService(provider: RecordingDisplayControlProvider(snapshot: Self.snapshot), timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.snapshot)
+        let model = DisplayControlMenuModel(service: service, displaySettingsOpener: opener)
+        model.start()
+
+        XCTAssertTrue(model.openSystemDisplaySettings())
+        XCTAssertEqual(opener.openCount, 1)
+        XCTAssertNil(model.systemSettingsErrorText)
+    }
+
+    func testOpenSystemDisplaySettingsExposesFailure() {
+        let opener = RecordingDisplaySettingsOpener(result: false)
+        let service = DisplayControlService(provider: RecordingDisplayControlProvider(snapshot: Self.snapshot), timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.snapshot)
+        let model = DisplayControlMenuModel(service: service, displaySettingsOpener: opener)
+
+        XCTAssertFalse(model.openSystemDisplaySettings())
+        XCTAssertEqual(model.systemSettingsErrorText, "无法打开系统显示设置")
+    }
+
+    func testSelectedDisplayStatusDescribesWriteOnlyDDC() {
+        let service = DisplayControlService(provider: RecordingDisplayControlProvider(snapshot: Self.snapshot), timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.snapshot)
+        let model = DisplayControlMenuModel(service: service)
+        model.start()
+
+        XCTAssertEqual(model.selectedDisplayStatusText, "DDC 只写 · 当前值为估算")
+    }
+
     func testCanceledPendingClearDoesNotRemoveReplacementValue() async throws {
         let provider = RecordingDisplayControlProvider(snapshot: Self.snapshot)
         let service = DisplayControlService(provider: provider, timing: .immediateForTests)
@@ -368,5 +399,19 @@ final class DisplayControlMenuModelTests: XCTestCase {
                 unavailableReason: status == .available ? nil : "Capability unavailable"
             )
         )
+    }
+}
+
+private final class RecordingDisplaySettingsOpener: DisplaySettingsOpening {
+    let result: Bool
+    private(set) var openCount = 0
+
+    init(result: Bool) {
+        self.result = result
+    }
+
+    func openDisplaySettings() -> Bool {
+        openCount += 1
+        return result
     }
 }

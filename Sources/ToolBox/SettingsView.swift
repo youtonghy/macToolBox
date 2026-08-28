@@ -8,6 +8,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case display
     case audio
     case screenshot
+    case clipboard
     case shortcuts
     case general
     case about
@@ -17,23 +18,25 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .home:
-            return "首页"
+            return L10n.string("首页")
         case .cables:
-            return "线缆"
+            return L10n.string("线缆")
         case .wifi:
-            return "Wi-Fi"
+            return L10n.string("Wi-Fi")
         case .display:
-            return "显示器"
+            return L10n.string("显示器")
         case .audio:
-            return "音频"
+            return L10n.string("音频")
         case .screenshot:
-            return "截图"
+            return L10n.string("截图")
+        case .clipboard:
+            return L10n.string("剪贴板")
         case .shortcuts:
-            return "快捷键"
+            return L10n.string("快捷键")
         case .general:
-            return "通用"
+            return L10n.string("通用")
         case .about:
-            return "关于"
+            return L10n.string("关于")
         }
     }
 
@@ -51,6 +54,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "speaker.wave.2"
         case .screenshot:
             return "camera.viewfinder"
+        case .clipboard:
+            return "doc.on.clipboard"
         case .shortcuts:
             return "keyboard"
         case .general:
@@ -74,6 +79,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemGreen)
         case .screenshot:
             return Color(nsColor: .systemOrange)
+        case .clipboard:
+            return Color(nsColor: .systemCyan)
         case .shortcuts:
             return Color(nsColor: .systemBlue)
         case .general:
@@ -93,6 +100,7 @@ struct SettingsView: View {
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
     @ObservedObject var shortcutSettings: ShortcutSettingsModel
+    @ObservedObject var clipboardCoordinator: ClipboardCoordinator
     @ObservedObject var updater: AppUpdateCoordinator
     @ObservedObject var launchAtLogin: LaunchAtLoginController
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
@@ -115,7 +123,7 @@ struct SettingsView: View {
 
     private var sidebar: some View {
         VStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
-            Text("设置")
+            Text(L10n.settings)
                 .font(.system(size: 22, weight: .semibold))
                 .padding(.horizontal, 4)
                 .padding(.bottom, 2)
@@ -158,6 +166,8 @@ struct SettingsView: View {
                     AudioRoutingSettingsView(service: audioRouting)
                 case .screenshot:
                     ScreenshotSettingsView(permissions: shortcutRegistry.permissions)
+                case .clipboard:
+                    ClipboardSettingsView(coordinator: clipboardCoordinator)
                 case .shortcuts:
                     ShortcutSettingsView(model: shortcutSettings)
                 case .general:
@@ -434,17 +444,62 @@ private struct SettingsDisplayView: View {
                         ? "\(model.displayItems.count) 台可管理"
                         : "未检测到外接屏"
                 ) {
-                    if model.hasExternalDisplay {
-                        VStack(spacing: 8) {
-                            ForEach(model.displayItems) { item in
-                                displayPickerRow(item)
+                    VStack(spacing: 10) {
+                        if model.hasExternalDisplay {
+                            VStack(spacing: 8) {
+                                ForEach(model.displayItems) { item in
+                                    displayPickerRow(item)
+                                }
                             }
+                        } else {
+                            SettingsEmptyState(
+                                symbolName: "display.trianglebadge.exclamationmark",
+                                title: "无外接显示器"
+                            )
                         }
-                    } else {
-                        SettingsEmptyState(
-                            symbolName: "display.trianglebadge.exclamationmark",
-                            title: "无外接显示器"
+
+                        HStack(spacing: 10) {
+                            SettingsIconBadge(
+                                systemName: "display",
+                                accent: Color(nsColor: .systemTeal),
+                                emphasized: true
+                            )
+
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("系统显示设置")
+                                    .font(.system(size: 13, weight: .semibold))
+                                Text("排列、分辨率、刷新率和系统级显示选项")
+                                    .font(.system(size: 11, weight: .medium))
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+
+                            Spacer(minLength: 8)
+
+                            Button {
+                                model.openSystemDisplaySettings()
+                            } label: {
+                                Image(systemName: "arrow.up.right.square")
+                                    .font(.system(size: 14, weight: .semibold))
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                            .help("打开 macOS 系统显示设置")
+                            .accessibilityLabel("打开系统显示设置")
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(
+                            RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
+                                .fill(SettingsChrome.cardBackground)
                         )
+
+                        if let errorText = model.systemSettingsErrorText {
+                            Text(errorText)
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Color(nsColor: .systemRed))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
                     }
                 }
 

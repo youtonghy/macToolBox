@@ -1,0 +1,2 @@
+"NSInputMonitoringUsageDescription" = "ToolBox 需要輸入監控權限，以攔截亮度與音量媒體鍵並轉發給外接顯示器。";
+"NSAudioCaptureUsageDescription" = "ToolBox 需要系統音訊擷取權限，以便調整各應用程式音量並將音訊路由至指定輸出裝置。";
