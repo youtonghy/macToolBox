@@ -6,5 +6,13 @@ import Combine
 final class FeatureState: ObservableObject {
     @Published var wipeOn = false
     @Published var awakeOn = false
-    @Published var clipboardOn = false
+    @Published var clipboardOn: Bool {
+        didSet { UserDefaults.standard.set(clipboardOn, forKey: Self.clipboardKey) }
+    }
+
+    private static let clipboardKey = "feature.clipboard.enabled"
+
+    init() {
+        clipboardOn = UserDefaults.standard.bool(forKey: Self.clipboardKey)
+    }
 }

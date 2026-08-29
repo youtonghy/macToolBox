@@ -75,9 +75,7 @@ enum MenuPanelLayout {
 
     static func audioContentHeight(rowCount: Int) -> CGFloat {
         guard rowCount > 0 else { return 0 }
-        return CGFloat(rowCount) * audioRowHeight
-            + CGFloat(max(0, rowCount - 1)) * audioRowSpacing
-            + 10
+        return 116
     }
 
     static func contentHeight(

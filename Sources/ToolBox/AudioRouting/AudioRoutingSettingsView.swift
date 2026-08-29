@@ -6,6 +6,11 @@ struct AudioRoutingSettingsView: View {
     var body: some View {
         ScrollView(.vertical, showsIndicators: true) {
             LazyVStack(alignment: .leading, spacing: SettingsChrome.sectionSpacing) {
+                SettingsSection(title: "显示") {
+                    Toggle("Lite 模式", isOn: $service.isLiteMode)
+                        .toggleStyle(.switch)
+                        .help("弹窗仅显示应用图标和百分比，点击后可用滚轮或上下键调节")
+                }
                 if let error = service.globalError {
                     SettingsValueRow(title: "状态", value: error, accent: .red)
                 }

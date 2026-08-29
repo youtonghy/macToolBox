@@ -3,21 +3,64 @@ import SwiftUI
 
 struct AudioRoutingPanel: View {
     @ObservedObject var service: AudioRoutingService
+    @State private var expandedRanges: [String: Int] = [:]
 
     private let iconPointSize: CGFloat = 24
 
     var body: some View {
-        VStack(spacing: MenuPanelLayout.audioRowSpacing) {
-            ForEach(service.menuRows) { row in
-                audioRow(row)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(alignment: .top, spacing: MenuPanelLayout.audioRowSpacing + 4) {
+                ForEach(service.menuRows) { row in
+                    audioRow(row)
+                }
             }
         }
         .padding(.trailing, 2)
         .frame(maxWidth: .infinity, alignment: .topLeading)
+        .onChange(of: service.menuRows.map(\.bundleID)) { _, bundleIDs in
+            expandedRanges = expandedRanges.filter { bundleIDs.contains($0.key) }
+        }
     }
 
     private func audioRow(_ row: AudioRoutingRow) -> some View {
-        HStack(spacing: 10) {
+        if service.isLiteMode {
+            return AnyView(liteAudioRow(row))
+        }
+        return AnyView(fullAudioRow(row))
+    }
+
+    @ViewBuilder
+    private func fullAudioRow(_ row: AudioRoutingRow) -> some View {
+        let maxPercent = max(
+            expandedRanges[row.bundleID] ?? 100,
+            AudioVolumeScale.initialMaximum(for: row.volumePercent)
+        )
+        VStack(spacing: 5) {
+            ScrollWheelSlider(
+                value: Binding(
+                    get: { Double(row.volumePercent) },
+                    set: { service.setVolume(bundleID: row.bundleID, percent: Int($0.rounded())) }
+                ),
+                in: 0...Double(maxPercent),
+                step: 1,
+                isVertical: true,
+                onRequestRangeExpansion: {
+                    guard let next = AudioVolumeScale.nextMaximum(after: maxPercent) else { return }
+                    withAnimation(.easeOut(duration: 0.22)) {
+                        expandedRanges[row.bundleID] = next
+                    }
+                }
+            )
+            .controlSize(.small)
+            .frame(width: 22, height: 76)
+            .help("音量 \(row.volumePercent)%（0–300%）")
+
+            Text("\(row.volumePercent)%")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 48)
+                .accessibilityLabel("音量 \(row.volumePercent)%")
+
             Button {
                 service.setVolume(bundleID: row.bundleID, percent: 100)
             } label: {
@@ -28,6 +71,27 @@ struct AudioRoutingPanel: View {
             .help(iconHelp(for: row))
             .accessibilityLabel("\(row.name)，恢复 100%")
             .accessibilityHint(statusDescription(for: row.state))
+        }
+        .padding(.vertical, 2)
+        .frame(width: 58, height: 108)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(row.name)，音量 \(row.volumePercent)%，\(statusDescription(for: row.state))")
+    }
+
+    private func liteAudioRow(_ row: AudioRoutingRow) -> some View {
+        VStack(spacing: 5) {
+            Button {
+                service.setVolume(bundleID: row.bundleID, percent: 100)
+            } label: {
+                appIcon(for: row)
+            }
+            .buttonStyle(.plain)
+            .help(iconHelp(for: row))
+
+            Text("\(row.volumePercent)%")
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .frame(width: 48)
 
             ScrollWheelSlider(
                 value: Binding(
@@ -37,19 +101,13 @@ struct AudioRoutingPanel: View {
                 in: 0...300,
                 step: 1
             )
-            .controlSize(.small)
-            .help("音量 \(row.volumePercent)%（0–300%）")
-
-            Text("\(row.volumePercent)%")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 40, alignment: .trailing)
-                .accessibilityLabel("音量 \(row.volumePercent)%")
+            .frame(width: 42, height: 12)
+            .opacity(0.02)
+            .help("点击后使用滚轮或上下键调节音量")
         }
-        .padding(.horizontal, 2)
-        .frame(minHeight: 30, maxHeight: 30)
+        .frame(width: 58, height: 78)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(row.name)，音量 \(row.volumePercent)%，\(statusDescription(for: row.state))")
+        .accessibilityLabel("\(row.name)，音量 \(row.volumePercent)%")
     }
 
     @ViewBuilder
@@ -111,6 +169,20 @@ struct AudioRoutingPanel: View {
         case .starting: "正在启动音频路由"
         case let .awaitingAudio(message), let .degraded(message), let .failed(message): message
         case .active: "分应用音频路由已生效"
+        }
+    }
+}
+
+enum AudioVolumeScale {
+    static func initialMaximum(for volume: Int) -> Int {
+        volume <= 100 ? 100 : volume <= 200 ? 200 : 300
+    }
+
+    static func nextMaximum(after maximum: Int) -> Int? {
+        switch maximum {
+        case 100: 200
+        case 200: 300
+        default: nil
         }
     }
 }

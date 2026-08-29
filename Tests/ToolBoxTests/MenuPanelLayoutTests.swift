@@ -226,19 +226,16 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertLessThan(MenuPanelLayout.outerSpacing, 18)
     }
 
-    func testAudioSectionHeightGrowsWithRowsInsteadOfScrolling() {
+    func testAudioSectionHeightStaysFixedWhileRowsScrollHorizontally() {
         XCTAssertEqual(
             MenuPanelLayout.audioContentHeight(rowCount: 3),
             MenuPanelLayout.audioSectionContentHeight
         )
-        XCTAssertGreaterThan(
-            MenuPanelLayout.audioContentHeight(rowCount: 4),
-            MenuPanelLayout.audioSectionContentHeight
-        )
+        XCTAssertEqual(MenuPanelLayout.audioContentHeight(rowCount: 4), MenuPanelLayout.audioSectionContentHeight)
         XCTAssertEqual(MenuPanelLayout.audioContentHeight(rowCount: 0), 0)
     }
 
-    func testPanelHeightIncludesAllVisibleAudioRows() {
+    func testPanelHeightUsesFixedAudioViewport() {
         let threeRowHeight = MenuPanelLayout.panelHeight(
             cableItemCount: 0,
             showsDisplayControl: false,
@@ -252,10 +249,7 @@ final class MenuPanelLayoutTests: XCTestCase {
             audioRowCount: 4
         )
 
-        XCTAssertEqual(
-            fourRowHeight - threeRowHeight,
-            MenuPanelLayout.audioRowHeight + MenuPanelLayout.audioRowSpacing
-        )
+        XCTAssertEqual(fourRowHeight, threeRowHeight)
     }
 
     func testCableGridGeometryForUpToThreeItems() {

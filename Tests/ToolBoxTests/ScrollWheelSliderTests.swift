@@ -3,6 +3,15 @@ import XCTest
 @testable import ToolBoxCore
 
 final class ScrollWheelSliderTests: XCTestCase {
+    func testAudioVolumeScaleExpandsInTwoSteps() {
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 100), 100)
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 150), 200)
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 300), 300)
+        XCTAssertEqual(AudioVolumeScale.nextMaximum(after: 100), 200)
+        XCTAssertEqual(AudioVolumeScale.nextMaximum(after: 200), 300)
+        XCTAssertNil(AudioVolumeScale.nextMaximum(after: 300))
+    }
+
     func testDiscreteWheelMovesOneStepInEitherDirection() {
         var adjuster = ScrollWheelValueAdjuster(preciseThreshold: 10)
 
@@ -204,6 +213,27 @@ final class ScrollWheelSliderTests: XCTestCase {
 
         XCTAssertEqual(slider.doubleValue, 41)
         XCTAssertEqual(probe.receivedValue, 41)
+    }
+
+    func testNativeSliderRequestsExpansionWhenScrollingAboveMaximum() throws {
+        let slider = ScrollWheelNSSlider(value: 100, minValue: 0, maxValue: 100, target: nil, action: nil)
+        var expansionCount = 0
+        slider.onRequestRangeExpansion = { expansionCount += 1 }
+
+        let cgEvent = try XCTUnwrap(
+            CGEvent(
+                scrollWheelEvent2Source: nil,
+                units: .line,
+                wheelCount: 1,
+                wheel1: 1,
+                wheel2: 0,
+                wheel3: 0
+            )
+        )
+        slider.scrollWheel(with: try XCTUnwrap(NSEvent(cgEvent: cgEvent)))
+
+        XCTAssertEqual(expansionCount, 1)
+        XCTAssertEqual(slider.doubleValue, 100)
     }
 
     func testNativeSliderDropsPreciseRemainderWhileDisabled() throws {

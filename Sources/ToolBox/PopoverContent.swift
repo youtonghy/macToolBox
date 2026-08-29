@@ -44,11 +44,13 @@ struct PopoverContent: View {
                     WiFiSignalPopoverView(model: wifiSignal)
                 }
 
-                section(
-                    title: "显示器控制",
-                    subtitle: displayControl.hasExternalDisplay ? displayControl.selectedDisplayName : "系统显示设置"
-                ) {
-                    DisplayControlPanel(model: displayControl)
+                if displayControl.hasExternalDisplay {
+                    section(
+                        title: "显示器控制",
+                        subtitle: displayControl.selectedDisplayName
+                    ) {
+                        DisplayControlPanel(model: displayControl)
+                    }
                 }
             }
 

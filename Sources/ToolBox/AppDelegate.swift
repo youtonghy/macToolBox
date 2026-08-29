@@ -194,6 +194,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             .receive(on: RunLoop.main)
             .sink { [weak self] on in self?.applyClipboard(on) }
             .store(in: &cancellables)
+        applyClipboard(state.clipboardOn)
 
         shortcutRegistry.onRoutedAction = { [weak self] action in
             self?.handleShortcutAction(action) ?? false

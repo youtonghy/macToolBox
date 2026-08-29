@@ -128,16 +128,19 @@ struct SettingsView: View {
                 .padding(.horizontal, 4)
                 .padding(.bottom, 2)
 
-            SettingsCard {
-                VStack(spacing: 8) {
-                    ForEach(SettingsTab.allCases) { tab in
-                        sidebarButton(for: tab)
+            ScrollView(.vertical, showsIndicators: true) {
+                SettingsCard {
+                    VStack(spacing: 8) {
+                        ForEach(SettingsTab.allCases) { tab in
+                            sidebarButton(for: tab)
+                        }
                     }
                 }
             }
-
-            Spacer(minLength: 0)
+            .scrollIndicators(.visible)
+            .frame(maxHeight: .infinity, alignment: .top)
         }
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     private var content: some View {

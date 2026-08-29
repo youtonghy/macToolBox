@@ -57,7 +57,7 @@ struct PendingTaskOwnership<Key: Hashable> {
 
     mutating func claim(_ key: Key) -> UInt64? {
         // Check for stale ownership and force-release if timed out
-        if let existingOwner = owners[key],
+        if owners[key] != nil,
            let timestamp = timestamps[key] {
             let now = nowProvider()
             if now.timeIntervalSince(timestamp) > timeout {
@@ -97,6 +97,8 @@ struct PendingTaskOwnership<Key: Hashable> {
 
 @MainActor
 final class AudioRoutingService: ObservableObject {
+    static let liteModeDefaultsKey = "audioRouting.liteMode"
+
     @Published private(set) var rows: [AudioRoutingRow] = []
     /// Menu-bar mixer: only apps that are currently (or recently) playing.
     /// Saved-but-idle rules stay out of the compact panel and live in Settings.
@@ -107,6 +109,9 @@ final class AudioRoutingService: ObservableObject {
     @Published private(set) var playingRows: [AudioRoutingRow] = []
     @Published private(set) var devices: [AudioOutputDevice] = []
     @Published private(set) var globalError: String?
+    @Published var isLiteMode: Bool {
+        didSet { UserDefaults.standard.set(isLiteMode, forKey: Self.liteModeDefaultsKey) }
+    }
 
     private let ruleStore: AudioRuleStore
     private let processRegistry: any AudioProcessRegistryProviding
@@ -176,6 +181,7 @@ final class AudioRoutingService: ObservableObject {
         self.persistenceDelay = persistenceDelay
         self.recentlyActiveWindow = recentlyActiveWindow
         self.nowProvider = now
+        self.isLiteMode = UserDefaults.standard.bool(forKey: Self.liteModeDefaultsKey)
         // Initialize PendingTaskOwnership with timeout and nowProvider
         self.pendingVolumeTaskOwnership = PendingTaskOwnership(timeout: 5.0, nowProvider: now)
     }
@@ -1002,7 +1008,7 @@ final class AudioRoutingService: ObservableObject {
             if !deferredVolumeChanges.isEmpty {
                 let deferredChanges = deferredVolumeChanges
                 deferredVolumeChanges.removeAll()
-                for (bundleID, percent) in deferredChanges {
+                for bundleID in deferredChanges.keys {
                     scheduleVolumeApplication(bundleID: bundleID, session: session)
                 }
             }

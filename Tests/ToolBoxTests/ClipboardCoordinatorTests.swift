@@ -134,3 +134,29 @@ final class ClipboardItemTests: XCTestCase {
         XCTAssertTrue(imageItem.isImage)
     }
 }
+
+@MainActor
+final class ClipboardPanelModelTests: XCTestCase {
+    func testSearchExcludesImagesAndIsCaseInsensitive() {
+        let store = ClipboardStore()
+        store.addOrUpdate(hash: "text", text: "Hello Clipboard", image: nil, types: [.string])
+        store.addOrUpdate(hash: "image", text: nil, image: Data([1, 2]), types: [.png])
+        let model = ClipboardPanelModel(store: store)
+
+        model.query = "CLIP"
+        XCTAssertEqual(model.filteredItems.map(\.contentHash), ["text"])
+    }
+
+    func testSelectionWraps() {
+        let store = ClipboardStore()
+        store.addOrUpdate(hash: "one", text: "1", image: nil, types: [.string])
+        store.addOrUpdate(hash: "two", text: "2", image: nil, types: [.string])
+        let model = ClipboardPanelModel(store: store)
+        model.selectFirst()
+
+        model.moveSelection(by: -1)
+        XCTAssertEqual(model.selectedItem?.contentHash, "one")
+        model.moveSelection(by: 1)
+        XCTAssertEqual(model.selectedItem?.contentHash, "two")
+    }
+}

@@ -7,6 +7,7 @@ final class ClipboardCoordinator: ObservableObject {
     private let store: ClipboardStore
     private var pollTimer: Timer?
     private var lastChangeCount: Int = 0
+    private var panelController: ClipboardPanelController?
 
     nonisolated init(store: ClipboardStore) {
         self.store = store
@@ -18,7 +19,9 @@ final class ClipboardCoordinator: ObservableObject {
 
     /// Start monitoring clipboard changes
     func start() {
+        guard pollTimer == nil else { return }
         lastChangeCount = NSPasteboard.general.changeCount
+        captureCurrentPasteboard()
         pollTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.checkPasteboardChange()
@@ -32,11 +35,13 @@ final class ClipboardCoordinator: ObservableObject {
         pollTimer = nil
     }
 
-    /// Show clipboard history panel (placeholder for now)
     func showPanel() {
-        // TODO: Implement in slice 4
-        print("[ClipboardCoordinator] showPanel() called")
+        captureCurrentPasteboard()
+        if panelController == nil { panelController = ClipboardPanelController(store: store) }
+        panelController?.present()
     }
+
+    var items: [ClipboardItem] { store.items }
 
     private func checkPasteboardChange() {
         let pasteboard = NSPasteboard.general
