@@ -290,19 +290,27 @@ public struct ToolBoxDisplayDTO: Codable, Equatable, Sendable {
     public let name: String
     public let isBuiltIn: Bool
     public let controls: [ToolBoxDisplayControlDTO]
+    /// Whether a hardware DDC transport is bound to this display. Optional
+    /// for backward compatibility with older encoded payloads.
+    public let supportsHardwareDDC: Bool?
+    public let unavailableReason: String?
 
     public init(
         displayID: UInt32,
         serial: String? = nil,
         name: String,
         isBuiltIn: Bool,
-        controls: [ToolBoxDisplayControlDTO]
+        controls: [ToolBoxDisplayControlDTO],
+        supportsHardwareDDC: Bool? = nil,
+        unavailableReason: String? = nil
     ) {
         self.displayID = displayID
         self.serial = serial
         self.name = name
         self.isBuiltIn = isBuiltIn
         self.controls = controls
+        self.supportsHardwareDDC = supportsHardwareDDC
+        self.unavailableReason = unavailableReason
     }
 }
 

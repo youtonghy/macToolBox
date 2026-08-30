@@ -61,11 +61,30 @@ final class BrightnessScheduleCoordinator: ObservableObject {
 
     private struct ScheduledWriteRetry {
         var attempts: Int
+        /// Earliest time the display may be rewritten. `.distantFuture` marks
+        /// an exhausted budget: the display stays deferred until a full
+        /// schedule trigger resets it.
+        var dueAt: Date
     }
 
     private var scheduledWriteRetries: [CGDirectDisplayID: ScheduledWriteRetry] = [:]
     private var retryFireDate: Date?
     private var retryGeneration: UInt64 = 0
+    private var lastActiveSegmentID: UUID?
+    /// Connection tokens recorded when overrides were last pruned; a changed
+    /// token under the same ID means the display was replugged and its
+    /// manual override must not carry over.
+    private var overrideConnectionTokens: [CGDirectDisplayID: UInt64?] = [:]
+    /// Increments on stop(); stale notification callbacks and delayed wake
+    /// closures from a previous session are dropped by comparing against it.
+    private var lifecycleGeneration: UInt64 = 0
+    /// Identifies the current wake cycle so an older cycle's delayed settle
+    /// closure cannot end a newer one early.
+    private var wakeCycleID = UUID()
+    /// Monotonic timestamp of the last wake settle. Paired wake notifications
+    /// (screensDidWake + didWake) that arrive after a completed settle must
+    /// not start a second refresh/rewrite cycle.
+    private var lastWakeSettleUptimeNanos: UInt64 = 0
 
     /// Exponential backoff for failed scheduled writes; after the last step
     /// the display gives up until the next schedule trigger.
@@ -91,6 +110,12 @@ final class BrightnessScheduleCoordinator: ObservableObject {
     func start() {
         guard !wantsRunning else { return }
         wantsRunning = true
+        // Defensive: a stale sleep/wake callback from a previous session must
+        // not leave the new session suspended.
+        isSleepSuspended = false
+        awaitingPostWakeSnapshot = false
+        wakeFallbackWorkItem?.cancel()
+        wakeFallbackWorkItem = nil
 
         // Already @MainActor; avoid receive(on:) which can stall unit tests waiting on async workers.
         service.$snapshot
@@ -127,8 +152,11 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         retryClock.cancel()
         timerGeneration += 1
         retryGeneration += 1
+        lifecycleGeneration += 1
         retryFireDate = nil
         scheduledWriteRetries.removeAll()
+        lastActiveSegmentID = nil
+        overrideConnectionTokens.removeAll()
         overrides.removeAll()
         lastSignatures.removeAll()
         isSleepSuspended = false
@@ -168,6 +196,10 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         if reason == .sleep {
             clock.cancel()
             timerGeneration += 1
+            retryClock.cancel()
+            retryGeneration += 1
+            retryFireDate = nil
+            scheduledWriteRetries.removeAll()
             return
         }
 
@@ -178,6 +210,10 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         guard configuration.isEnabled else {
             clock.cancel()
             timerGeneration += 1
+            retryClock.cancel()
+            retryGeneration += 1
+            retryFireDate = nil
+            scheduledWriteRetries.removeAll()
             overrides.removeAll()
             lastSignatures = signatures(from: service.snapshot)
             runtimeState = .disabled
@@ -190,6 +226,12 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             runtimeState = .waitingForDisplays
             return
         }
+
+        // PLAN trigger matrix: a clock/zone change rewrites everything only
+        // when the active segment actually moved; otherwise it just
+        // reschedules the timer and recalculates override expiry.
+        let activeSegmentChanged = lastActiveSegmentID != match.activeSegment.id
+        lastActiveSegmentID = match.activeSegment.id
 
         // PLAN: on clock/zone changes, recalculate expiry for still-valid
         // same-segment overrides so they track the recomputed boundary.
@@ -208,19 +250,36 @@ final class BrightnessScheduleCoordinator: ObservableObject {
 
         let eligible = eligibleDisplays(in: snapshot)
         let signatures = signatures(from: snapshot)
-        let writeTargets = displaysToWrite(
+        var writeTargets = displaysToWrite(
             reason: reason,
             eligible: eligible,
-            signatures: signatures
+            signatures: signatures,
+            activeSegmentChanged: activeSegmentChanged
         )
+
+        // A display with a pending retry must not be rewritten by an
+        // ordinary snapshot refresh before its backoff elapses — otherwise
+        // the post-failure refresh burns the whole budget in one burst.
+        var deferredRetryDisplayIDs = Set<CGDirectDisplayID>()
+        if reason == .snapshot || reason == .retry {
+            for display in writeTargets where isRetryDeferred(display.id, now: now) {
+                deferredRetryDisplayIDs.insert(display.id)
+            }
+            if !deferredRetryDisplayIDs.isEmpty {
+                writeTargets.removeAll { deferredRetryDisplayIDs.contains($0.id) }
+            }
+        }
 
         // A fresh write from a full-scope trigger restarts the retry budget;
         // retry- and snapshot-driven writes must not (they would reset the
-        // budget on every failed attempt and loop forever).
+        // budget on every failed attempt and loop forever). A clock change
+        // only counts as a full trigger when the active segment moved.
         let resetsRetryBudget: Bool
         switch reason {
-        case .start, .commit, .timer, .wake, .clockChange:
+        case .start, .commit, .timer, .wake:
             resetsRetryBudget = true
+        case .clockChange:
+            resetsRetryBudget = activeSegmentChanged
         case .snapshot, .retry, .sleep:
             resetsRetryBudget = false
         }
@@ -242,6 +301,11 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         }
 
         lastSignatures = signatures
+        // Deferred displays keep their signature cleared so the retry timer
+        // still finds them pending when their backoff elapses.
+        for displayID in deferredRetryDisplayIDs {
+            lastSignatures[displayID] = nil
+        }
 
         if eligible.isEmpty {
             runtimeState = .waitingForDisplays
@@ -260,10 +324,18 @@ final class BrightnessScheduleCoordinator: ObservableObject {
     private func displaysToWrite(
         reason: ReconcileReason,
         eligible: [DisplayControlDisplay],
-        signatures: [CGDirectDisplayID: DisplayTopologySignature]
+        signatures: [CGDirectDisplayID: DisplayTopologySignature],
+        activeSegmentChanged: Bool
     ) -> [DisplayControlDisplay] {
         switch reason {
-        case .start, .commit, .timer, .wake, .clockChange:
+        case .start, .commit, .timer, .wake:
+            return eligible
+        case .clockChange:
+            // Within the same segment a clock change only reschedules; a
+            // segment move behaves like a boundary crossing and rewrites.
+            guard activeSegmentChanged else {
+                return []
+            }
             return eligible
         case .snapshot, .retry:
             return eligible.filter { display in
@@ -328,10 +400,11 @@ final class BrightnessScheduleCoordinator: ObservableObject {
                 wakeFallbackWorkItem?.cancel()
                 wakeFallbackWorkItem = nil
                 isSleepSuspended = false
+                lastWakeSettleUptimeNanos = DispatchTime.now().uptimeNanoseconds
                 // The first settled snapshot is authoritative for display
-                // presence; discard overrides for displays that did not return.
-                let liveIDs = Set(snapshot.displays.map(\.id))
-                overrides = overrides.filter { liveIDs.contains($0.key) }
+                // presence; discard overrides for displays that did not
+                // return or were replugged under the same ID.
+                pruneOverrides(liveDisplays: snapshot.displays)
                 reconcile(reason: .wake, snapshot: snapshot)
             }
             return
@@ -346,10 +419,36 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             if snapshot.displays.isEmpty, service.lastRefreshError != nil {
                 return
             }
-            let liveIDs = Set(snapshot.displays.map(\.id))
-            overrides = overrides.filter { liveIDs.contains($0.key) }
+            pruneOverrides(liveDisplays: snapshot.displays)
         }
         reconcile(reason: .snapshot, snapshot: snapshot)
+    }
+
+    /// Removes overrides and retry state for absent displays and for
+    /// replugged displays (same CGDirectDisplayID, different connection
+    /// token), then records the current tokens. PLAN: a replugged display
+    /// gets the current schedule value, never a stale manual override or a
+    /// stale retry deferral (including budget exhaustion).
+    private func pruneOverrides(liveDisplays: [DisplayControlDisplay]) {
+        let liveIDs = Set(liveDisplays.map(\.id))
+        overrides = overrides.filter { liveIDs.contains($0.key) }
+        for display in liveDisplays {
+            let token = display.connectionToken
+            if let previous = overrideConnectionTokens[display.id], previous != token {
+                overrides.removeValue(forKey: display.id)
+                scheduledWriteRetries.removeValue(forKey: display.id)
+            }
+            overrideConnectionTokens[display.id] = token
+        }
+        for displayID in overrideConnectionTokens.keys where !liveIDs.contains(displayID) {
+            overrideConnectionTokens.removeValue(forKey: displayID)
+            scheduledWriteRetries.removeValue(forKey: displayID)
+        }
+        if scheduledWriteRetries.isEmpty {
+            retryClock.cancel()
+            retryGeneration += 1
+            retryFireDate = nil
+        }
     }
 
     // MARK: - Scheduled write failure retry
@@ -357,20 +456,41 @@ final class BrightnessScheduleCoordinator: ObservableObject {
     private func handleScheduledWriteFailure(displayID: CGDirectDisplayID, policy: DisplayBrightnessWritePolicy) {
         guard wantsRunning, configuration.isEnabled, policy == .scheduled else { return }
 
-        var state = scheduledWriteRetries[displayID] ?? ScheduledWriteRetry(attempts: 0)
+        var state = scheduledWriteRetries[displayID] ?? ScheduledWriteRetry(attempts: 0, dueAt: .distantPast)
         guard state.attempts < Self.retryDelays.count else {
+            // Keep the display deferred forever (until a full trigger) so
+            // neither the retry timer nor refresh-driven reconciles keep
+            // hammering a dead connection.
+            state.dueAt = .distantFuture
+            scheduledWriteRetries[displayID] = state
             logger.error("Scheduled brightness retry budget exhausted for display \(displayID, privacy: .public); waiting for the next schedule trigger.")
             return
         }
         let delay = Self.retryDelays[state.attempts]
         state.attempts += 1
+        state.dueAt = clock.now.addingTimeInterval(delay)
         scheduledWriteRetries[displayID] = state
 
         // Drop the recorded signature so the next reconcile rewrites this
         // display instead of skipping it as unchanged.
         lastSignatures[displayID] = nil
-        let fireDate = clock.now.addingTimeInterval(delay)
-        scheduleRetryTimer(at: fireDate)
+        scheduleRetryTimer(at: state.dueAt)
+    }
+
+    private func isRetryDeferred(_ displayID: CGDirectDisplayID, now: Date) -> Bool {
+        guard let state = scheduledWriteRetries[displayID] else { return false }
+        return state.dueAt > now
+    }
+
+    /// Schedules the retry clock for the earliest pending per-display due
+    /// date, so every display retries on its own backoff.
+    private func scheduleNextPendingRetry() {
+        let now = clock.now
+        let upcoming = scheduledWriteRetries.values
+            .map(\.dueAt)
+            .filter { $0 > now && $0 != .distantFuture }
+        guard let next = upcoming.min() else { return }
+        scheduleRetryTimer(at: next)
     }
 
     private func scheduleRetryTimer(at date: Date) {
@@ -383,6 +503,8 @@ final class BrightnessScheduleCoordinator: ObservableObject {
                 guard let self, self.retryGeneration == firedGeneration else { return }
                 self.retryFireDate = nil
                 self.reconcile(reason: .retry)
+                // Other displays may still be waiting on their own backoff.
+                self.scheduleNextPendingRetry()
             }
         }
     }
@@ -393,17 +515,22 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         timerGeneration += 1
         let generation = timerGeneration
         var fireDate = match.nextTransition
+        var firesAtDSTTransition = false
 
         if let dst = clock.calendar.timeZone.nextDaylightSavingTimeTransition(after: now),
            dst < fireDate {
             fireDate = dst
+            firesAtDSTTransition = true
         }
 
         clock.schedule(at: fireDate, generation: generation) { [weak self] firedGeneration in
             Task { @MainActor in
                 guard let self else { return }
                 guard self.timerGeneration == firedGeneration else { return }
-                self.reconcile(reason: .timer)
+                // A DST-only fire within the same segment reschedules the
+                // timer and recalculates override expiry (like a clock
+                // change) instead of rewriting every display.
+                self.reconcile(reason: firesAtDSTTransition ? .clockChange : .timer)
             }
         }
     }
@@ -447,6 +574,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         let center = NotificationCenter.default
         let workspace = NSWorkspace.shared.notificationCenter
         // Explicit .main delivery makes the synchronous MainActor hops below valid.
+        let generation = lifecycleGeneration
 
         let sleepNames: [Notification.Name] = [
             NSWorkspace.screensDidSleepNotification,
@@ -456,7 +584,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             notificationObservers.append(
                 workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated {
-                        self?.handleSleep()
+                        self?.handleSleep(generation: generation)
                     }
                 }
             )
@@ -470,7 +598,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             notificationObservers.append(
                 workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated {
-                        self?.handleWake()
+                        self?.handleWake(generation: generation)
                     }
                 }
             )
@@ -485,7 +613,12 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             notificationObservers.append(
                 center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                     MainActor.assumeIsolated {
-                        self?.reconcile(reason: .clockChange)
+                        // Stale notifications queued before stop() must not
+                        // touch a freshly started session.
+                        guard let self,
+                              self.wantsRunning,
+                              self.lifecycleGeneration == generation else { return }
+                        self.reconcile(reason: .clockChange)
                     }
                 }
             )
@@ -502,9 +635,13 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         notificationObservers.removeAll()
     }
 
-    private func handleSleep() {
+    private func handleSleep(generation: UInt64) {
+        // Stale notifications queued before stop() must not suspend a
+        // freshly started session.
+        guard wantsRunning, lifecycleGeneration == generation else { return }
         isSleepSuspended = true
         awaitingPostWakeSnapshot = false
+        lastWakeSettleUptimeNanos = 0
         wakeFallbackWorkItem?.cancel()
         wakeFallbackWorkItem = nil
         clock.cancel()
@@ -512,8 +649,21 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         reconcile(reason: .sleep)
     }
 
-    private func handleWake() {
-        // Coalesce duplicate wake notifications.
+    private func handleWake(generation: UInt64) {
+        guard wantsRunning, lifecycleGeneration == generation else { return }
+        // A paired duplicate wake (screensDidWake + didWake) arriving after
+        // this cycle already settled must not start a second refresh and
+        // full rewrite. A genuine new sleep clears the marker.
+        if !awaitingPostWakeSnapshot,
+           !isSleepSuspended,
+           lastWakeSettleUptimeNanos > 0,
+           DispatchTime.now().uptimeNanoseconds &- lastWakeSettleUptimeNanos < 10_000_000_000 {
+            return
+        }
+        // Coalesce duplicate wake notifications; each new wake cycle
+        // invalidates delayed closures from older cycles.
+        let cycle = UUID()
+        wakeCycleID = cycle
         awaitingPostWakeSnapshot = true
         isSleepSuspended = true
         clock.cancel()
@@ -521,15 +671,24 @@ final class BrightnessScheduleCoordinator: ObservableObject {
 
         wakeFallbackWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.awaitingPostWakeSnapshot else { return }
+            guard let self,
+                  self.wantsRunning,
+                  self.lifecycleGeneration == generation,
+                  self.wakeCycleID == cycle,
+                  self.awaitingPostWakeSnapshot else { return }
             self.service.refresh()
             // If the refresh fails (no snapshot published) or reports an
             // empty erroring topology, force-settle so the coordinator never
             // remains suspended indefinitely.
             DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
-                guard let self, self.awaitingPostWakeSnapshot else { return }
+                guard let self,
+                      self.wantsRunning,
+                      self.lifecycleGeneration == generation,
+                      self.wakeCycleID == cycle,
+                      self.awaitingPostWakeSnapshot else { return }
                 self.awaitingPostWakeSnapshot = false
                 self.isSleepSuspended = false
+                self.lastWakeSettleUptimeNanos = DispatchTime.now().uptimeNanoseconds
                 self.reconcile(reason: .wake)
             }
         }

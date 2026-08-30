@@ -214,10 +214,30 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             )
             let writer = ToolBoxCLIWriter()
             if case let .unconfirmed(detail) = confirmed {
-                writer.writeStandardError("✗ 回读确认失败：\(detail)\n")
+                if options.json {
+                    // Keep stdout a single valid JSON document; the wait
+                    // failure is reported on stderr as JSON + exit code.
+                    let payload: [String: Any] = [
+                        "error": [
+                            "code": "readback-unconfirmed",
+                            "message": detail,
+                        ],
+                    ]
+                    if let data = try? JSONSerialization.data(
+                        withJSONObject: payload,
+                        options: [.sortedKeys]
+                    ),
+                       let line = String(data: data, encoding: .utf8) {
+                        writer.writeStandardError(line + "\n")
+                    }
+                } else {
+                    writer.writeStandardError("✗ 回读确认失败：\(detail)\n")
+                }
                 throw ExitCode(ToolBoxCLIExitStatus.failure)
             }
-            writer.writeStandardOutput("✓ 回读确认成功。\n")
+            if !options.json {
+                writer.writeStandardOutput("✓ 回读确认成功。\n")
+            }
         }
 
         private func isPresetChange(_ change: ToolBoxDisplayChangeDTO) -> Bool {
@@ -225,13 +245,15 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             return false
         }
 
-        private enum ReadbackConfirmation {
+        enum ReadbackConfirmation {
             case confirmed
             case unconfirmed(String)
         }
 
         /// Polls displayGet until the readback matches the requested change.
         /// Write-only displays cannot be verified and report unconfirmed.
+        /// The deadline is strict: sleep and per-request timeouts never
+        /// exceed the remaining --wait budget.
         private static func waitForReadback(
             selector: ToolBoxDisplayTargetDTO,
             change: ToolBoxDisplayChangeDTO,
@@ -239,14 +261,27 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             options: ToolBoxCLIConnectionOptions
         ) -> ReadbackConfirmation {
             let client = ToolBoxControlClient()
-            let clientOptions = ToolBoxControlClientOptions(
-                shouldLaunchApplication: false,
-                timeout: options.timeout
-            )
             let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
 
-            while Date() < deadline {
-                Thread.sleep(forTimeInterval: 0.5)
+            while true {
+                let remaining = deadline.timeIntervalSinceNow
+                guard remaining > 0 else { break }
+                Thread.sleep(forTimeInterval: min(0.5, remaining))
+                let remainingAfterSleep = deadline.timeIntervalSinceNow
+                guard remainingAfterSleep > 0 else { break }
+                // Strict deadline: the per-request timeout never exceeds the
+                // configured timeout or the remaining budget — no floor that
+                // could push a final request past --wait.
+                let perCallTimeout = min(
+                    2.0,
+                    max(TimeInterval(options.timeout), 0.05),
+                    remainingAfterSleep
+                )
+                guard perCallTimeout > 0.01 else { break }
+                let clientOptions = ToolBoxControlClientOptions(
+                    shouldLaunchApplication: false,
+                    timeout: perCallTimeout
+                )
                 guard
                     let response = try? client.execute(
                         ToolBoxControlRequestEnvelope(request: .displayGet(selector)),
@@ -266,7 +301,7 @@ struct ToolBoxDisplayCommand: ParsableCommand {
 
         /// Returns nil while the readback has not converged on the target yet
         /// (keep polling); a verdict ends the wait.
-        private static func readbackVerdict(
+        static func readbackVerdict(
             for dto: ToolBoxDisplayDTO,
             change: ToolBoxDisplayChangeDTO
         ) -> ReadbackConfirmation? {
@@ -293,7 +328,7 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             }
         }
 
-        private static func numericVerdict(
+        static func numericVerdict(
             for dto: ToolBoxDisplayDTO,
             kind: ToolBoxDisplayControlKind,
             target: Int
@@ -304,7 +339,15 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             guard control.isReadable, let current = control.currentValue, let value = Int(current) else {
                 return .unconfirmed("当前值不可回读（write-only）")
             }
-            if abs(value - target) <= 2 {
+            // Mirror the server's quantization: step = 1 / (maximum -
+            // minimum), snapped back into percent. A 20...30 range maps 53%
+            // to 50%, exactly like the service would.
+            let rawMinimum = Double(control.minimum ?? 0)
+            let rawMaximum = Double(max(control.maximum ?? 100, Int(rawMinimum) + 1))
+            let span = max(rawMaximum - rawMinimum, 1)
+            let quantizedRaw = rawMinimum + (Double(target) / 100.0 * span).rounded()
+            let quantizedPercent = ((quantizedRaw - rawMinimum) / span * 100.0).rounded()
+            if abs(Double(value) - quantizedPercent) <= 0.501 {
                 return .confirmed
             }
             return nil

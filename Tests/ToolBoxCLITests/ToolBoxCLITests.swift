@@ -104,3 +104,63 @@ extension ToolBoxCLITests {
         XCTAssertTrue(rendered.standardOutput.contains("已截断"))
     }
 }
+
+extension ToolBoxCLITests {
+    private func makeControlDTO(
+        kind: ToolBoxDisplayControlKind,
+        minimum: Int?,
+        maximum: Int?,
+        current: String?,
+        readable: Bool = true
+    ) -> ToolBoxDisplayControlDTO {
+        ToolBoxDisplayControlDTO(
+            kind: kind,
+            minimum: minimum,
+            maximum: maximum,
+            currentValue: current,
+            isReadable: readable,
+            isWritable: true
+        )
+    }
+
+    /// Mirrors the server quantization (step = 1/(max-min)): a 20...30 range
+    /// maps a 53% request to 50%, so a readback of 50 confirms while 53 is
+    /// still pending.
+    func testReadbackVerdictUsesRawMinimumInQuantization() throws {
+        let dto = ToolBoxDisplayDTO(
+            displayID: 42,
+            name: "Test",
+            isBuiltIn: false,
+            controls: [
+                makeControlDTO(kind: .brightness, minimum: 20, maximum: 30, current: "50"),
+                makeControlDTO(kind: .contrast, minimum: 20, maximum: 30, current: "53"),
+            ]
+        )
+
+        guard case .confirmed = ToolBoxDisplayCommand.Set.readbackVerdict(for: dto, change: .brightness(53)) else {
+            XCTFail("Expected 50 to confirm a 53% target on a 20...30 range")
+            return
+        }
+
+        // 53 displayed on a 20...30 range means the write has not landed on
+        // the quantized expectation yet: keep polling (nil), not confirmed.
+        if case .confirmed = ToolBoxDisplayCommand.Set.readbackVerdict(for: dto, change: .contrast(53)) {
+            XCTFail("53 must not confirm while the quantized expectation is 50")
+        }
+    }
+
+    func testReadbackVerdictRejectsUnreadableControl() throws {
+        let dto = ToolBoxDisplayDTO(
+            displayID: 42,
+            name: "Test",
+            isBuiltIn: false,
+            controls: [
+                makeControlDTO(kind: .brightness, minimum: 0, maximum: 100, current: "50", readable: false),
+            ]
+        )
+        guard case .unconfirmed = ToolBoxDisplayCommand.Set.readbackVerdict(for: dto, change: .brightness(50)) else {
+            XCTFail("Expected write-only control to be unconfirmed")
+            return
+        }
+    }
+}

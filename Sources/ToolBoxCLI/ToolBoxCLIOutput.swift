@@ -312,7 +312,8 @@ struct ToolBoxCLIResponseRenderer {
     private func renderDisplaySummary(_ display: ToolBoxDisplayDTO) -> String {
         let serial = display.serial.map { "，序列号 \($0)" } ?? ""
         let kind = display.isBuiltIn ? "内建" : "外接"
-        return "\(display.name)（ID \(display.displayID)\(serial)，\(kind)）"
+        let controllability = display.supportsHardwareDDC == false ? "，不可控" : ""
+        return "\(display.name)（ID \(display.displayID)\(serial)，\(kind)\(controllability)）"
     }
 
     private func onOff(_ value: Bool) -> String {

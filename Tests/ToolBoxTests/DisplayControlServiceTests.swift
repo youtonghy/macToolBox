@@ -75,6 +75,10 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     private var shouldBlockFirstWrite = false
     private var failReleasedFirstWrite = false
     private var failingKinds = Set<DisplayControlKind>()
+    private var blockedKind: DisplayControlKind?
+    private var kindBlockedRelease: CheckedContinuation<Void, Never>?
+    private var kindBlockedStartedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var failKindBlockedWrite = false
     private var firstWriteRelease: CheckedContinuation<Void, Never>?
     private var firstWriteStartedWaiters: [CheckedContinuation<Void, Never>] = []
     private var writeWaiters: [WriteWaiter] = []
@@ -83,7 +87,7 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     private var blockedSnapshotRelease: CheckedContinuation<Void, Never>?
     private var blockedSnapshotStartedWaiters: [CheckedContinuation<Void, Never>] = []
     private var failReleasedSnapshot = false
-    private let configuredSnapshot: DisplayControlSnapshot
+    private var configuredSnapshot: DisplayControlSnapshot
     private(set) var presetWrites: [UInt8] = []
     private var shouldBlockFirstPresetWrite = false
     private var firstPresetWriteRelease: CheckedContinuation<Void, Never>?
@@ -104,6 +108,10 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         shouldBlockFirstWrite = true
     }
 
+    func updateSnapshot(_ snapshot: DisplayControlSnapshot) {
+        configuredSnapshot = snapshot
+    }
+
     func failWrites(kind: DisplayControlKind) {
         failingKinds.insert(kind)
     }
@@ -112,6 +120,25 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         failReleasedFirstWrite = true
         firstWriteRelease?.resume()
         firstWriteRelease = nil
+    }
+
+    func blockNextWrite(of kind: DisplayControlKind) {
+        blockedKind = kind
+    }
+
+    func waitUntilKindWriteIsBlocked() async {
+        if kindBlockedRelease != nil {
+            return
+        }
+        await withCheckedContinuation { continuation in
+            kindBlockedStartedWaiters.append(continuation)
+        }
+    }
+
+    func releaseKindBlockedWrite(fail: Bool) {
+        failKindBlockedWrite = fail
+        kindBlockedRelease?.resume()
+        kindBlockedRelease = nil
     }
 
     func blockFirstPresetWrite() {
@@ -255,6 +282,19 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
         }
         if failingKinds.contains(kind) {
             throw DisplayControlError.writeFailed(displayID, kind)
+        }
+        if kind == blockedKind {
+            blockedKind = nil
+            await withCheckedContinuation { continuation in
+                kindBlockedRelease = continuation
+                let waiters = kindBlockedStartedWaiters
+                kindBlockedStartedWaiters.removeAll()
+                waiters.forEach { $0.resume() }
+            }
+            if failKindBlockedWrite {
+                failKindBlockedWrite = false
+                throw SnapshotTestError.forced
+            }
         }
 
         return DisplayControlValue(
@@ -600,9 +640,11 @@ final class DisplayControlServiceTests: XCTestCase {
     }
 
     func testStaleBrightnessWorkerFailureAfterStopDoesNotClobberNewState() async {
-        let provider = RecordingDisplayControlProvider()
+        let snapshot = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available)
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
         await provider.blockFirstWrite()
         let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
 
         service.writeBrightness(displayID: 42, normalizedValue: 0.5, smooth: false)
         await provider.waitUntilFirstWriteIsBlocked()
@@ -615,13 +657,15 @@ final class DisplayControlServiceTests: XCTestCase {
         await provider.waitUntilWrite(kind: .brightness, value: 0.8)
         for _ in 0..<20 { await Task.yield() }
 
-        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .brightness), 0.8)
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .brightness) ?? 0, 0.8, accuracy: 0.0001)
     }
 
     func testStaleAudioWorkerFailureAfterStopDoesNotClobberNewState() async {
-        let provider = RecordingDisplayControlProvider()
+        let snapshot = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 1)
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
         await provider.blockFirstWrite()
         let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
 
         service.setVolume(displayID: 42, normalizedValue: 0.4)
         await provider.waitUntilFirstWriteIsBlocked()
@@ -629,7 +673,11 @@ final class DisplayControlServiceTests: XCTestCase {
         await provider.releaseFirstWriteWithFailure()
         for _ in 0..<20 { await Task.yield() }
 
-        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+        // New session on a replugged display; keep the provider's snapshot
+        // aligned so post-write refreshes do not see another token change.
+        let replugSnapshot = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 2)
+        await provider.updateSnapshot(replugSnapshot)
+        service.setSnapshotForTesting(replugSnapshot)
         service.setVolume(displayID: 42, normalizedValue: 0.9)
         await provider.waitUntilWrite(kind: .volume, value: 0.9)
         for _ in 0..<20 { await Task.yield() }
@@ -759,7 +807,9 @@ final class DisplayControlServiceTests: XCTestCase {
         service.setColorPreset(displayID: 42, rawValue: 0x41)
         await provider.waitUntilFirstPresetWriteIsBlocked()
         service.setColorPreset(displayID: 42, rawValue: 0x0C)
-        service.setSnapshotForTesting(DisplayControlSnapshot(timestamp: Date(), displays: []))
+        let removedSnapshot = DisplayControlSnapshot(timestamp: Date(), displays: [])
+        await provider.updateSnapshot(removedSnapshot)
+        service.setSnapshotForTesting(removedSnapshot)
         await provider.releaseFirstPresetWrite()
         await yieldForPendingTasks()
 
@@ -830,7 +880,11 @@ final class DisplayControlServiceTests: XCTestCase {
 
     private static func makeControlsSnapshot(
         muteStatus: DisplayControlStatus,
-        volumeStatus: DisplayControlStatus
+        volumeStatus: DisplayControlStatus,
+        connectionToken: UInt64? = nil,
+        brightnessRawMaximum: UInt16 = 100,
+        muteRawCurrent: UInt16 = 2,
+        brightnessHasValue: Bool = true
     ) -> DisplayControlSnapshot {
         func capability(
             kind: DisplayControlKind,
@@ -868,12 +922,15 @@ final class DisplayControlServiceTests: XCTestCase {
                     backendName: "Test DDC",
                     unavailableReason: nil,
                     controls: [
-                        capability(kind: .brightness, status: .available, rawCurrent: 50, rawMaximum: 100),
+                        brightnessHasValue
+                            ? capability(kind: .brightness, status: .available, rawCurrent: brightnessRawMaximum / 2, rawMaximum: brightnessRawMaximum)
+                            : DisplayControlCapability(kind: .brightness, status: .writeOnly, value: nil, unavailableReason: "value unavailable"),
                         capability(kind: .contrast, status: .available, rawCurrent: 50, rawMaximum: 100),
                         capability(kind: .volume, status: volumeStatus, rawCurrent: 10, rawMaximum: 100),
-                        capability(kind: .mute, status: muteStatus, rawCurrent: 2, rawMaximum: 2),
+                        capability(kind: .mute, status: muteStatus, rawCurrent: muteRawCurrent, rawMaximum: 2),
                     ],
-                    colorPreset: nil
+                    colorPreset: nil,
+                    connectionToken: connectionToken
                 ),
             ]
         )
@@ -909,5 +966,269 @@ final class DisplayControlServiceTests: XCTestCase {
                 ),
             ]
         )
+    }
+}
+
+extension DisplayControlServiceTests {
+    /// A stale audio worker whose write fails after stop() must not roll
+    /// back the newer session's desired values.
+    func testStaleAudioWorkerFailureDoesNotOverrideNewSessionIntent() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 1))
+
+        service.setVolume(displayID: 42, normalizedValue: 0.4)
+        await provider.waitUntilFirstWriteIsBlocked()
+        service.stop()
+
+        // New session on a replugged display (same ID, new token). The new
+        // worker blocks inside its unmute write, then the user flips mute —
+        // the desired mute state must differ from the seeded last-successful
+        // value so a stale rollback is observable.
+        let replugSnapshot = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 2)
+        await provider.updateSnapshot(replugSnapshot)
+        service.setSnapshotForTesting(replugSnapshot)
+        await provider.blockNextWrite(of: .mute)
+        service.setVolume(displayID: 42, normalizedValue: 0.9)
+        await provider.waitUntilKindWriteIsBlocked()
+        service.setMuted(displayID: 42, muted: true)
+
+        // The old worker's write now fails; its failure handling must be
+        // dropped because it no longer owns the display.
+        await provider.releaseFirstWriteWithFailure()
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .volume), 0.9)
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .mute), 1)
+
+        await provider.releaseKindBlockedWrite(fail: false)
+        await provider.waitUntilWrite(kind: .mute, value: 1)
+    }
+
+    /// A replug under the same CGDirectDisplayID clears stale manual targets;
+    /// the snapshot value re-seeds the desired value.
+    func testSeedValuesClearsUserTargetsOnSameIDReplug() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 1))
+
+        service.writeControl(displayID: 42, kind: .contrast, normalizedValue: 0.9)
+        await provider.waitUntilWrite(kind: .contrast, value: 0.9)
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .contrast), 0.9)
+
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 2))
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .contrast), 0.5)
+    }
+
+    /// After a failed refresh, a successful refresh to an empty topology
+    /// must publish the empty snapshot AND clear the error, so consumers
+    /// can act on the genuinely-empty state.
+    func testRefreshRecoversToEmptyTopologyAfterFailure() async {
+        let provider = RecordingDisplayControlProvider(
+            snapshot: Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available)
+        )
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+
+        await provider.blockNextSnapshot()
+        service.refresh()
+        await provider.waitUntilSnapshotIsBlocked()
+        await provider.releaseBlockedSnapshotWithFailure()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNotNil(service.lastRefreshError)
+        XCTAssertEqual(service.snapshot.displays.count, 1)
+
+        await provider.updateSnapshot(DisplayControlSnapshot(timestamp: Date(), displays: []))
+        service.refresh()
+        for _ in 0..<100 where !(service.snapshot.displays.isEmpty && service.lastRefreshError == nil) {
+            await Task.yield()
+        }
+        XCTAssertTrue(service.snapshot.displays.isEmpty)
+        XCTAssertNil(service.lastRefreshError)
+    }
+}
+
+extension DisplayControlServiceTests {
+    // MARK: - Request-level generation (same worker, newer intent mid-flight)
+
+    func testBrightnessFailureDuringNewerIntentKeepsNewerTarget() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        service.writeBrightness(displayID: 42, normalizedValue: 0.3, smooth: false)
+        await provider.waitUntilFirstWriteIsBlocked()
+        // Newer intent submitted while the old write is in flight.
+        service.writeBrightness(displayID: 42, normalizedValue: 0.7, smooth: false)
+
+        await provider.releaseFirstWriteWithFailure()
+        await provider.waitUntilWrite(kind: .brightness, value: 0.7)
+
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .brightness) ?? 0, 0.7, accuracy: 0.0001)
+    }
+
+    func testContrastFailureDuringNewerIntentKeepsNewerTarget() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        service.writeControl(displayID: 42, kind: .contrast, normalizedValue: 0.2)
+        await provider.waitUntilFirstWriteIsBlocked()
+        service.writeControl(displayID: 42, kind: .contrast, normalizedValue: 0.8)
+
+        await provider.releaseFirstWriteWithFailure()
+        await provider.waitUntilWrite(kind: .contrast, value: 0.8)
+
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .contrast), 0.8)
+    }
+
+    func testAudioFailureDuringNewerIntentKeepsDesiredMute() async {
+        let snapshot = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, muteRawCurrent: 0)
+        let provider = RecordingDisplayControlProvider(snapshot: snapshot)
+        await provider.blockNextWrite(of: .mute)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(snapshot)
+
+        service.setVolume(displayID: 42, normalizedValue: 0.5)
+        await provider.waitUntilKindWriteIsBlocked()
+        // Newer mute intent submitted mid-flight (seeded state: unmuted).
+        service.setMuted(displayID: 42, muted: true)
+
+        await provider.releaseKindBlockedWrite(fail: true)
+        await provider.waitUntilWrite(kind: .mute, value: 1)
+        for _ in 0..<20 { await Task.yield() }
+
+        // A stale rollback would restore the seeded 0; the newer intent owns
+        // the desired state.
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .mute), 1)
+    }
+
+    func testPresetFailureDuringNewerIntentAppliesNewerPreset() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstPresetWrite()
+        await provider.failPresetWrite(rawValue: 0x0B)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.presetSnapshot)
+
+        service.setColorPreset(displayID: 42, rawValue: 0x0B)
+        await provider.waitUntilFirstPresetWriteIsBlocked()
+        service.setColorPreset(displayID: 42, rawValue: 0x0C)
+
+        await provider.releaseFirstPresetWrite()
+        await provider.waitUntilPresetWriteCount(2)
+
+        XCTAssertEqual(service.presentedColorPreset(displayID: 42), 0x0C)
+        XCTAssertNil(service.colorPresetError(displayID: 42))
+    }
+
+    // MARK: - Replug / removal state isolation
+
+    func testRemovalDropsControlState() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+
+        service.writeControl(displayID: 42, kind: .contrast, normalizedValue: 0.7)
+        await provider.waitUntilWrite(kind: .contrast, value: 0.7)
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .contrast) ?? 0, 0.7, accuracy: 0.0001)
+
+        service.setSnapshotForTesting(DisplayControlSnapshot(timestamp: Date(), displays: []))
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNil(service.presentedValue(displayID: 42, kind: .contrast))
+    }
+
+    func testTokenChangeCancelsInFlightWorkerAndClearsState() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 1))
+
+        service.writeBrightness(displayID: 42, normalizedValue: 0.5, smooth: false)
+        await provider.waitUntilFirstWriteIsBlocked()
+
+        // Replug under the same ID fences the in-flight worker.
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 2))
+        await provider.releaseFirstWrite()
+        for _ in 0..<20 { await Task.yield() }
+
+        let brightnessWrites = await provider.recordedWrites().filter { $0.0 == .brightness }
+        XCTAssertEqual(brightnessWrites.count, 1)
+
+        service.writeBrightness(displayID: 42, normalizedValue: 0.8, smooth: false)
+        await provider.waitUntilWrite(kind: .brightness, value: 0.8)
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .brightness), 0.8)
+    }
+}
+
+extension DisplayControlServiceTests {
+    /// A newer same-target force request must not be completed away by the
+    /// older non-force write: the force write still reaches the transport.
+    func testSameTargetForceRequestIsNotSwallowedByOlderWrite() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+
+        service.writeBrightness(displayID: 42, normalizedValue: 0.5, smooth: false)
+        await provider.waitUntilFirstWriteIsBlocked()
+        // Same target, newer sequence, force (scheduled) policy.
+        service.writeBrightness(displayID: 42, normalizedValue: 0.5, smooth: false, policy: .scheduled)
+
+        await provider.releaseFirstWrite()
+        for _ in 0..<100 {
+            let writes = await provider.recordedWrites().filter { $0.0 == .brightness }
+            if writes.count >= 2 { break }
+            await Task.yield()
+        }
+
+        let writes = await provider.recordedWrites().filter { $0.0 == .brightness }
+        XCTAssertEqual(writes.count, 2)
+        XCTAssertFalse(writes[0].2.contains(.force))
+        XCTAssertTrue(writes[1].2.contains(.force))
+    }
+
+    /// During a snapshot publish (@Published willSet), quantization must use
+    /// the already-seeded NEW raw range, not the previous screen's range.
+    func testQuantizationUsesSeededRangeDuringPublish() async {
+        let oldRange = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, brightnessRawMaximum: 10)
+        let newRange = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, brightnessRawMaximum: 100)
+        let provider = RecordingDisplayControlProvider(snapshot: newRange)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(oldRange)
+
+        let cancellable = service.$snapshot.sink { snapshot in
+            guard snapshot.displays.first?.controls.first(where: { $0.kind == .brightness })?.value?.rawMaximum == 100 else {
+                return
+            }
+            // Runs during willSet: service.snapshot still reports the old
+            // 0...10 range, but the seeded view already carries 0...100.
+            service.writeBrightness(displayID: 42, normalizedValue: 0.53, smooth: false)
+        }
+        defer { cancellable.cancel() }
+
+        service.refresh()
+        await provider.waitUntilWrite(kind: .brightness, value: 0.53)
+    }
+}
+
+extension DisplayControlServiceTests {
+    /// A replug whose new snapshot reports the brightness capability without
+    /// a value (write-only) must drop the previous connection's seeded raw
+    /// range: quantization falls back to the default step instead of the old
+    /// screen's step.
+    func testReplugWithoutValueDropsSeededRange() async {
+        let oldRange = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 1, brightnessRawMaximum: 10)
+        let replug = Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available, connectionToken: 2, brightnessRawMaximum: 100, brightnessHasValue: false)
+        let provider = RecordingDisplayControlProvider(snapshot: replug)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(oldRange)
+
+        service.setSnapshotForTesting(replug)
+
+        // With the stale seeded range (0...10, step 0.1) this quantizes to
+        // 0.5; the default step 0.01 keeps 0.53.
+        service.writeBrightness(displayID: 42, normalizedValue: 0.53, smooth: false)
+        await provider.waitUntilWrite(kind: .brightness, value: 0.53)
     }
 }

@@ -232,3 +232,57 @@ extension DisplayControlCapabilityClassificationTests {
         XCTAssertNoThrow(try ToolBoxCommandRouter.validate(display: available, supports: .preset("sRGB")))
     }
 }
+
+extension DisplayControlCapabilityClassificationTests {
+    @MainActor
+    func testValidateRejectsOutOfRangeControlValues() {
+        let display = makeValidationDisplay(controls: [
+            DisplayControlCapability(
+                kind: .brightness,
+                status: .available,
+                value: DisplayControlValue(
+                    kind: .brightness,
+                    timestamp: Date(),
+                    rawCurrent: 50,
+                    rawMinimum: 0,
+                    rawMaximum: 100,
+                    normalized: 0.5
+                ),
+                unavailableReason: nil
+            ),
+        ])
+
+        for invalid in [-1, 101, 255] {
+            XCTAssertThrowsError(
+                try ToolBoxCommandRouter.validate(display: display, supports: .brightness(invalid))
+            ) { error in
+                XCTAssertEqual((error as? ToolBoxDisplayTargetError)?.code, .invalidRequest)
+            }
+        }
+        XCTAssertNoThrow(try ToolBoxCommandRouter.validate(display: display, supports: .brightness(0)))
+        XCTAssertNoThrow(try ToolBoxCommandRouter.validate(display: display, supports: .brightness(100)))
+    }
+}
+
+extension DisplayControlCapabilityClassificationTests {
+    @MainActor
+    func testValidateRejectsUnadvertisedPresetValues() throws {
+        let display = makeValidationDisplay(
+            colorPreset: DisplayColorPresetCapability(
+                status: .available,
+                currentRawValue: 0x0B,
+                options: [DisplayColorPresetOption(rawValue: 0x0B, name: "sRGB")],
+                advertisedRawValues: [0x0B, 0x41],
+                unavailableReason: nil
+            )
+        )
+
+        XCTAssertThrowsError(
+            try ToolBoxCommandRouter.validate(display: display, supports: .preset("0xFF"))
+        ) { error in
+            XCTAssertEqual((error as? ToolBoxDisplayTargetError)?.code, .invalidRequest)
+        }
+        XCTAssertNoThrow(try ToolBoxCommandRouter.validate(display: display, supports: .preset("0x41")))
+        XCTAssertNoThrow(try ToolBoxCommandRouter.validate(display: display, supports: .preset("sRGB")))
+    }
+}

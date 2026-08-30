@@ -80,6 +80,7 @@ toolbox status
 toolbox display list
 toolbox display get --display-id 1
 toolbox display set --display-id 1 --brightness 55
+toolbox display set --display-id 1 --brightness 55 --wait 10
 toolbox focus set --enabled true --opacity 55
 toolbox audio apps
 toolbox audio devices
@@ -95,6 +96,14 @@ toolbox launch-at-login on
 CLI 只开放 ToolBox 已有的控制能力，不接受任意 `defaults` key、shell 命令或提权操作。
 显示器和音频一次只修改一个参数，避免多项硬件操作部分成功。退出码为：`0` 成功、`64`
 参数错误、`69` 应用或控制协议不可用、`77` 权限不足、`1` 硬件或领域操作失败。
+
+`display set` 默认为异步提交：命令返回 `0` 仅代表写入已被服务接受（附带 `write-unverified`
+警告），硬件失败稍后才在应用内上报。加 `--wait <秒>`（1...60）后，CLI 会在预算内轮询回读：
+回读值与服务端按显示器原始量程量化后的期望一致时返回 `0`；超时、不可回读（write-only）
+或未收敛则以退出码 `1` 结束，细节写入 stderr（`--json` 时 stderr 为 JSON 对象）。
+`--json --wait` 成功时 stdout 仍保持单个合法 JSON 文档；预设写入自带服务端回读验证，
+无需也不支持 `--wait`。不可控目标（无 DDC 通道、控制项不可写、预设值未在广告列表内、
+数值越界）在提交前即被同步拒绝。
 
 `build.sh` 固定使用 Bundle ID `com.youtonghy.toolbox`。首次构建会按顺序选择钥匙串中的第一张
 `Developer ID Application`、`Apple Development` 或名为 `youtonghy` 的证书，并将其 SHA-1 identity 锁定在

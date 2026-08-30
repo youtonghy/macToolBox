@@ -302,18 +302,22 @@ final class BrightnessScheduleCoordinatorTests: XCTestCase {
 
     private func makeSnapshot(
         displayIDs: [CGDirectDisplayID],
-        timestamp: Date = Date()
+        timestamp: Date = Date(),
+        connectionToken: UInt64? = nil
     ) -> DisplayControlSnapshot {
         DisplayControlSnapshot(
             timestamp: timestamp,
-            displays: displayIDs.map { makeDisplay(id: $0, isBuiltIn: false, writable: true) }
+            displays: displayIDs.map {
+                makeDisplay(id: $0, isBuiltIn: false, writable: true, connectionToken: connectionToken)
+            }
         )
     }
 
     private func makeDisplay(
         id: CGDirectDisplayID,
         isBuiltIn: Bool,
-        writable: Bool
+        writable: Bool,
+        connectionToken: UInt64? = nil
     ) -> DisplayControlDisplay {
         DisplayControlDisplay(
             id: id,
@@ -340,7 +344,8 @@ final class BrightnessScheduleCoordinatorTests: XCTestCase {
                     ),
                     unavailableReason: writable ? nil : "unsupported"
                 )
-            ]
+            ],
+            connectionToken: connectionToken
         )
     }
 }
@@ -570,5 +575,247 @@ extension BrightnessScheduleCoordinatorTests {
             try await Task.sleep(nanoseconds: 5_000_000)
         }
         XCTFail("Timed out waiting for override count == \(expected); state: \(coordinator.runtimeState)")
+    }
+}
+
+extension BrightnessScheduleCoordinatorTests {
+    /// The post-failure refresh must not rewrite a display before its retry
+    /// backoff elapses; the retry clock rewrites it at the due time.
+    func testScheduledWriteFailureDefersRefreshDrivenRewriteUntilDue() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30)
+        await harness.provider.failWrites(kind: .brightness)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 1)
+        try await waitForRetryScheduled(harness.retryClock)
+
+        // Let the post-failure refresh land; it must NOT rewrite early.
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let earlyCount = await harness.provider.recordedWrites().filter { $0.0 == .brightness }.count
+        XCTAssertEqual(earlyCount, 1)
+
+        let fireDate = try XCTUnwrap(harness.retryClock.scheduledDate)
+        harness.clock.advance(to: fireDate)
+        harness.retryClock.advance(to: fireDate)
+        harness.retryClock.fireIfDue()
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 2)
+    }
+
+    /// A replug under the same CGDirectDisplayID (new connectionToken) must
+    /// drop the manual override and apply the scheduled value.
+    func testSameIDReplugDropsManualOverride() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+        try await waitForWrite(provider: harness.provider, value: 0.6)
+
+        harness.service.writeBrightness(displayID: 21, normalizedValue: 0.4, smooth: false)
+        try await waitForWrite(provider: harness.provider, value: 0.4)
+        try await waitForOverrideCount(harness.coordinator, atLeast: 1)
+
+        // Same ID, different connection: replug.
+        harness.service.setSnapshotForTesting(makeSnapshot(displayIDs: [21], connectionToken: 99))
+
+        try await waitForOverrideCount(harness.coordinator, exactly: 0)
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 2)
+    }
+
+    /// Recovery from a refresh error into a genuinely empty topology clears
+    /// overrides instead of keeping the stale state forever.
+    func testRefreshErrorRecoveryToEmptyClearsOverrides() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+        try await waitForWrite(provider: harness.provider, value: 0.6)
+
+        harness.service.writeBrightness(displayID: 21, normalizedValue: 0.4, smooth: false)
+        try await waitForWrite(provider: harness.provider, value: 0.4)
+        try await waitForOverrideCount(harness.coordinator, atLeast: 1)
+
+        // Transient failure keeps the override ...
+        await harness.provider.blockNextSnapshot()
+        harness.service.refresh()
+        await harness.provider.waitUntilSnapshotIsBlocked()
+        await harness.provider.releaseBlockedSnapshotWithFailure()
+        for _ in 0..<20 { await Task.yield() }
+        XCTAssertNotNil(harness.service.lastRefreshError)
+
+        // ... and a successful refresh to an empty topology clears it.
+        await harness.provider.updateSnapshot(DisplayControlSnapshot(timestamp: Date(), displays: []))
+        harness.service.refresh()
+        for _ in 0..<100 {
+            if case .waitingForDisplays = harness.coordinator.runtimeState { break }
+            await Task.yield()
+        }
+        guard case .waitingForDisplays = harness.coordinator.runtimeState else {
+            XCTFail("Expected waitingForDisplays after empty recovery; state: \(harness.coordinator.runtimeState)")
+            return
+        }
+    }
+
+    /// Within the same segment, a clock/zone change only reschedules; it
+    /// must not force-rewrite every display.
+    func testClockChangeWithinSameSegmentReschedulesWithoutRewrite() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30, observesSystemEvents: true)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+        try await waitForWrite(provider: harness.provider, value: 0.6)
+
+        var shifted = harness.calendar
+        shifted.timeZone = TimeZone(secondsFromGMT: 3600)!
+        harness.clock.calendar = shifted
+        NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let writes = await harness.provider.recordedWrites().filter { $0.0 == .brightness }
+        XCTAssertEqual(writes.count, 1)
+    }
+}
+
+extension BrightnessScheduleCoordinatorTests {
+    /// After the retry budget is exhausted (.distantFuture deferral), a
+    /// replug under the same ID must clear the retry state and be rewritten
+    /// immediately by the ordinary snapshot reconcile.
+    func testRetryExhaustionDoesNotDeferRepluggedDisplay() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30)
+        await harness.provider.failWrites(kind: .brightness)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 1)
+        var fired = 0
+        while fired < BrightnessScheduleCoordinator.retryDelays.count * 3 {
+            guard await waitForRetryScheduled(harness.retryClock, timeout: 0.3) else { break }
+            let fireDate = try XCTUnwrap(harness.retryClock.scheduledDate)
+            harness.clock.advance(to: fireDate)
+            harness.retryClock.advance(to: fireDate)
+            harness.retryClock.fireIfDue()
+            fired += 1
+            try await Task.sleep(nanoseconds: 30_000_000)
+        }
+        XCTAssertLessThanOrEqual(fired, BrightnessScheduleCoordinator.retryDelays.count)
+
+        // Replug: same ID, new connection token.
+        await harness.provider.updateSnapshot(makeSnapshot(displayIDs: [21], connectionToken: 99))
+        harness.service.setSnapshotForTesting(makeSnapshot(displayIDs: [21], connectionToken: 99))
+
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 2)
+    }
+
+    /// Disabling the schedule clears the retry timer and state.
+    func testDisableClearsRetryTimer() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30)
+        await harness.provider.failWrites(kind: .brightness)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 1)
+        try await waitForRetryScheduled(harness.retryClock, timeout: 1.0)
+        XCTAssertNotNil(harness.retryClock.scheduledDate)
+
+        try harness.coordinator.commit(
+            BrightnessScheduleConfiguration(isEnabled: false, schedule: .default)
+        )
+        XCTAssertNil(harness.retryClock.scheduledDate)
+        XCTAssertEqual(harness.coordinator.runtimeState, .disabled)
+    }
+
+    /// Sleep clears the retry timer so no DDC write happens while suspended.
+    func testSleepClearsRetryTimer() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30, observesSystemEvents: true)
+        await harness.provider.failWrites(kind: .brightness)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 1)
+        try await waitForRetryScheduled(harness.retryClock, timeout: 1.0)
+
+        NSWorkspace.shared.notificationCenter.post(
+            name: NSWorkspace.screensDidSleepNotification, object: nil
+        )
+        XCTAssertNil(harness.retryClock.scheduledDate)
+    }
+
+    /// A DST transition inside the same segment reschedules the timer without
+    /// rewriting every display.
+    func testDSTWithinSegmentDoesNotForceRewrite() async throws {
+        let provider = RecordingDisplayControlProvider(
+            snapshot: makeSnapshot(displayIDs: [21], connectionToken: 5)
+        )
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(makeSnapshot(displayIDs: [21], connectionToken: 5))
+
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "Europe/Berlin")!
+        // 2024-03-30 23:00 Berlin (CET): segment 22:00...07:00, next boundary
+        // 07:00; the DST jump (02:00 -> 03:00 on 03-31) fires first.
+        let now = calendar.date(from: DateComponents(year: 2024, month: 3, day: 30, hour: 23, minute: 0))!
+        let clock = TestBrightnessScheduleClock(now: now, calendar: calendar)
+        let retryClock = TestBrightnessScheduleClock(now: now, calendar: calendar)
+
+        let store = BrightnessScheduleStore(defaults: defaults, key: storeKey)
+        try store.save(BrightnessScheduleConfiguration(isEnabled: true, schedule: .default))
+        let coordinator = BrightnessScheduleCoordinator(
+            service: service,
+            store: store,
+            clock: clock,
+            retryClock: retryClock,
+            observesSystemEvents: false
+        )
+        coordinator.start()
+        defer { coordinator.stop() }
+
+        try await waitForWrite(provider: provider, value: 0.35)
+
+        guard let fireDate = clock.scheduledDate else {
+            XCTFail("Expected a timer at the DST transition")
+            return
+        }
+        clock.advance(to: fireDate)
+        clock.fireIfDue()
+
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let writes = await provider.recordedWrites().filter { $0.0 == .brightness }
+        XCTAssertEqual(writes.count, 1)
+        guard case let .active(percent, count, _, overrideCount) = coordinator.runtimeState else {
+            XCTFail("Expected active runtime state after DST fire; state: \(coordinator.runtimeState)")
+            return
+        }
+        XCTAssertEqual(percent, 35)
+        XCTAssertEqual(count, 1)
+        XCTAssertEqual(overrideCount, 0)
+    }
+}
+
+extension BrightnessScheduleCoordinatorTests {
+    /// A paired duplicate wake arriving after the cycle already settled must
+    /// not re-enter the suspended window: the segment-boundary timer keeps
+    /// working (a spurious second cycle would block it).
+    func testDuplicateWakeAfterSettleDoesNotRestartCycle() async throws {
+        let harness = try makeEnabledHarness(displayIDs: [21], hour: 12, minute: 30, observesSystemEvents: true)
+        harness.coordinator.start()
+        defer { harness.coordinator.stop() }
+        try await waitForWrite(provider: harness.provider, value: 0.6)
+
+        let workspace = NSWorkspace.shared.notificationCenter
+        workspace.post(name: NSWorkspace.screensDidSleepNotification, object: nil)
+        harness.service.setSnapshotForTesting(DisplayControlSnapshot(timestamp: Date(), displays: []))
+        workspace.post(name: NSWorkspace.screensDidWakeNotification, object: nil)
+        harness.service.setSnapshotForTesting(makeSnapshot(displayIDs: [21]))
+        try await waitForWriteCount(harness.provider, kind: .brightness, count: 2)
+
+        // Paired duplicate wake after the settle: must be ignored.
+        workspace.post(name: NSWorkspace.didWakeNotification, object: nil)
+        try await Task.sleep(nanoseconds: 200_000_000)
+
+        // The segment boundary (18:00, 70%) must still fire: a spurious new
+        // wake cycle would have suspended reconciliation and blocked it.
+        let boundary = harness.calendar.date(
+            from: DateComponents(year: 2024, month: 6, day: 1, hour: 18, minute: 0)
+        )!
+        harness.clock.advance(to: boundary)
+        harness.clock.fireIfDue()
+        try await waitForWrite(provider: harness.provider, value: 0.7)
     }
 }

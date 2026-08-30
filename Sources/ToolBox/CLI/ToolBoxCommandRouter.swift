@@ -150,17 +150,41 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
         } else if let serial = target.serial {
             matches = controllableDisplays.filter { $0.serialNumber.map(String.init) == serial }
         } else {
-            matches = controllableDisplays
+            // Auto-selection: only DDC-capable displays are candidates so
+            // "one controllable screen + one DDC-less screen" resolves
+            // instead of reporting an ambiguous target.
+            let capable = controllableDisplays.filter(\.supportsHardwareDDC)
+            matches = capable.isEmpty ? controllableDisplays : capable
         }
         guard !matches.isEmpty else { throw ToolBoxDisplayTargetError.notFound }
         guard matches.count == 1 else { throw ToolBoxDisplayTargetError.ambiguous }
         return matches[0]
     }
 
+    /// Parses a numeric or 0x-hexadecimal preset literal. Returns nil for
+    /// preset names (resolved against the display's advertised options
+    /// elsewhere) and for unparseable input.
+    static func parsePresetValue(_ value: String) -> UInt8? {
+        if let rawValue = UInt8(value) { return rawValue }
+        if value.lowercased().hasPrefix("0x") { return UInt8(value.dropFirst(2), radix: 16) }
+        return nil
+    }
+
     /// Validates that the resolved display can actually accept the requested
     /// change before reporting acceptance. Uncontrollable targets fail here
     /// with a typed error instead of returning success for a doomed write.
     static func validate(display: DisplayControlDisplay, supports change: ToolBoxDisplayChangeDTO) throws {
+        // Reject out-of-range values here instead of letting them clamp
+        // silently (or fail asynchronously) deep in the write path.
+        switch change {
+        case let .brightness(value), let .contrast(value), let .volume(value):
+            guard (0...100).contains(value) else {
+                throw ToolBoxDisplayTargetError.valueOutOfRange("\(value) 不在 0...100 范围内")
+            }
+        case .mute, .preset:
+            break
+        }
+
         switch change {
         case .brightness, .contrast, .volume, .mute:
             let kind: DisplayControlKind
@@ -186,11 +210,19 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
                     control.unavailableReason ?? "该显示器不支持\(kind.title)控制"
                 )
             }
-        case .preset:
+        case let .preset(literal):
             guard let preset = display.colorPreset, preset.status == .available else {
                 throw ToolBoxDisplayTargetError.controlNotWritable(
                     display.colorPreset?.unavailableReason ?? "该显示器不支持颜色预设控制"
                 )
+            }
+            // Numeric/hex preset values must be advertised by the display;
+            // otherwise the write would fail asynchronously after the CLI
+            // has already reported success. Name lookups inherently resolve
+            // to advertised values.
+            if let rawValue = Self.parsePresetValue(literal),
+               !preset.advertisedRawValues.contains(rawValue) {
+                throw ToolBoxDisplayTargetError.presetNotAdvertised(String(format: "0x%02X", rawValue))
             }
         }
     }
@@ -218,7 +250,9 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
             serial: display.serialNumber.map(String.init),
             name: display.name,
             isBuiltIn: display.isBuiltIn,
-            controls: controls
+            controls: controls,
+            supportsHardwareDDC: display.supportsHardwareDDC,
+            unavailableReason: display.unavailableReason
         )
     }
 
@@ -245,8 +279,7 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
     }
 
     private func parsePreset(_ value: String, display: DisplayControlDisplay) -> UInt8? {
-        if let rawValue = UInt8(value) { return rawValue }
-        if value.lowercased().hasPrefix("0x") { return UInt8(value.dropFirst(2), radix: 16) }
+        if let rawValue = Self.parsePresetValue(value) { return rawValue }
         return display.colorPreset?.options.first { $0.name.caseInsensitiveCompare(value) == .orderedSame }?.rawValue
     }
 
@@ -342,6 +375,8 @@ enum ToolBoxDisplayTargetError: LocalizedError {
     case deviceNotFound
     case displayNotControllable(String)
     case controlNotWritable(String)
+    case valueOutOfRange(String)
+    case presetNotAdvertised(String)
 
     var code: ToolBoxControlErrorCode {
         switch self {
@@ -350,6 +385,8 @@ enum ToolBoxDisplayTargetError: LocalizedError {
         case .invalidPreset, .invalidBundleID, .invalidVolume: return .invalidRequest
         case .displayNotControllable: return .unavailable
         case .controlNotWritable: return .unsupported
+        case .valueOutOfRange: return .invalidRequest
+        case .presetNotAdvertised: return .invalidRequest
         }
     }
 
@@ -363,6 +400,8 @@ enum ToolBoxDisplayTargetError: LocalizedError {
         case .deviceNotFound: return "找不到指定的音频输出设备。"
         case let .displayNotControllable(reason): return "该显示器不可控：\(reason)。"
         case let .controlNotWritable(reason): return "该控制项不可写：\(reason)。"
+        case let .valueOutOfRange(reason): return "控制值越界：\(reason)。"
+        case let .presetNotAdvertised(rawValue): return "预设值 \(rawValue) 不在该显示器支持的预设列表内。"
         }
     }
 }

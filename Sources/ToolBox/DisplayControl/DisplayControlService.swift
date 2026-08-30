@@ -92,6 +92,9 @@ private struct BrightnessWriteRequest: Equatable {
     var smooth: Bool
     var force: Bool
     var policy: DisplayBrightnessWritePolicy
+    /// Monotonic per-display sequence; a failure only rolls back state when
+    /// the failed request is still the newest intent.
+    var sequence: UInt64
 }
 
 /// One serial user intent for a display's audio controls. Volume and mute
@@ -100,6 +103,17 @@ private struct BrightnessWriteRequest: Equatable {
 private struct AudioWriteRequest: Equatable {
     var volume: Double?
     var muted: Bool?
+    var sequence: UInt64
+}
+
+private struct PendingControlRequest: Equatable {
+    var target: Double
+    var sequence: UInt64
+}
+
+private struct PendingPresetRequest: Equatable {
+    var rawValue: UInt8
+    var sequence: UInt64
 }
 
 @MainActor
@@ -129,10 +143,16 @@ final class DisplayControlService: ObservableObject {
     private var desiredValues: [ControlWriteKey: Double] = [:]
     private var lastSuccessfulValues: [ControlWriteKey: Double] = [:]
     private var userTargetKeys = Set<ControlWriteKey>()
+    /// Capabilities from the most recently seeded snapshot. Because
+    /// @Published emits on willSet, `snapshot` still reflects the previous
+    /// topology while consumers react to a new emission — quantization must
+    /// use the already-seeded (new) raw ranges.
+    private var seededControlValues: [ControlWriteKey: DisplayControlValue] = [:]
 
     private var latestBrightnessRequests: [CGDirectDisplayID: BrightnessWriteRequest] = [:]
     private var brightnessWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
     private var brightnessWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+    private var brightnessRequestSequences: [CGDirectDisplayID: UInt64] = [:]
     private let manualBrightnessWriteSubject = PassthroughSubject<
         (displayID: CGDirectDisplayID, normalizedValue: Double),
         Never
@@ -142,17 +162,20 @@ final class DisplayControlService: ObservableObject {
         Never
     >()
 
-    private var pendingControlTargets: [ControlWriteKey: Double] = [:]
+    private var pendingControlTargets: [ControlWriteKey: PendingControlRequest] = [:]
     private var controlWorkers: [ControlWriteKey: Task<Void, Never>] = [:]
     private var controlWorkerIDs: [ControlWriteKey: UUID] = [:]
+    private var controlRequestSequences: [ControlWriteKey: UInt64] = [:]
 
     private var pendingAudioRequests: [CGDirectDisplayID: AudioWriteRequest] = [:]
     private var audioWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
     private var audioWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+    private var audioRequestSequences: [CGDirectDisplayID: UInt64] = [:]
 
-    private var pendingPresetTargets: [CGDirectDisplayID: UInt8] = [:]
+    private var pendingPresetTargets: [CGDirectDisplayID: PendingPresetRequest] = [:]
     private var presetWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
     private var presetWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+    private var presetRequestSequences: [CGDirectDisplayID: UInt64] = [:]
     private var desiredPresetValues: [CGDirectDisplayID: UInt8] = [:]
     private var lastVerifiedPresetValues: [CGDirectDisplayID: UInt8] = [:]
 
@@ -162,6 +185,9 @@ final class DisplayControlService: ObservableObject {
     private var sessionID: UInt64 = 0
     private var isSuspended = false
     private var isWakeSettling = false
+    /// Last observed connection token per display; a changed token under the
+    /// same CGDirectDisplayID means the display was replugged.
+    private var lastSeedTokens: [CGDirectDisplayID: UInt64?] = [:]
 
     init(
         provider: DisplayControlProviding = DarwinDisplayControlProvider(),
@@ -190,8 +216,8 @@ final class DisplayControlService: ObservableObject {
 
     /// Test seam: publish a snapshot without going through the provider.
     func setSnapshotForTesting(_ snapshot: DisplayControlSnapshot) {
-        self.snapshot = snapshot
         seedValues(from: snapshot)
+        self.snapshot = snapshot
     }
 
     func stop() {
@@ -216,9 +242,13 @@ final class DisplayControlService: ObservableObject {
             do {
                 let next = try await provider.snapshot()
                 try Task.checkCancellation()
-                snapshot = next
                 lastRefreshError = nil
+                // Seed BEFORE publishing: @Published emits on willSet, and
+                // consumers (e.g. the schedule coordinator) may enqueue new
+                // writes during the event — seeding afterwards would wipe
+                // that fresh state on replug/removal.
                 seedValues(from: next)
+                snapshot = next
             } catch is CancellationError {
                 return
             } catch {
@@ -283,10 +313,12 @@ final class DisplayControlService: ObservableObject {
     }
 
     func normalizedStep(displayID: CGDirectDisplayID, kind: DisplayControlKind) -> Double {
-        let value = snapshot.displays
-            .first(where: { $0.id == displayID })?
-            .controls.first(where: { $0.kind == kind })?
-            .value
+        let key = ControlWriteKey(displayID: displayID, kind: kind)
+        let value = seededControlValues[key]
+            ?? snapshot.displays
+                .first(where: { $0.id == displayID })?
+                .controls.first(where: { $0.kind == kind })?
+                .value
         return Self.normalizedStep(for: value)
     }
 
@@ -317,11 +349,13 @@ final class DisplayControlService: ObservableObject {
         userTargetKeys.insert(key)
 
         let force = policy == .scheduled
+        brightnessRequestSequences[displayID] = (brightnessRequestSequences[displayID] ?? 0) + 1
         latestBrightnessRequests[displayID] = BrightnessWriteRequest(
             target: target,
             smooth: smooth,
             force: force,
-            policy: policy
+            policy: policy,
+            sequence: brightnessRequestSequences[displayID] ?? 0
         )
 
         if policy == .manual {
@@ -387,7 +421,11 @@ final class DisplayControlService: ObservableObject {
         guard !isSuspended else { return }
         desiredPresetValues[displayID] = rawValue
         colorPresetErrors[displayID] = nil
-        pendingPresetTargets[displayID] = rawValue
+        presetRequestSequences[displayID] = (presetRequestSequences[displayID] ?? 0) + 1
+        pendingPresetTargets[displayID] = PendingPresetRequest(
+            rawValue: rawValue,
+            sequence: presetRequestSequences[displayID] ?? 0
+        )
         guard presetWorkers[displayID] == nil else { return }
 
         let workerID = UUID()
@@ -444,7 +482,11 @@ final class DisplayControlService: ObservableObject {
         )
         desiredValues[key] = target
         userTargetKeys.insert(key)
-        pendingControlTargets[key] = target
+        controlRequestSequences[key] = (controlRequestSequences[key] ?? 0) + 1
+        pendingControlTargets[key] = PendingControlRequest(
+            target: target,
+            sequence: controlRequestSequences[key] ?? 0
+        )
         guard controlWorkers[key] == nil else { return }
 
         let workerID = UUID()
@@ -464,61 +506,80 @@ final class DisplayControlService: ObservableObject {
             kind: .brightness
         )
         var failedPolicy: DisplayBrightnessWritePolicy?
+        var activeSequence: UInt64?
 
-        do {
-            while brightnessWorkerIDs[displayID] == workerID,
-                  let request = latestBrightnessRequests[displayID] {
-                try Task.checkCancellation()
-                failedPolicy = request.policy
-                let target = request.target
-                let next: Double
-                if !request.smooth || transient == nil {
-                    next = target
-                } else if abs(target - transient!) < 0.01 {
-                    next = target
-                } else {
-                    let distance = target - transient!
-                    let step = distance > 0
-                        ? max(distance / 6, 0.01)
-                        : min(distance / 6, -0.01)
-                    next = Self.clamp(transient! + step)
+        while true {
+            do {
+                while brightnessWorkerIDs[displayID] == workerID,
+                      let request = latestBrightnessRequests[displayID] {
+                    try Task.checkCancellation()
+                    failedPolicy = request.policy
+                    activeSequence = request.sequence
+                    let target = request.target
+                    let next: Double
+                    if !request.smooth || transient == nil {
+                        next = target
+                    } else if abs(target - transient!) < 0.01 {
+                        next = target
+                    } else {
+                        let distance = target - transient!
+                        let step = distance > 0
+                            ? max(distance / 6, 0.01)
+                            : min(distance / 6, -0.01)
+                        next = Self.clamp(transient! + step)
+                    }
+
+                    let options: DisplayControlWriteOptions = request.force ? .force : .none
+                    let value = try await provider.writeValue(
+                        displayID: displayID,
+                        kind: .brightness,
+                        normalizedValue: next,
+                        options: options
+                    )
+                    try Task.checkCancellation()
+                    guard brightnessWorkerIDs[displayID] == workerID else { return }
+                    transient = value.normalized
+                    lastSuccessfulValues[key] = value.normalized
+
+                    if let latest = latestBrightnessRequests[displayID],
+                       latest.sequence == request.sequence,
+                       abs(latest.target - value.normalized) < 0.0001 {
+                        // Only complete when the successful write corresponds
+                        // to the newest request: a newer same-target request
+                        // (e.g. a scheduled force write) must still run.
+                        latestBrightnessRequests[displayID] = nil
+                        break
+                    }
+                    if timing.brightnessFrameDelayNanos > 0 {
+                        try await Task.sleep(nanoseconds: timing.brightnessFrameDelayNanos)
+                    } else {
+                        await Task.yield()
+                    }
                 }
-
-                let options: DisplayControlWriteOptions = request.force ? .force : .none
-                let value = try await provider.writeValue(
-                    displayID: displayID,
-                    kind: .brightness,
-                    normalizedValue: next,
-                    options: options
-                )
-                try Task.checkCancellation()
+                finishBrightnessWorker(displayID: displayID, workerID: workerID)
+                return
+            } catch is CancellationError {
+                finishBrightnessWorker(displayID: displayID, workerID: workerID)
+                return
+            } catch {
                 guard brightnessWorkerIDs[displayID] == workerID else { return }
-                transient = value.normalized
-                lastSuccessfulValues[key] = value.normalized
-
-                if let latest = latestBrightnessRequests[displayID],
-                   abs(latest.target - value.normalized) < 0.0001 {
-                    latestBrightnessRequests[displayID] = nil
-                    break
+                logger.error("Brightness write failed: \(error.localizedDescription, privacy: .public)")
+                // A newer intent was submitted while this write was in
+                // flight: the failure belongs to the superseded request, so
+                // keep the newer request and process it instead of rolling
+                // it back.
+                if let current = latestBrightnessRequests[displayID],
+                   current.sequence != activeSequence {
+                    continue
                 }
-                if timing.brightnessFrameDelayNanos > 0 {
-                    try await Task.sleep(nanoseconds: timing.brightnessFrameDelayNanos)
-                } else {
-                    await Task.yield()
+                if let failedPolicy {
+                    brightnessWriteFailureSubject.send((displayID, failedPolicy))
                 }
+                latestBrightnessRequests[displayID] = nil
+                restoreDesiredValue(for: key)
+                finishBrightnessWorker(displayID: displayID, workerID: workerID)
+                return
             }
-            finishBrightnessWorker(displayID: displayID, workerID: workerID)
-        } catch is CancellationError {
-            finishBrightnessWorker(displayID: displayID, workerID: workerID)
-        } catch {
-            guard brightnessWorkerIDs[displayID] == workerID else { return }
-            logger.error("Brightness write failed: \(error.localizedDescription, privacy: .public)")
-            if let failedPolicy {
-                brightnessWriteFailureSubject.send((displayID, failedPolicy))
-            }
-            latestBrightnessRequests[displayID] = nil
-            restoreDesiredValue(for: key)
-            finishBrightnessWorker(displayID: displayID, workerID: workerID)
         }
     }
 
@@ -530,28 +591,37 @@ final class DisplayControlService: ObservableObject {
     }
 
     private func runControlWorker(key: ControlWriteKey, workerID: UUID) async {
-        do {
-            while controlWorkerIDs[key] == workerID,
-                  let target = pendingControlTargets.removeValue(forKey: key) {
-                try Task.checkCancellation()
-                let value = try await provider.writeValue(
-                    displayID: key.displayID,
-                    kind: key.kind,
-                    normalizedValue: target
-                )
-                try Task.checkCancellation()
+        while true {
+            do {
+                while controlWorkerIDs[key] == workerID,
+                      let pending = pendingControlTargets.removeValue(forKey: key) {
+                    try Task.checkCancellation()
+                    let value = try await provider.writeValue(
+                        displayID: key.displayID,
+                        kind: key.kind,
+                        normalizedValue: pending.target
+                    )
+                    try Task.checkCancellation()
+                    guard controlWorkerIDs[key] == workerID else { return }
+                    lastSuccessfulValues[key] = value.normalized
+                }
+                finishControlWorker(key: key, workerID: workerID)
+                return
+            } catch is CancellationError {
+                finishControlWorker(key: key, workerID: workerID)
+                return
+            } catch {
                 guard controlWorkerIDs[key] == workerID else { return }
-                lastSuccessfulValues[key] = value.normalized
+                logger.error("Display control write failed: \(error.localizedDescription, privacy: .public)")
+                // A newer target was enqueued while this write was in
+                // flight: process it instead of rolling it back.
+                if pendingControlTargets[key] != nil {
+                    continue
+                }
+                restoreDesiredValue(for: key)
+                finishControlWorker(key: key, workerID: workerID)
+                return
             }
-            finishControlWorker(key: key, workerID: workerID)
-        } catch is CancellationError {
-            finishControlWorker(key: key, workerID: workerID)
-        } catch {
-            guard controlWorkerIDs[key] == workerID else { return }
-            logger.error("Display control write failed: \(error.localizedDescription, privacy: .public)")
-            pendingControlTargets[key] = nil
-            restoreDesiredValue(for: key)
-            finishControlWorker(key: key, workerID: workerID)
         }
     }
 
@@ -566,8 +636,11 @@ final class DisplayControlService: ObservableObject {
         displayID: CGDirectDisplayID,
         mutate: (inout AudioWriteRequest) -> Void
     ) {
-        var request = pendingAudioRequests[displayID] ?? AudioWriteRequest(volume: nil, muted: nil)
+        audioRequestSequences[displayID] = (audioRequestSequences[displayID] ?? 0) + 1
+        var request = pendingAudioRequests[displayID]
+            ?? AudioWriteRequest(volume: nil, muted: nil, sequence: audioRequestSequences[displayID] ?? 0)
         mutate(&request)
+        request.sequence = audioRequestSequences[displayID] ?? 0
         pendingAudioRequests[displayID] = request
         guard audioWorkers[displayID] == nil else { return }
 
@@ -642,7 +715,6 @@ final class DisplayControlService: ObservableObject {
             } catch {
                 break
             }
-
             let muteWritability = controlWritability(displayID: displayID, kind: .mute)
             let volumeWritability = controlWritability(displayID: displayID, kind: .volume)
             let muteTarget = request.muted.map { $0 ? 1.0 : 0.0 }
@@ -668,9 +740,13 @@ final class DisplayControlService: ObservableObject {
                 if !part.writable {
                     // The display supports one audio control but not the
                     // other: skip the unsupported part instead of blocking
-                    // (or rolling back) the supported one.
+                    // (or rolling back) the supported one. A newer intent
+                    // must not be rolled back by this superseded request —
+                    // re-check currency here, not before the awaits.
                     logger.debug("Skipping unwritable audio part \(part.key.kind.rawValue, privacy: .public) for display \(displayID, privacy: .public).")
-                    restoreDesiredValue(for: part.key)
+                    if audioRequestSequences[displayID] == request.sequence {
+                        restoreDesiredValue(for: part.key)
+                    }
                     continue
                 }
                 switch await writeAudioPart(
@@ -685,9 +761,19 @@ final class DisplayControlService: ObservableObject {
                     finishAudioWorker(displayID: displayID, workerID: workerID)
                     return
                 case let .failure(message):
-                    // Partial success stays: only the failed part rolls back.
+                    // A stale worker (replaced or stopped mid-write) must not
+                    // roll back the newer session's desired state.
+                    guard audioWorkerIDs[displayID] == workerID else {
+                        finishAudioWorker(displayID: displayID, workerID: workerID)
+                        return
+                    }
                     logger.error("Audio write failed for \(part.key.kind.rawValue, privacy: .public) on display \(displayID, privacy: .public): \(message, privacy: .public)")
-                    restoreDesiredValue(for: part.key)
+                    // Partial success stays; and if a newer intent was
+                    // submitted mid-flight (the await may have taken a while),
+                    // only it owns the desired state.
+                    if audioRequestSequences[displayID] == request.sequence {
+                        restoreDesiredValue(for: part.key)
+                    }
                 }
             }
         }
@@ -702,32 +788,42 @@ final class DisplayControlService: ObservableObject {
     }
 
     private func runPresetWorker(displayID: CGDirectDisplayID, workerID: UUID) async {
-        do {
-            while presetWorkerIDs[displayID] == workerID,
-                  let target = pendingPresetTargets.removeValue(forKey: displayID) {
-                try Task.checkCancellation()
-                let result = try await provider.writeColorPreset(
-                    displayID: displayID,
-                    rawValue: target
-                )
-                try Task.checkCancellation()
-                guard presetWorkerIDs[displayID] == workerID else { return }
-                lastVerifiedPresetValues[displayID] = result.verifiedRawValue
-                if pendingPresetTargets[displayID] == nil {
-                    desiredPresetValues[displayID] = result.verifiedRawValue
+        while true {
+            do {
+                while presetWorkerIDs[displayID] == workerID,
+                      let pending = pendingPresetTargets.removeValue(forKey: displayID) {
+                    try Task.checkCancellation()
+                    let result = try await provider.writeColorPreset(
+                        displayID: displayID,
+                        rawValue: pending.rawValue
+                    )
+                    try Task.checkCancellation()
+                    guard presetWorkerIDs[displayID] == workerID else { return }
+                    lastVerifiedPresetValues[displayID] = result.verifiedRawValue
+                    if pendingPresetTargets[displayID] == nil {
+                        desiredPresetValues[displayID] = result.verifiedRawValue
+                    }
+                    colorPresetErrors[displayID] = nil
                 }
-                colorPresetErrors[displayID] = nil
+                finishPresetWorker(displayID: displayID, workerID: workerID)
+                return
+            } catch is CancellationError {
+                finishPresetWorker(displayID: displayID, workerID: workerID)
+                return
+            } catch {
+                guard presetWorkerIDs[displayID] == workerID else { return }
+                logger.error("Color preset write failed: \(error.localizedDescription, privacy: .public)")
+                // A newer preset was enqueued mid-flight: process it instead
+                // of surfacing a stale error.
+                if pendingPresetTargets[displayID] != nil {
+                    continue
+                }
+                pendingPresetTargets[displayID] = nil
+                desiredPresetValues[displayID] = lastVerifiedPresetValues[displayID]
+                colorPresetErrors[displayID] = error.localizedDescription
+                finishPresetWorker(displayID: displayID, workerID: workerID)
+                return
             }
-            finishPresetWorker(displayID: displayID, workerID: workerID)
-        } catch is CancellationError {
-            finishPresetWorker(displayID: displayID, workerID: workerID)
-        } catch {
-            guard presetWorkerIDs[displayID] == workerID else { return }
-            logger.error("Color preset write failed: \(error.localizedDescription, privacy: .public)")
-            pendingPresetTargets[displayID] = nil
-            desiredPresetValues[displayID] = lastVerifiedPresetValues[displayID]
-            colorPresetErrors[displayID] = error.localizedDescription
-            finishPresetWorker(displayID: displayID, workerID: workerID)
         }
     }
 
@@ -769,8 +865,74 @@ final class DisplayControlService: ObservableObject {
         }
     }
 
+    /// Fences every in-flight worker and drops all per-display state.
+    /// Used when a display is removed or replugged under the same
+    /// CGDirectDisplayID, so nothing from the old physical connection leaks
+    /// into the new one (a single already-started bus write may still
+    /// complete at the transport level; its results are discarded).
+    private func dropDisplayState(displayID: CGDirectDisplayID) {
+        brightnessWorkers.removeValue(forKey: displayID)?.cancel()
+        brightnessWorkerIDs[displayID] = nil
+        latestBrightnessRequests[displayID] = nil
+        brightnessRequestSequences[displayID] = nil
+
+        for key in controlWorkers.keys where key.displayID == displayID {
+            controlWorkers.removeValue(forKey: key)?.cancel()
+            controlWorkerIDs[key] = nil
+            pendingControlTargets[key] = nil
+            controlRequestSequences[key] = nil
+        }
+
+        audioWorkers.removeValue(forKey: displayID)?.cancel()
+        audioWorkerIDs[displayID] = nil
+        pendingAudioRequests[displayID] = nil
+        audioRequestSequences[displayID] = nil
+
+        removePresetState(displayID: displayID)
+        presetRequestSequences[displayID] = nil
+
+        for kind in DisplayControlKind.allCases {
+            let key = ControlWriteKey(displayID: displayID, kind: kind)
+            desiredValues.removeValue(forKey: key)
+            lastSuccessfulValues.removeValue(forKey: key)
+            userTargetKeys.remove(key)
+            seededControlValues.removeValue(forKey: key)
+        }
+        lastSeedTokens.removeValue(forKey: displayID)
+        scheduleRefreshWhenIdle()
+    }
+
     private func seedValues(from snapshot: DisplayControlSnapshot) {
         let displayedIDs = Set(snapshot.displays.map(\.id))
+
+        // Drop per-display state for removed/replugged displays BEFORE
+        // rebuilding the seeded-capability view.
+        for key in seededControlValues.keys where !displayedIDs.contains(key.displayID) {
+            seededControlValues.removeValue(forKey: key)
+        }
+
+        // Removal: displays that previously held state but are absent now.
+        let trackedIDs = Set(lastSeedTokens.keys)
+            .union(desiredValues.keys.map(\.displayID))
+            .union(lastSuccessfulValues.keys.map(\.displayID))
+            .union(userTargetKeys.map(\.displayID))
+            .union(brightnessWorkers.keys)
+            .union(audioWorkers.keys)
+            .union(presetWorkers.keys)
+            .union(controlWorkers.keys.map(\.displayID))
+        for displayID in trackedIDs.subtracting(displayedIDs) {
+            dropDisplayState(displayID: displayID)
+        }
+
+        // Replug under the same ID: fence workers and clear stale targets.
+        for display in snapshot.displays {
+            let token = display.connectionToken
+            if let previous = lastSeedTokens[display.id], previous != token {
+                dropDisplayState(displayID: display.id)
+            }
+            lastSeedTokens[display.id] = token
+        }
+
         let knownPresetIDs = Set(presetWorkers.keys)
             .union(pendingPresetTargets.keys)
             .union(desiredPresetValues.keys)
@@ -791,9 +953,17 @@ final class DisplayControlService: ObservableObject {
             }
         )
 
+        // Rebuild the seeded-capability view wholesale from this snapshot:
+        // capabilities without a value (e.g. write-only after a replug) must
+        // not leave the previous connection's raw range behind.
+        seededControlValues.removeAll()
+
         for display in snapshot.displays {
             for capability in display.controls {
                 let key = ControlWriteKey(displayID: display.id, kind: capability.kind)
+                if let value = capability.value {
+                    seededControlValues[key] = value
+                }
                 guard !activeKeys.contains(key), let value = capability.value else { continue }
                 if userTargetKeys.contains(key) {
                     let step = Self.normalizedStep(for: value)
@@ -1056,15 +1226,19 @@ final class DisplayControlService: ObservableObject {
         brightnessWorkers.removeAll()
         brightnessWorkerIDs.removeAll()
         latestBrightnessRequests.removeAll()
+        brightnessRequestSequences.removeAll()
         controlWorkers.removeAll()
         controlWorkerIDs.removeAll()
         pendingControlTargets.removeAll()
+        controlRequestSequences.removeAll()
         audioWorkers.removeAll()
         audioWorkerIDs.removeAll()
         pendingAudioRequests.removeAll()
+        audioRequestSequences.removeAll()
         presetWorkers.removeAll()
         presetWorkerIDs.removeAll()
         pendingPresetTargets.removeAll()
+        presetRequestSequences.removeAll()
         desiredPresetValues.removeAll()
         lastVerifiedPresetValues.removeAll()
         colorPresetErrors.removeAll()
@@ -1073,6 +1247,8 @@ final class DisplayControlService: ObservableObject {
         desiredValues.removeAll()
         lastSuccessfulValues.removeAll()
         userTargetKeys.removeAll()
+        seededControlValues.removeAll()
+        lastSeedTokens.removeAll()
     }
 
     private static func normalizedStep(for value: DisplayControlValue?) -> Double {
