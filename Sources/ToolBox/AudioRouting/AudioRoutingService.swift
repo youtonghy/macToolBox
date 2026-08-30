@@ -769,8 +769,33 @@ final class AudioRoutingService: ObservableObject {
                 : nil
         })
         guard !outputAppearedBundleIDs.isEmpty else { return }
-        let routedBundleIDs = Set(appliedPlans.flatMap { $0.sources.map(\.bundleID) })
-        guard outputAppearedBundleIDs.contains(where: { !routedBundleIDs.contains($0) }) else { return }
+        // Only compensate when the process identity set is unchanged: any identity
+        // change already triggers the main CombineLatest reconcile path, and a
+        // second racing reconcile would overwrite its outcome (e.g. clear a
+        // rolled-back route's failed state). The sibling case this compensates
+        // for — a same-bundle process flipping `isRunningOutput` while the
+        // identity set is stable — never reaches the main path.
+        guard Self.haveSameRoutingProcesses(previousProcesses, currentProcesses) else { return }
+        // Compare process identities, not bundles: a second process of an
+        // already-routed bundle (helper, iOS shell) that starts playing later
+        // would otherwise never join the route — the bundle set looks unchanged
+        // and the main reconcile path dedupes activity-only updates.
+        let affectedCompilation = RoutePlanCompiler.compile(
+            rules: rules.filter { outputAppearedBundleIDs.contains($0.bundleID) },
+            processes: currentProcesses,
+            devices: deviceRegistry.snapshot,
+            defaultOutputUID: deviceRegistry.defaultOutputUID,
+            deviceConfigurationGeneration: deviceConfigurationGeneration
+        )
+        let routedProcessObjectIDs = Set(
+            appliedPlans.flatMap { plan in plan.sources.map(\.processObjectID) }
+        )
+        let hasUnroutedProducingSource = affectedCompilation.plans.contains { plan in
+            plan.sources.contains { source in
+                !routedProcessObjectIDs.contains(source.processObjectID)
+            }
+        }
+        guard hasUnroutedProducingSource else { return }
         Task { @MainActor [weak self] in
             guard let self, self.isCurrentSession(session) else { return }
             await self.reconcile(

@@ -124,7 +124,7 @@ final class AudioRouteRuntimeTests: XCTestCase {
         ]
 
         XCTAssertThrowsError(try runtime.converge(to: AudioRouteTestFixtures.intent()))
-        XCTAssertFalse(runtime.performMaintenance())
+        XCTAssertEqual(runtime.performMaintenance(), .recovered)
         XCTAssertEqual(
             try runtime.converge(to: AudioRouteTestFixtures.intent()),
             .applied

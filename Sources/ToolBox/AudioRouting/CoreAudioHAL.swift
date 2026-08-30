@@ -586,6 +586,10 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
     private var lastObservedAudioServerGeneration: UInt64 = 0
     private var activeRoutes: [String: RouteResources] = [:]
     private var pendingCleanupRoutes: [String: RouteResources] = [:]
+    /// Keeps the init-registered audio-server restart listener alive for the
+    /// HAL's lifetime so the generation fence works without any external
+    /// `changes(for:)` subscriber.
+    private var serviceRestartReceipt: HALListenerReceipt?
 
     init(
         propertyAccess: any CoreAudioPropertyAccess = SystemCoreAudioPropertyAccess(),
@@ -593,6 +597,19 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
     ) {
         self.propertyAccess = propertyAccess
         self.resourceAccess = resourceAccess
+        self.serviceRestartReceipt = nil
+        // The generation fence in `execute`/`updateParameters` must detect a
+        // coreaudiod restart in the observe→execute window on its own. Register
+        // the restart listener for the HAL's lifetime; if registration fails the
+        // fence merely degrades to a never-advancing generation (the previous
+        // behavior) instead of failing construction.
+        let registration = listenerRegistration(for: .audioServerGeneration)
+        serviceRestartReceipt = try? propertyAccess.addListener(
+            objectID: registration.objectID,
+            address: registration.address
+        ) { [weak self] in
+            self?.advanceAudioServerGeneration()
+        }
     }
 
     func observe(_ request: HALObservationRequest) throws -> HALObservationSnapshot {
@@ -936,9 +953,10 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                     let receipt = try propertyAccess.addListener(
                         objectID: registration.objectID,
                         address: registration.address
-                    ) { [weak self] in
+                    ) {
                         if registration.isAudioServerRestart {
-                            self?.advanceAudioServerGeneration()
+                            // Generation advancement is owned by the init-registered
+                            // restart listener; this stream only reports the fact.
                             continuation.yield(.audioServerRestarted)
                         } else {
                             continuation.yield(.propertyChanged)
@@ -1162,6 +1180,7 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                 // output device, it is usually mid device migration (the default
                 // output just switched). Wait at most 225 ms for the process to
                 // move before binding; after the timeout, bind the new device.
+                var waitedForDeviceMigration = false
                 if !processDevices.contains(observation.outputDeviceID),
                     processDevices.count > 1 {
                     processDevices = waitForProcessDeviceMigration(
@@ -1169,12 +1188,21 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                         outputDeviceID: observation.outputDeviceID,
                         initialDevices: processDevices
                     )
+                    waitedForDeviceMigration = true
                 }
-                let selectedDevice = selectCaptureDevice(
+                var selectedDevice = selectCaptureDevice(
                     processObjectID: source.processObjectID,
                     outputDeviceID: observation.outputDeviceID,
                     processDeviceIDs: processDevices
                 )
+                if waitedForDeviceMigration, selectedDevice == nil {
+                    // The 225 ms budget expired without the process reporting the
+                    // output device. Bind the new default explicitly instead of
+                    // falling back to a process-wide stereo mixdown
+                    // (per-app-audio-acceptance.md). A later reconcile re-observes
+                    // the device set and rebuilds once the migration completes.
+                    selectedDevice = observation.outputDeviceID
+                }
                 let deviceUID = try selectedDevice.map(propertyAccess.deviceUID(forID:))
                 sourceResources.processObjectID = source.processObjectID
                 sourceResources.captureDeviceUID = deviceUID
@@ -1736,9 +1764,22 @@ enum HALOperation: Equatable, Sendable {
     case destroyTap(UInt32)
 }
 
+/// Result of a maintenance pass on the runtime.
+/// - `pending`: deferred cleanup work remains; keep scheduling maintenance.
+/// - `clean`: nothing was pending (routine pass); all ledgers stay valid.
+/// - `recovered`: a failure episode finished and the runtime dropped its
+///   realization ledger — callers holding derived ledgers (e.g. the adapter's
+///   `plansByID`) must drop theirs too, or later reconciles resurrect removed
+///   routes.
+enum AudioRouteMaintenanceOutcome: Equatable, Sendable {
+    case pending
+    case clean
+    case recovered
+}
+
 protocol AudioRouteRuntimeControlling: AnyObject {
     func converge(to intent: AudioRuntimeIntent) throws -> AudioRuntimeApplyResult
     func snapshot() -> [AudioRouteDiagnosticsSnapshot]
-    func performMaintenance() -> Bool
+    func performMaintenance() -> AudioRouteMaintenanceOutcome
     func shutdown(reason: AudioRouteStopReason) -> AudioRouteStopReport
 }

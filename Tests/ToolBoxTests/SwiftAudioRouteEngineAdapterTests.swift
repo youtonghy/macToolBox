@@ -167,6 +167,49 @@ final class SwiftAudioRouteEngineAdapterTests: XCTestCase {
         XCTAssertEqual(runtime.shutdownReasons, [.serviceStopped])
     }
 
+    func testMaintenanceRecoveryClearsPlansLedger() throws {
+        let runtime = RecordingAudioRouteRuntime()
+        let adapter = SwiftAudioRouteEngineAdapter(runtime: runtime)
+        let applied = plan(outputUID: "output-A", processObjectID: 42, gain: 1)
+        try adapter.reconcile(
+            changedPlans: [applied],
+            removingRouteIDs: [],
+            retainedParameters: []
+        )
+
+        // Routine maintenance (nothing was pending) must not disturb the ledger.
+        runtime.nextMaintenanceOutcome = .clean
+        XCTAssertFalse(adapter.performMaintenance())
+        XCTAssertNoThrow(
+            try adapter.update(parameters: [
+                AudioRouteNativeRuntimeParameters(routeID: "output-A", sourceIndex: 0, targetGain: 2)
+            ])
+        )
+
+        // A recovery outcome means the runtime dropped its realization; the
+        // adapter ledger must follow, or the next reconcile would resurrect
+        // routes removed during the failure episode from the stale `plansByID`.
+        runtime.nextMaintenanceOutcome = .recovered
+        XCTAssertFalse(adapter.performMaintenance())
+        XCTAssertThrowsError(
+            try adapter.update(parameters: [
+                AudioRouteNativeRuntimeParameters(routeID: "output-A", sourceIndex: 0, targetGain: 2)
+            ])
+        ) { error in
+            guard case AudioRouteControllerError.gainUpdateFailed = error else {
+                return XCTFail("Expected gainUpdateFailed, got \(error)")
+            }
+        }
+
+        // Re-applying the plan converges a fresh intent.
+        try adapter.reconcile(
+            changedPlans: [applied],
+            removingRouteIDs: [],
+            retainedParameters: []
+        )
+        XCTAssertEqual(runtime.intents.count, 3)
+    }
+
     private func plan(
         outputUID: String,
         processObjectID: UInt32,
@@ -189,6 +232,7 @@ private final class RecordingAudioRouteRuntime: AudioRouteRuntimeControlling {
     private(set) var intents: [AudioRuntimeIntent] = []
     private(set) var shutdownReasons: [AudioRouteStopReason] = []
     var nextError: Error?
+    var nextMaintenanceOutcome: AudioRouteMaintenanceOutcome = .clean
 
     func converge(to intent: AudioRuntimeIntent) throws -> AudioRuntimeApplyResult {
         intents.append(intent)
@@ -201,7 +245,9 @@ private final class RecordingAudioRouteRuntime: AudioRouteRuntimeControlling {
 
     func snapshot() -> [AudioRouteDiagnosticsSnapshot] { [] }
 
-    func performMaintenance() -> Bool { false }
+    func performMaintenance() -> AudioRouteMaintenanceOutcome {
+        nextMaintenanceOutcome
+    }
 
     func shutdown(reason: AudioRouteStopReason) -> AudioRouteStopReport {
         shutdownReasons.append(reason)

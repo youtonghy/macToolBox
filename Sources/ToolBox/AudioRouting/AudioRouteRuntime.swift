@@ -78,7 +78,7 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
         hal.diagnostics()
     }
 
-    func performMaintenance() -> Bool {
+    func performMaintenance() -> AudioRouteMaintenanceOutcome {
         var deferred: [PendingCleanup] = []
         for cleanup in pendingCleanups {
             switch cleanup.receipt.rollback() {
@@ -104,18 +104,18 @@ final class AudioRouteRuntime: AudioRouteRuntimeControlling {
                 failures: failures
             )
         }
-        if deferred.isEmpty, !halCleanupPending, lastFailure != nil {
-            lastFailure = nil
-            // The completed cleanup destroyed resources that the realization
-            // bookkeeping still refers to: the failure episode tore the old
-            // routes down before the cleanup deferred. Drop the bookkeeping so
-            // the next converge performs a full rebuild instead of taking the
-            // `.unchanged` shortcut against dead Core Audio objects.
-            desiredIntent = nil
-            realizedKeysByRouteID = [:]
-            activeReceipt = nil
-        }
-        return !deferred.isEmpty || halCleanupPending
+        guard deferred.isEmpty, !halCleanupPending else { return .pending }
+        guard lastFailure != nil else { return .clean }
+        lastFailure = nil
+        // The completed cleanup destroyed resources that the realization
+        // bookkeeping still refers to: the failure episode tore the old
+        // routes down before the cleanup deferred. Drop the bookkeeping so
+        // the next converge performs a full rebuild instead of taking the
+        // `.unchanged` shortcut against dead Core Audio objects.
+        desiredIntent = nil
+        realizedKeysByRouteID = [:]
+        activeReceipt = nil
+        return .recovered
     }
 
     func shutdown(reason: AudioRouteStopReason) -> AudioRouteStopReport {

@@ -93,7 +93,11 @@ final class RangeExpandableSliderCell: NSSliderCell {
 
 final class ScrollWheelNSSlider: NSSlider {
     var wheelStep = 1.0
-    var ignoresMouseClicks = false
+    /// When true, a mouse click only claims keyboard focus: the click must not
+    /// jump the value (the slider is invisible overlay decoration), but arrow-key
+    /// control requires first-responder status, so the click cannot be dropped
+    /// entirely.
+    var focusOnlyOnClick = false
     var onRequestRangeExpansion: (() -> Void)?
     private(set) var isRangeExpansionPending = false
     private var wheelAdjuster = ScrollWheelValueAdjuster()
@@ -109,20 +113,30 @@ final class ScrollWheelNSSlider: NSSlider {
     }
 
     override func mouseDown(with event: NSEvent) {
-        guard !ignoresMouseClicks else { return }
+        guard !focusOnlyOnClick else {
+            window?.makeFirstResponder(self)
+            return
+        }
         super.mouseDown(with: event)
     }
 
     override func mouseDragged(with event: NSEvent) {
-        guard !ignoresMouseClicks else { return }
+        guard !focusOnlyOnClick else { return }
         super.mouseDragged(with: event)
     }
 
     override func keyDown(with event: NSEvent) {
+        guard isEnabled else {
+            super.keyDown(with: event)
+            return
+        }
+        // Up/Right increase, Down/Left decrease — the AppKit convention for both
+        // slider orientations. (This previously mapped Left to increase, which is
+        // inverted for the horizontal lite-mode slider.)
         let delta: Double
         switch event.keyCode {
-        case 126, 123: delta = 1
-        case 125, 124: delta = -1
+        case 126, 124: delta = 1
+        case 125, 123: delta = -1
         default:
             super.keyDown(with: event)
             return
@@ -189,7 +203,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
     private let step: Double
     private let isVertical: Bool
     private let onRequestRangeExpansion: (() -> Void)?
-    private let ignoresMouseClicks: Bool
+    private let focusOnlyOnClick: Bool
 
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.controlSize) private var controlSize
@@ -200,7 +214,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
         step: Double = 1,
         isVertical: Bool = false,
         onRequestRangeExpansion: (() -> Void)? = nil,
-        ignoresMouseClicks: Bool = false
+        focusOnlyOnClick: Bool = false
     ) {
         precondition(range.lowerBound <= range.upperBound)
         precondition(step > 0)
@@ -209,7 +223,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
         self.step = step
         self.isVertical = isVertical
         self.onRequestRangeExpansion = onRequestRangeExpansion
-        self.ignoresMouseClicks = ignoresMouseClicks
+        self.focusOnlyOnClick = focusOnlyOnClick
     }
 
     func makeCoordinator() -> Coordinator {
@@ -226,7 +240,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
         slider.action = #selector(Coordinator.valueChanged(_:))
         slider.isContinuous = true
         slider.isVertical = isVertical
-        slider.ignoresMouseClicks = ignoresMouseClicks
+        slider.focusOnlyOnClick = focusOnlyOnClick
         slider.onRequestRangeExpansion = onRequestRangeExpansion
         return slider
     }
@@ -239,7 +253,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
         context.coordinator.onRequestRangeExpansion = onRequestRangeExpansion
         slider.minValue = range.lowerBound
         slider.onRequestRangeExpansion = onRequestRangeExpansion
-        slider.ignoresMouseClicks = ignoresMouseClicks
+        slider.focusOnlyOnClick = focusOnlyOnClick
         if slider.isVertical, previousMaximum != range.upperBound {
             slider.finishRangeExpansion()
             NSAnimationContext.runAnimationGroup { animationContext in

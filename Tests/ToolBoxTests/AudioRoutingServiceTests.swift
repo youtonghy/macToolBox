@@ -1445,6 +1445,72 @@ final class AudioRoutingServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testSiblingProcessOfRoutedBundleJoinsRouteWhenItStartsProducingOutput() async throws {
+        let suiteName = "test.audioRoutingService.sibling.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AudioRuleStore(defaults: defaults, key: suiteName)
+        try store.save([AppAudioRule(bundleID: "us.zoom.xos", volumePercent: 200)])
+
+        let processA = AudioProcessSnapshot(
+            objectID: 42,
+            pid: 1234,
+            bundleID: "us.zoom.xos",
+            name: "zoom.us",
+            isRunningOutput: true
+        )
+        let processRegistry = FakeAudioProcessRegistry(snapshot: [processA])
+        let deviceRegistry = FakeAudioDeviceRegistry(
+            snapshot: [AudioOutputDevice(uid: "speakers", name: "Speakers", isAvailable: true)],
+            defaultOutputUID: "speakers"
+        )
+        let engine = WatchdogAudioRouteEngine()
+        let service = AudioRoutingService(
+            ruleStore: store,
+            processRegistry: processRegistry,
+            deviceRegistry: deviceRegistry,
+            engine: engine
+        )
+
+        service.start()
+        await engine.waitUntilReconcileCount(1)
+        let initialSources = await engine.currentPlans().first?.sources.map(\.processObjectID)
+        XCTAssertEqual(initialSources, [42])
+
+        // A helper process of the same bundle appears while idle: it must not
+        // join the route yet.
+        let idleB = AudioProcessSnapshot(
+            objectID: 43,
+            pid: 1235,
+            bundleID: "us.zoom.xos",
+            name: "zoom.us",
+            isRunningOutput: false
+        )
+        processRegistry.setSnapshot([processA, idleB])
+        try await Task.sleep(for: .milliseconds(30))
+        let afterIdleSources = await engine.currentPlans().first?.sources.map(\.processObjectID)
+        XCTAssertEqual(afterIdleSources, [42])
+
+        // B starts producing output. The process identity set is unchanged and
+        // A never toggles activity, so only the sibling compensation path can
+        // pull B into the route — without it B would play at system volume.
+        let producingB = AudioProcessSnapshot(
+            objectID: 43,
+            pid: 1235,
+            bundleID: "us.zoom.xos",
+            name: "zoom.us",
+            isRunningOutput: true
+        )
+        processRegistry.setSnapshot([processA, producingB])
+        await engine.waitUntilReconcileCount(3)
+
+        let routedSources = await engine.currentPlans().first?.sources.map(\.processObjectID)
+        XCTAssertEqual(routedSources, [42, 43])
+        _ = await service.shutdown()
+    }
+
+    @MainActor
     func testInFlightReconcileCannotOverwriteNewerActivityFlags() async throws {
         let suiteName = "test.audioRoutingService.activityRace.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))

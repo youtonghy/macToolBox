@@ -465,13 +465,13 @@ final class CoreAudioHALTests: XCTestCase {
         let observation = try hal.observe(HALObservationRequest(intent: intent))
 
         // coreaudiod restarts between observe and execute/update: every object ID
-        // in the observation is stale. Both paths must refuse to act on it.
-        let changes = hal.changes(for: [.audioServerGeneration])
+        // in the observation is stale. The HAL tracks restarts via its own
+        // init-registered listener — no external `changes(for:)` subscription is
+        // involved, mirroring the production wiring.
         properties.emit(
             selector: kAudioHardwarePropertyServiceRestarted,
             objectID: AudioObjectID(kAudioObjectSystemObject)
         )
-        _ = changes
 
         XCTAssertThrowsError(
             try hal.execute(
@@ -630,6 +630,90 @@ final class CoreAudioHALTests: XCTestCase {
         )
         XCTAssertLessThan(Date().timeIntervalSince(singleStarted), 0.15)
         XCTAssertEqual(singleResources.createdTapDeviceUIDs, ["device-A"])
+    }
+
+    func testCandidateFailureAfterTeardownLeavesHALCleanAndReExecutable() throws {
+        let properties = tapReuseProperties()
+        let resources = RecordingHALResources(realtimeSnapshot: TBAudioRealtimeSnapshot())
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+
+        // Route A is live.
+        let initialIntent = tapReuseIntent(routeID: "output-A", processObjectID: 42, generation: 1)
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+
+        // The replacement tears route A down, then its candidate output IOProc
+        // fails. The old realization is NOT restored (documented tradeoff), but
+        // the HAL must be left fully clean and immediately re-executable.
+        resources.failNextCreateOutput = true
+        let replacingPlan = AudioRoutePlan(
+            outputDeviceUID: "output-A",
+            deviceConfigurationGeneration: 1,
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player",
+                    processObjectID: 42,
+                    linearGain: 1
+                )
+            ]
+        )
+        let replacingIntent = AudioRuntimeIntent(
+            generation: 2,
+            plansByID: [replacingPlan.id: replacingPlan],
+            mutedRouteIDs: []
+        )
+        let replacingObservation = try hal.observe(
+            HALObservationRequest(intent: replacingIntent)
+        )
+        XCTAssertThrowsError(
+            try hal.execute(
+                HALTransaction(
+                    kind: .prepareCandidate,
+                    routeID: "output-A",
+                    sourceIDs: [42],
+                    intent: replacingIntent,
+                    observation: replacingObservation,
+                    replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+                )
+            )
+        )
+
+        XCTAssertEqual(hal.performMaintenance(), .succeeded)
+        XCTAssertTrue(
+            hal.diagnostics().isEmpty,
+            "No half-alive routes may remain after a candidate failure"
+        )
+
+        // The very same intent can be re-executed immediately (the retry path
+        // relies on this instead of an in-transaction restore).
+        let recoveryObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: initialIntent,
+                observation: recoveryObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        XCTAssertEqual(hal.diagnostics().map(\.routeID), ["output-A"])
     }
 
     // MARK: - Process tap reuse on output switch
@@ -1246,6 +1330,9 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
     private var nextTapObjectID: AudioObjectID = 77
     private let failCaptureStart: Bool
     private let createOutputStatus: OSStatus
+    /// One-shot injection: the next `createOutputIOProc` throws, then the fake
+    // recovers — used to exercise candidate-failure paths after teardown.
+    var failNextCreateOutput = false
     private let realtimeSnapshot: TBAudioRealtimeSnapshot?
     private var destroyAggregateStatuses: [OSStatus]
 
@@ -1337,6 +1424,14 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
         generation: UInt64
     ) throws -> HALIOProcResource {
         operations.append("createOutputIOProc")
+        if failNextCreateOutput {
+            failNextCreateOutput = false
+            throw AudioRuntimeFailure.prepareFailed(
+                routeID: "",
+                stage: .createIOProc,
+                status: -1
+            )
+        }
         if createOutputStatus != noErr {
             throw AudioRuntimeFailure.prepareFailed(
                 routeID: "",

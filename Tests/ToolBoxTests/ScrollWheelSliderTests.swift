@@ -213,6 +213,93 @@ final class ScrollWheelSliderTests: XCTestCase {
         )
     }
 
+    func testArrowKeysFollowAppKitDirectionConvention() throws {
+        let probe = SliderActionProbe()
+        let slider = ScrollWheelNSSlider(
+            value: 40,
+            minValue: 0,
+            maxValue: 100,
+            target: probe,
+            action: #selector(SliderActionProbe.valueChanged(_:))
+        )
+        slider.wheelStep = 1
+
+        func arrowEvent(keyCode: CGKeyCode) throws -> NSEvent {
+            let cgEvent = try XCTUnwrap(
+                CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true)
+            )
+            return try XCTUnwrap(NSEvent(cgEvent: cgEvent))
+        }
+
+        slider.keyDown(with: try arrowEvent(keyCode: 126))  // Up
+        XCTAssertEqual(slider.doubleValue, 41)
+        slider.keyDown(with: try arrowEvent(keyCode: 124))  // Right
+        XCTAssertEqual(slider.doubleValue, 42)
+        slider.keyDown(with: try arrowEvent(keyCode: 125))  // Down
+        XCTAssertEqual(slider.doubleValue, 41)
+        slider.keyDown(with: try arrowEvent(keyCode: 123))  // Left
+        XCTAssertEqual(slider.doubleValue, 40)
+        XCTAssertEqual(probe.receivedValue, 40)
+    }
+
+    func testDisabledSliderIgnoresArrowKeys() throws {
+        let probe = SliderActionProbe()
+        let slider = ScrollWheelNSSlider(
+            value: 40,
+            minValue: 0,
+            maxValue: 100,
+            target: probe,
+            action: #selector(SliderActionProbe.valueChanged(_:))
+        )
+        slider.wheelStep = 1
+        slider.isEnabled = false
+
+        let cgEvent = try XCTUnwrap(
+            CGEvent(keyboardEventSource: nil, virtualKey: 126, keyDown: true)
+        )
+        slider.keyDown(with: try XCTUnwrap(NSEvent(cgEvent: cgEvent)))
+
+        XCTAssertEqual(slider.doubleValue, 40, "Keyboard control must respect isEnabled")
+        XCTAssertNil(probe.receivedValue)
+    }
+
+    func testFocusOnlyClickClaimsFirstResponderWithoutChangingValue() throws {
+        let probe = SliderActionProbe()
+        let slider = ScrollWheelNSSlider(
+            value: 40,
+            minValue: 0,
+            maxValue: 100,
+            target: probe,
+            action: #selector(SliderActionProbe.valueChanged(_:))
+        )
+        slider.focusOnlyOnClick = true
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 100, height: 100),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView?.addSubview(slider)
+        slider.frame = NSRect(x: 0, y: 0, width: 58, height: 78)
+
+        let cgEvent = try XCTUnwrap(
+            CGEvent(
+                mouseEventSource: nil,
+                mouseType: .leftMouseDown,
+                mouseCursorPosition: CGPoint(x: 20, y: 40),
+                mouseButton: .left
+            )
+        )
+        slider.mouseDown(with: try XCTUnwrap(NSEvent(cgEvent: cgEvent)))
+
+        XCTAssertEqual(slider.doubleValue, 40, "A focus-only click must not jump the value")
+        XCTAssertNil(probe.receivedValue)
+        XCTAssertTrue(
+            window.firstResponder === slider,
+            "A focus-only click must still claim keyboard focus for arrow keys"
+        )
+    }
+
     func testNativeSliderConsumesVerticalWheelAndSendsAction() throws {
         let probe = SliderActionProbe()
         let slider = ScrollWheelNSSlider(

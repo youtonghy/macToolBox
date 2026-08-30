@@ -86,7 +86,22 @@ final class SwiftAudioRouteEngineAdapter: AudioRouteNativeEngineControlling {
     }
 
     func performMaintenance() -> Bool {
-        runtime.performMaintenance()
+        switch runtime.performMaintenance() {
+        case .pending:
+            return true
+        case .clean:
+            return false
+        case .recovered:
+            // The runtime dropped its realization ledger: this plans ledger now
+            // refers to destroyed routes. If it seeded the next reconcile it
+            // would resurrect routes removed during the failure episode (or keep
+            // them muted by a stale fade), so drop it — and any pending fade
+            // failure — alongside the runtime's recovery.
+            plansByID = [:]
+            mutedRouteIDs = []
+            pendingFailure = nil
+            return false
+        }
     }
 
     func stopAll(reason: AudioRouteStopReason) -> AudioRouteStopReport {

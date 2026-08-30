@@ -95,6 +95,10 @@ struct AudioRoutingPanel: View {
 
     private func liteAudioRow(_ row: AudioRoutingRow) -> some View {
         ZStack {
+            // Invisible slider under the icon tile: it receives scroll-wheel
+            // events by hover and — with `focusOnlyOnClick` — turns a click on the
+            // tile into keyboard focus without jumping the value, making the
+            // arrow keys usable as the help text promises.
             ScrollWheelSlider(
                 value: Binding(
                     get: { Double(row.volumePercent) },
@@ -102,27 +106,34 @@ struct AudioRoutingPanel: View {
                 ),
                 in: 0...300,
                 step: 1,
-                ignoresMouseClicks: true
+                focusOnlyOnClick: true
             )
             .frame(width: 58, height: 78)
             .opacity(0)
             .contentShape(Rectangle())
-            .help("点击后使用滚轮或上下键调节音量")
+            .help("悬停滚轮或方向键调节音量，点击图标恢复 100%")
 
             VStack(spacing: 5) {
-                appIcon(for: row)
+                Button {
+                    service.setVolume(bundleID: row.bundleID, percent: 100)
+                } label: {
+                    appIcon(for: row)
+                }
+                .buttonStyle(.plain)
+                .disabled(row.volumePercent == 100)
 
                 Text("\(row.volumePercent)%")
                     .font(.system(size: 11, weight: .semibold, design: .monospaced))
                     .foregroundStyle(.secondary)
                     .frame(width: 48)
+                    .allowsHitTesting(false)
             }
-            .allowsHitTesting(false)
         }
         .frame(width: 58, height: 78)
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.name)，音量 \(row.volumePercent)%")
+        .accessibilityHint("\(iconHelp(for: row))")
     }
 
     @ViewBuilder
