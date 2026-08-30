@@ -62,6 +62,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         panelSize: currentPanelSize
     )
     private var settingsWindowController: NSWindowController?
+    private var imageToolsWindowController: NSWindowController?
     private let state = FeatureState()
     private let hardware = HardwareMenuModel()
     private let displayControl = DisplayControlService.shared
@@ -147,7 +148,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             showsDisplayControl: displayControlMenu.hasExternalDisplay,
             showsAudioSection: !audioRouting.menuRows.isEmpty,
             showsColorPreset: displayControlMenu.presetAvailable,
-            audioRowCount: audioRouting.menuRows.count
+            audioRowCount: audioRouting.menuRows.count,
+            isAudioLiteMode: audioRouting.isLiteMode
         )
     }
 
@@ -233,14 +235,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func observePanelSizeChanges() {
-        Publishers.CombineLatest4(
-            hardware.$cableItems.map(\.count).removeDuplicates(),
-            displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
-            audioRouting.$menuRows.map(\.count).removeDuplicates(),
-            displayControlMenu.$presetAvailable.removeDuplicates()
+        Publishers.CombineLatest(
+            Publishers.CombineLatest4(
+                hardware.$cableItems.map(\.count).removeDuplicates(),
+                displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
+                audioRouting.$menuRows.map(\.count).removeDuplicates(),
+                displayControlMenu.$presetAvailable.removeDuplicates()
+            ),
+            audioRouting.$isLiteMode.removeDuplicates()
         )
             .receive(on: RunLoop.main)
-            .sink { [weak self] _, _, _, _ in
+            .sink { [weak self] _, _ in
                 self?.refreshPanelSize()
             }
             .store(in: &cancellables)
@@ -361,6 +366,11 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
         menu.addItem(.separator())
         menu.addItem(NSMenuItem(
+            title: L10n.imageTools,
+            action: #selector(openImageToolsWindow(_:)),
+            keyEquivalent: ""
+        ))
+        menu.addItem(NSMenuItem(
             title: L10n.settings,
             action: #selector(openSettingsWindow(_:)),
             keyEquivalent: ","
@@ -397,6 +407,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.window?.makeKeyAndOrderFront(sender)
     }
 
+    @objc private func openImageToolsWindow(_ sender: Any?) {
+        NSApp.activate(ignoringOtherApps: true)
+        let controller = imageToolsWindowController ?? makeImageToolsWindowController()
+        imageToolsWindowController = controller
+        controller.showWindow(sender)
+        controller.window?.makeKeyAndOrderFront(sender)
+    }
+
     @objc private func quitApplication(_ sender: Any?) {
         NSApp.terminate(sender)
     }
@@ -426,6 +444,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         window.title = L10n.settings
         window.setContentSize(windowSize)
         window.minSize = NSSize(width: 760, height: 500)
+        window.styleMask.insert(.titled)
+        window.styleMask.insert(.closable)
+        window.styleMask.insert(.miniaturizable)
+        window.styleMask.insert(.resizable)
+        window.styleMask.insert(.fullSizeContentView)
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.titlebarSeparatorStyle = .none
+        window.isOpaque = false
+        window.backgroundColor = .clear
+        window.toolbarStyle = .unifiedCompact
+        window.isMovableByWindowBackground = true
+        window.isReleasedWhenClosed = false
+        window.center()
+
+        let controller = NSWindowController(window: window)
+        controller.shouldCascadeWindows = true
+        return controller
+    }
+
+    private func makeImageToolsWindowController() -> NSWindowController {
+        let windowSize = NSSize(width: 480, height: 640)
+        let model = ImageToolsPanelModel()
+        model.level = UserDefaults.standard.object(forKey: "imageTools.defaultLevel") as? Int
+            ?? ImageQualityTable.defaultLevel
+        model.renameInsteadOfOverwrite =
+            UserDefaults.standard.string(forKey: "imageTools.defaultNaming") == "suffix"
+        let hostingController = GlassHostingViewController(
+            rootView: AnyView(ImageToolsPanelView(model: model)
+                .padding(12)),
+            contentSize: windowSize,
+            contentInsets: NSEdgeInsets(top: 44, left: 12, bottom: 12, right: 12)
+        )
+        let window = NSWindow(contentViewController: hostingController)
+        window.title = L10n.imageTools
+        window.setContentSize(windowSize)
+        window.minSize = NSSize(width: 420, height: 520)
         window.styleMask.insert(.titled)
         window.styleMask.insert(.closable)
         window.styleMask.insert(.miniaturizable)

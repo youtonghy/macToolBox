@@ -17,11 +17,12 @@ struct PopoverContent: View {
                 hardwareSection
 
                 if !audioRouting.menuRows.isEmpty {
-                    section(title: "应用音频", subtitle: "0–300%") {
+                    section(title: "应用音频") {
                         AudioRoutingPanel(service: audioRouting)
                             .frame(
                                 height: MenuPanelLayout.audioContentHeight(
-                                    rowCount: audioRouting.menuRows.count
+                                    rowCount: audioRouting.menuRows.count,
+                                    isLiteMode: audioRouting.isLiteMode
                                 ),
                                 alignment: .topLeading
                             )

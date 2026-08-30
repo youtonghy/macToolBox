@@ -64,6 +64,9 @@ struct DisplayControlDisplay: Codable, Equatable, Identifiable, Sendable {
     var unavailableReason: String?
     var controls: [DisplayControlCapability]
     var colorPreset: DisplayColorPresetCapability? = nil
+    /// Registry-backed identity of the physical connection. A changed token
+    /// under the same CGDirectDisplayID means the display was replugged.
+    var connectionToken: UInt64? = nil
 }
 
 enum DisplayControlKind: String, CaseIterable, Codable, Equatable, Sendable {

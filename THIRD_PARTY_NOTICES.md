@@ -47,3 +47,19 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## Image Tools (compression / conversion / rehash)
+
+This project links the following third-party libraries:
+
+- libwebp, Copyright (c) Google LLC — BSD 3-Clause license
+  - Integrated via SwiftPM wrapper `SDWebImage/libwebp-Xcode` (MIT), pinned to
+    tag 1.6.0; used for WebP encoding (the system ImageIO framework does not
+    provide a WebP encoder on macOS).
+  - Full license text: https://raw.githubusercontent.com/webmproject/libwebp/main/COPYING
+
+Licensing note (why some well-known optimizers are intentionally NOT embedded):
+the repository is MIT-licensed, so GPL-family components cannot be linked or
+embedded. `pngquant`/`libimagequant` (GPL-3 / commercial) and `gifsicle`
+(GPL-2) are therefore excluded; PNG optimization stays lossless (metadata
+strip + repack), and animated GIFs are processed frame 0 only.

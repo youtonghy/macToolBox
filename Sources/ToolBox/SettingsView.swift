@@ -9,6 +9,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case audio
     case screenshot
     case clipboard
+    case image
     case shortcuts
     case general
     case about
@@ -31,6 +32,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return L10n.string("截图")
         case .clipboard:
             return L10n.string("剪贴板")
+        case .image:
+            return L10n.string("图像")
         case .shortcuts:
             return L10n.string("快捷键")
         case .general:
@@ -56,6 +59,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "camera.viewfinder"
         case .clipboard:
             return "doc.on.clipboard"
+        case .image:
+            return "photo"
         case .shortcuts:
             return "keyboard"
         case .general:
@@ -81,6 +86,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemOrange)
         case .clipboard:
             return Color(nsColor: .systemCyan)
+        case .image:
+            return Color(nsColor: .systemPink)
         case .shortcuts:
             return Color(nsColor: .systemBlue)
         case .general:
@@ -171,6 +178,8 @@ struct SettingsView: View {
                     ScreenshotSettingsView(permissions: shortcutRegistry.permissions)
                 case .clipboard:
                     ClipboardSettingsView(coordinator: clipboardCoordinator)
+                case .image:
+                    ImageSettingsView()
                 case .shortcuts:
                     ShortcutSettingsView(model: shortcutSettings)
                 case .general:

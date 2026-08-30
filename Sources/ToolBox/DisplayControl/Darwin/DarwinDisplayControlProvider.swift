@@ -15,6 +15,7 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     private let sleepNanos: (UInt64) -> Void
     private var transports: [CGDirectDisplayID: DDCTransport] = [:]
     private var unavailableReasons: [CGDirectDisplayID: String] = [:]
+    private var lastConnectionTokens: [CGDirectDisplayID: UInt64?] = [:]
     private var valueStore = DisplayControlValueStore()
     private var capabilityStore = DisplayCapabilityStore()
 
@@ -277,8 +278,11 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 }
             }
         } else if Arm64DDCBackend.isArm64 {
-            let matches = Arm64DDCBackend.serviceMatches(displayIDs: displayIDs)
-            for match in matches {
+            let resolution = Arm64DDCBackend.serviceMatches(displayIDs: displayIDs)
+            for displayID in resolution.ambiguousDisplayIDs {
+                nextReasons[displayID] = "DDC service matching is ambiguous (identical displays without distinguishing serial numbers); reconnect one display or use a different port to disambiguate."
+            }
+            for match in resolution.matches {
                 if match.dummy {
                     nextReasons[match.displayID] = "Display is marked as a dummy display."
                     continue
@@ -316,6 +320,24 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
 
         transports = nextTransports
         unavailableReasons = nextReasons
+
+        // A replug under the same CGDirectDisplayID invalidates cached
+        // values: the monitor may have reset to defaults, and the cached
+        // last-written raw value would wrongly suppress rewrites.
+        for (displayID, transport) in nextTransports {
+            let token = transport.connectionToken
+            if let previous = lastConnectionTokens[displayID], previous != token {
+                valueStore.invalidate(
+                    displayID: displayID,
+                    kinds: Set(DisplayControlKind.allCases)
+                )
+            }
+            lastConnectionTokens[displayID] = token
+        }
+        for displayID in lastConnectionTokens.keys where nextTransports[displayID] == nil {
+            lastConnectionTokens.removeValue(forKey: displayID)
+        }
+
         valueStore.retainDisplays(Set(nextTransports.keys))
         capabilityStore.retainConnections(
             Set(nextTransports.compactMap { displayID, transport in
@@ -356,7 +378,8 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
                 displayID: displayID,
                 identity: identity,
                 transport: transport
-            )
+            ),
+            connectionToken: transport?.connectionToken
         )
     }
 
@@ -383,17 +406,63 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
             )
         }
         let key = DisplayControlValueKey(displayID: displayID, kind: kind)
-        let observedValue = try? self.currentValueLocked(
+        switch probeCurrentValueLocked(
             displayID: displayID,
             kind: kind,
             transport: transport,
             options: .probe
-        )
-        return valueStore.capability(
-            for: key,
-            identity: brightnessMemoryIdentityLocked(displayID: displayID),
-            observedValue: observedValue
-        )
+        ) {
+        case .observed(let value):
+            return valueStore.capability(
+                for: key,
+                identity: brightnessMemoryIdentityLocked(displayID: displayID),
+                observedValue: value
+            )
+        case .unsupported:
+            // An explicit unsupported reply is a durable property of the
+            // display: fail closed instead of exposing an unwritable control
+            // as write-only.
+            return DisplayControlCapability(
+                kind: kind,
+                status: .unsupported,
+                value: nil,
+                unavailableReason: "The display reported this control as unsupported over DDC."
+            )
+        case .failed:
+            return valueStore.capability(
+                for: key,
+                identity: brightnessMemoryIdentityLocked(displayID: displayID),
+                observedValue: nil
+            )
+        }
+    }
+
+    private enum ControlProbeOutcome {
+        case observed(DisplayControlValue)
+        case unsupported
+        case failed
+    }
+
+    /// Probe with typed failure classification: a DDC "unsupported" reply
+    /// marks the control unsupported (not writable), while transient
+    /// transport/checksum failures keep writes enabled as write-only.
+    private func probeCurrentValueLocked(
+        displayID: CGDirectDisplayID,
+        kind: DisplayControlKind,
+        transport: DDCTransport,
+        options: DDCRequestOptions
+    ) -> ControlProbeOutcome {
+        switch transport.readOutcome(command: kind.ddcCommand.rawValue, options: options) {
+        case .success(let read):
+            guard let value = try? Self.decodeValue(kind: kind, read: read) else {
+                return .failed
+            }
+            return .observed(value)
+        case .failure(.unsupportedReply):
+            return .unsupported
+        case .failure:
+            return .failed
+        }
     }
 
     private func ensureDisplayOnline(_ displayID: CGDirectDisplayID) throws {
@@ -580,6 +649,12 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
 
     static func decodeValue(kind: DisplayControlKind, read: DDCReadResult) throws -> DisplayControlValue {
         if kind == .mute {
+            // MCCS 0x8D only defines 1 (muted) and 2 (not muted). Any other
+            // value (0, 3, sentinel leftovers, ...) is an invalid reply and
+            // must fail instead of silently decoding as "not muted".
+            guard read.current == 1 || read.current == 2 else {
+                throw DisplayControlError.invalidValue(Double(read.current))
+            }
             let muted = read.current == 1
             return DisplayControlValue(
                 kind: kind,
@@ -610,12 +685,21 @@ final class DarwinDisplayControlProvider: DisplayControlProviding {
     }
 
     private static func onlineDisplayIDs() -> [CGDirectDisplayID] {
-        var displayIDs = [CGDirectDisplayID](repeating: 0, count: 32)
-        var displayCount: UInt32 = 0
-        guard CGGetOnlineDisplayList(UInt32(displayIDs.count), &displayIDs, &displayCount) == .success else {
-            return []
+        // CGGetOnlineDisplayList truncates silently when the buffer is too
+        // small; grow geometrically up to a sane ceiling.
+        var capacity: UInt32 = 32
+        let maximumCapacity: UInt32 = 128
+        while true {
+            var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(capacity))
+            var displayCount: UInt32 = 0
+            guard CGGetOnlineDisplayList(capacity, &displayIDs, &displayCount) == .success else {
+                return []
+            }
+            if displayCount < capacity || capacity >= maximumCapacity {
+                return Array(displayIDs.prefix(Int(displayCount))).filter { $0 != 0 }
+            }
+            capacity = min(capacity * 2, maximumCapacity)
         }
-        return Array(displayIDs.prefix(Int(displayCount))).filter { $0 != 0 }
     }
 
     private static func isExternalHardwareDisplay(_ displayID: CGDirectDisplayID) -> Bool {

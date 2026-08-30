@@ -73,6 +73,8 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
     private(set) var writes: [(DisplayControlKind, Double, DisplayControlWriteOptions)] = []
     private var readCount = 0
     private var shouldBlockFirstWrite = false
+    private var failReleasedFirstWrite = false
+    private var failingKinds = Set<DisplayControlKind>()
     private var firstWriteRelease: CheckedContinuation<Void, Never>?
     private var firstWriteStartedWaiters: [CheckedContinuation<Void, Never>] = []
     private var writeWaiters: [WriteWaiter] = []
@@ -100,6 +102,16 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
 
     func blockFirstWrite() {
         shouldBlockFirstWrite = true
+    }
+
+    func failWrites(kind: DisplayControlKind) {
+        failingKinds.insert(kind)
+    }
+
+    func releaseFirstWriteWithFailure() {
+        failReleasedFirstWrite = true
+        firstWriteRelease?.resume()
+        firstWriteRelease = nil
     }
 
     func blockFirstPresetWrite() {
@@ -235,6 +247,14 @@ actor RecordingDisplayControlProvider: DisplayControlProviding {
                 firstWriteStartedWaiters.removeAll()
                 waiters.forEach { $0.resume() }
             }
+        }
+
+        if failReleasedFirstWrite {
+            failReleasedFirstWrite = false
+            throw SnapshotTestError.forced
+        }
+        if failingKinds.contains(kind) {
+            throw DisplayControlError.writeFailed(displayID, kind)
         }
 
         return DisplayControlValue(
@@ -536,6 +556,87 @@ final class DisplayControlServiceTests: XCTestCase {
         XCTAssertEqual(writes.map(\.0), [.volume, .mute])
     }
 
+    func testVolumeWriteSucceedsWhenMuteControlUnsupported() async {
+        let provider = RecordingDisplayControlProvider()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .unsupported, volumeStatus: .available))
+
+        service.setVolume(displayID: 42, normalizedValue: 0.5)
+        await provider.waitUntilWrite(kind: .volume, value: 0.5)
+
+        let writes = await provider.recordedWrites()
+        XCTAssertEqual(writes.map(\.0), [.volume])
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .volume), 0.5)
+    }
+
+    func testSetMutedAfterSetVolumeAppliesFinalMuteIntent() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        service.setVolume(displayID: 42, normalizedValue: 0.6)
+        await provider.waitUntilFirstWriteIsBlocked()
+        service.setMuted(displayID: 42, muted: true)
+        await provider.releaseFirstWrite()
+        await provider.waitUntilWrite(kind: .mute, value: 1)
+
+        let writes = await provider.recordedWrites().map(\.0)
+        XCTAssertEqual(writes, [.mute, .volume, .mute])
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .mute), 1)
+    }
+
+    func testMuteFailureDoesNotRollBackSuccessfulVolumeWrite() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.failWrites(kind: .mute)
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+
+        service.setVolume(displayID: 42, normalizedValue: 0)
+        await provider.waitUntilWrite(kind: .mute, value: 1)
+
+        let writes = await provider.recordedWrites().map(\.0)
+        XCTAssertEqual(writes, [.volume, .mute])
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .volume), 0)
+    }
+
+    func testStaleBrightnessWorkerFailureAfterStopDoesNotClobberNewState() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        service.writeBrightness(displayID: 42, normalizedValue: 0.5, smooth: false)
+        await provider.waitUntilFirstWriteIsBlocked()
+        service.stop()
+        await provider.releaseFirstWriteWithFailure()
+        for _ in 0..<20 { await Task.yield() }
+
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+        service.writeBrightness(displayID: 42, normalizedValue: 0.8, smooth: false)
+        await provider.waitUntilWrite(kind: .brightness, value: 0.8)
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .brightness), 0.8)
+    }
+
+    func testStaleAudioWorkerFailureAfterStopDoesNotClobberNewState() async {
+        let provider = RecordingDisplayControlProvider()
+        await provider.blockFirstWrite()
+        let service = DisplayControlService(provider: provider, timing: .immediateForTests)
+
+        service.setVolume(displayID: 42, normalizedValue: 0.4)
+        await provider.waitUntilFirstWriteIsBlocked()
+        service.stop()
+        await provider.releaseFirstWriteWithFailure()
+        for _ in 0..<20 { await Task.yield() }
+
+        service.setSnapshotForTesting(Self.makeControlsSnapshot(muteStatus: .available, volumeStatus: .available))
+        service.setVolume(displayID: 42, normalizedValue: 0.9)
+        await provider.waitUntilWrite(kind: .volume, value: 0.9)
+        for _ in 0..<20 { await Task.yield() }
+
+        XCTAssertEqual(service.presentedValue(displayID: 42, kind: .volume), 0.9)
+    }
+
     func testStepUsesLatestScheduledValueWithoutReadingHardware() async {
         let provider = RecordingDisplayControlProvider()
         await provider.blockFirstWrite()
@@ -726,6 +827,57 @@ final class DisplayControlServiceTests: XCTestCase {
     }
 
     private static let presetSnapshot = makePresetSnapshot(currentRawValue: 0x0B)
+
+    private static func makeControlsSnapshot(
+        muteStatus: DisplayControlStatus,
+        volumeStatus: DisplayControlStatus
+    ) -> DisplayControlSnapshot {
+        func capability(
+            kind: DisplayControlKind,
+            status: DisplayControlStatus,
+            rawCurrent: UInt16,
+            rawMaximum: UInt16
+        ) -> DisplayControlCapability {
+            DisplayControlCapability(
+                kind: kind,
+                status: status,
+                value: DisplayControlValue(
+                    kind: kind,
+                    timestamp: Date(),
+                    rawCurrent: rawCurrent,
+                    rawMinimum: 0,
+                    rawMaximum: rawMaximum,
+                    normalized: rawMaximum > 0 ? Double(rawCurrent) / Double(rawMaximum) : 0
+                ),
+                unavailableReason: status == .available ? nil : "test"
+            )
+        }
+
+        return DisplayControlSnapshot(
+            timestamp: Date(),
+            displays: [
+                DisplayControlDisplay(
+                    id: 42,
+                    name: "Controls Display",
+                    vendorNumber: 1,
+                    modelNumber: 2,
+                    serialNumber: 3,
+                    isBuiltIn: false,
+                    isVirtual: false,
+                    supportsHardwareDDC: true,
+                    backendName: "Test DDC",
+                    unavailableReason: nil,
+                    controls: [
+                        capability(kind: .brightness, status: .available, rawCurrent: 50, rawMaximum: 100),
+                        capability(kind: .contrast, status: .available, rawCurrent: 50, rawMaximum: 100),
+                        capability(kind: .volume, status: volumeStatus, rawCurrent: 10, rawMaximum: 100),
+                        capability(kind: .mute, status: muteStatus, rawCurrent: 2, rawMaximum: 2),
+                    ],
+                    colorPreset: nil
+                ),
+            ]
+        )
+    }
 
     private static func makePresetSnapshot(currentRawValue: UInt8?) -> DisplayControlSnapshot {
         DisplayControlSnapshot(

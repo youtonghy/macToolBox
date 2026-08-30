@@ -189,7 +189,7 @@ final class DisplayControlMenuModel: ObservableObject {
 
         selectedDisplayName = selected.name
         if selected.controls.contains(where: { $0.status == .writeOnly }) {
-            statusText = "DDC write-only - current values estimated"
+            statusText = L10n.string("DDC 只写模式，当前值为估算值")
         } else {
             statusText = selected.supportsHardwareDDC
                 ? (selected.backendName ?? "Hardware DDC")

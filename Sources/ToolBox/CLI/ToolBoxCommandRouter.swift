@@ -50,12 +50,13 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
                 result = .displayList(makeDisplayList())
                 warnings = []
             case let .displayGet(target):
-                result = .display(makeDisplayDTO(try resolveDisplay(target)))
+                result = .display(Self.makeDisplayDTO(try resolveDisplay(target)))
                 warnings = []
             case let .displaySet(payload):
                 let display = try resolveDisplay(payload.target)
+                try Self.validate(display: display, supports: payload.change)
                 try applyDisplayChange(payload.change, to: display)
-                result = .display(makeDisplayDTO(display))
+                result = .display(Self.makeDisplayDTO(display))
                 warnings = [.init(code: .writeUnverified, message: "写入已提交；显示器回读将在后台完成。", details: ["displayId": String(display.id)])]
             case .focusStatus:
                 result = .focus(makeFocusDTO())
@@ -96,6 +97,12 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
                 try applyLaunchAtLogin(toggle.action)
                 result = .launchAtLogin(.init(isEnabled: launchAtLogin.isEnabled))
                 warnings = []
+            case let .imageProcess(payload):
+                result = try await handleImageProcess(payload)
+                warnings = []
+            case let .imageRehash(payload):
+                result = try await handleImageRehash(payload)
+                warnings = []
             }
             return .success(requestID: request.requestID, result: result, warnings: warnings)
         } catch let error as ToolBoxDisplayTargetError {
@@ -133,7 +140,7 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
     }
 
     private func makeDisplayList() -> ToolBoxDisplayListDTO {
-        .init(displays: controllableDisplays.map(makeDisplayDTO))
+        .init(displays: controllableDisplays.map(Self.makeDisplayDTO))
     }
 
     private func resolveDisplay(_ target: ToolBoxDisplayTargetDTO) throws -> DisplayControlDisplay {
@@ -150,14 +157,52 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
         return matches[0]
     }
 
-    private func makeDisplayDTO(_ display: DisplayControlDisplay) -> ToolBoxDisplayDTO {
+    /// Validates that the resolved display can actually accept the requested
+    /// change before reporting acceptance. Uncontrollable targets fail here
+    /// with a typed error instead of returning success for a doomed write.
+    static func validate(display: DisplayControlDisplay, supports change: ToolBoxDisplayChangeDTO) throws {
+        switch change {
+        case .brightness, .contrast, .volume, .mute:
+            let kind: DisplayControlKind
+            switch change {
+            case .brightness: kind = .brightness
+            case .contrast: kind = .contrast
+            case .volume: kind = .volume
+            case .mute: kind = .mute
+            case .preset: return
+            }
+            guard display.supportsHardwareDDC else {
+                throw ToolBoxDisplayTargetError.displayNotControllable(
+                    display.unavailableReason ?? "该显示器没有可用的硬件 DDC 通道"
+                )
+            }
+            guard let control = display.controls.first(where: { $0.kind == kind }) else {
+                throw ToolBoxDisplayTargetError.controlNotWritable(
+                    "该显示器未上报\(kind.title)控制能力"
+                )
+            }
+            guard control.status.isWritable else {
+                throw ToolBoxDisplayTargetError.controlNotWritable(
+                    control.unavailableReason ?? "该显示器不支持\(kind.title)控制"
+                )
+            }
+        case .preset:
+            guard let preset = display.colorPreset, preset.status == .available else {
+                throw ToolBoxDisplayTargetError.controlNotWritable(
+                    display.colorPreset?.unavailableReason ?? "该显示器不支持颜色预设控制"
+                )
+            }
+        }
+    }
+
+    static func makeDisplayDTO(_ display: DisplayControlDisplay) -> ToolBoxDisplayDTO {
         let controls = display.controls.map { capability in
             ToolBoxDisplayControlDTO(
                 kind: ToolBoxDisplayControlKind(rawValue: capability.kind.rawValue)!,
                 minimum: capability.value.map { Int($0.rawMinimum) },
                 maximum: capability.value.map { Int($0.rawMaximum) },
                 currentValue: currentValue(for: capability),
-                isReadable: capability.value != nil,
+                isReadable: capability.status == .available,
                 isWritable: capability.status.isWritable
             )
         } + (display.colorPreset.map { preset in
@@ -177,7 +222,7 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
         )
     }
 
-    private func currentValue(for capability: DisplayControlCapability) -> String? {
+    private static func currentValue(for capability: DisplayControlCapability) -> String? {
         guard let value = capability.value else { return nil }
         if capability.kind == .mute { return value.normalized >= 0.5 ? "true" : "false" }
         return String(Int((value.normalized * 100).rounded()))
@@ -288,19 +333,23 @@ final class ToolBoxCommandRouter: ToolBoxControlRequestHandling {
     }
 }
 
-private enum ToolBoxDisplayTargetError: LocalizedError {
+enum ToolBoxDisplayTargetError: LocalizedError {
     case notFound
     case ambiguous
     case invalidPreset
     case invalidBundleID
     case invalidVolume
     case deviceNotFound
+    case displayNotControllable(String)
+    case controlNotWritable(String)
 
     var code: ToolBoxControlErrorCode {
         switch self {
         case .notFound, .deviceNotFound: return .notFound
         case .ambiguous: return .ambiguousTarget
         case .invalidPreset, .invalidBundleID, .invalidVolume: return .invalidRequest
+        case .displayNotControllable: return .unavailable
+        case .controlNotWritable: return .unsupported
         }
     }
 
@@ -312,6 +361,8 @@ private enum ToolBoxDisplayTargetError: LocalizedError {
         case .invalidBundleID: return "Bundle ID 不能为空。"
         case .invalidVolume: return "音量必须在 0...300 之间。"
         case .deviceNotFound: return "找不到指定的音频输出设备。"
+        case let .displayNotControllable(reason): return "该显示器不可控：\(reason)。"
+        case let .controlNotWritable(reason): return "该控制项不可写：\(reason)。"
         }
     }
 }

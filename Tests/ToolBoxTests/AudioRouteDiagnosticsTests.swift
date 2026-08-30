@@ -8,7 +8,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                 snapshot: nil,
                 previous: nil,
                 startupPollCount: 1,
-                consecutiveStalledPollCount: 0
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 0
             ),
             .starting
         )
@@ -20,7 +21,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                 snapshot: nil,
                 previous: nil,
                 startupPollCount: 8,
-                consecutiveStalledPollCount: 0
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 0
             ),
             .awaitingAudio
         )
@@ -75,7 +77,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                 snapshot: value,
                 previous: value,
                 startupPollCount: 20,
-                consecutiveStalledPollCount: 8
+                consecutiveOutputStalledPollCount: 8,
+                consecutiveCaptureStalledPollCount: 8
             ),
             .stalled
         )
@@ -84,21 +87,90 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
     func testEitherCaptureOrOutputStoppingBecomesStalledWhileSourceProducesOutput() {
         let previous = snapshot(captureFrames: 512, outputFrames: 512)
 
-        for current in [
-            snapshot(captureFrames: 512, outputFrames: 1024),
-            snapshot(captureFrames: 1024, outputFrames: 512)
-        ] {
-            XCTAssertEqual(
-                AudioRouteDiagnosticsEvaluator.evaluate(
-                    snapshot: current,
-                    previous: previous,
-                    startupPollCount: 20,
-                    consecutiveStalledPollCount: 8,
-                    sourceIsProducingOutput: true
-                ),
-                .stalled
-            )
-        }
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 512, outputFrames: 1024),
+                previous: previous,
+                startupPollCount: 20,
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 8,
+                sourceIsProducingOutput: true
+            ),
+            .stalled
+        )
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 1024, outputFrames: 512),
+                previous: previous,
+                startupPollCount: 20,
+                consecutiveOutputStalledPollCount: 8,
+                consecutiveCaptureStalledPollCount: 0,
+                sourceIsProducingOutput: true
+            ),
+            .stalled
+        )
+    }
+
+    func testFrozenCaptureStaysActiveBelowStallThreshold() {
+        let previous = snapshot(captureFrames: 512, outputFrames: 512)
+
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 512, outputFrames: 1024),
+                previous: previous,
+                startupPollCount: 20,
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 7,
+                sourceIsProducingOutput: true
+            ),
+            .active
+        )
+    }
+
+    func testOutputNeverRenderingBecomesStalledAfterGraceAndStallWindow() {
+        // Output IOProc dead from the very first callback while the source is
+        // confirmed producing: a route the user can never hear through.
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 512, outputFrames: 0),
+                previous: nil,
+                startupPollCount: AudioRouteDiagnosticsEvaluator.startupGracePollCount
+                    + AudioRouteDiagnosticsEvaluator.stallPollCount,
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 0,
+                sourceIsProducingOutput: true
+            ),
+            .stalled
+        )
+        // Still inside the combined window it must not be torn down.
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(captureFrames: 512, outputFrames: 0),
+                previous: nil,
+                startupPollCount: AudioRouteDiagnosticsEvaluator.startupGracePollCount
+                    + AudioRouteDiagnosticsEvaluator.stallPollCount - 1,
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 0,
+                sourceIsProducingOutput: true
+            ),
+            .awaitingAudio
+        )
+    }
+
+    func testSilentCaptureForeverIsNotAStallWhenOutputRuns() {
+        // DRM-protected content keeps the tap silent indefinitely; it must stay
+        // `.awaitingAudio`, never be torn down, even long after every window.
+        XCTAssertEqual(
+            AudioRouteDiagnosticsEvaluator.evaluate(
+                snapshot: snapshot(outputFrames: 2048),
+                previous: snapshot(outputFrames: 1024),
+                startupPollCount: 100,
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 100,
+                sourceIsProducingOutput: true
+            ),
+            .awaitingAudio
+        )
     }
 
     func testPausedSourceKeepsRouteInsteadOfStalling() {
@@ -109,7 +181,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                 snapshot: snapshot(captureFrames: 512, outputFrames: 1024),
                 previous: snapshot(captureFrames: 512, outputFrames: 512),
                 startupPollCount: 20,
-                consecutiveStalledPollCount: 8,
+                consecutiveOutputStalledPollCount: 0,
+                consecutiveCaptureStalledPollCount: 8,
                 sourceIsProducingOutput: false
             ),
             .awaitingAudio
@@ -122,7 +195,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                 snapshot: snapshot(captureFrames: 1024, outputFrames: 512),
                 previous: snapshot(captureFrames: 512, outputFrames: 512),
                 startupPollCount: 20,
-                consecutiveStalledPollCount: 8,
+                consecutiveOutputStalledPollCount: 8,
+                consecutiveCaptureStalledPollCount: 0,
                 sourceIsProducingOutput: false
             ),
             .stalled
@@ -138,7 +212,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
                 snapshot: current,
                 previous: previous,
                 startupPollCount: 20,
-                consecutiveStalledPollCount: 8
+                consecutiveOutputStalledPollCount: 8,
+                consecutiveCaptureStalledPollCount: 8
             ),
             .active
         )
@@ -162,7 +237,8 @@ final class AudioRouteDiagnosticsTests: XCTestCase {
             snapshot: snapshot,
             previous: nil,
             startupPollCount: startupPollCount,
-            consecutiveStalledPollCount: 0
+            consecutiveOutputStalledPollCount: 0,
+            consecutiveCaptureStalledPollCount: 0
         )
     }
 

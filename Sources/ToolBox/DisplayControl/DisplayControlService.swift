@@ -94,12 +94,24 @@ private struct BrightnessWriteRequest: Equatable {
     var policy: DisplayBrightnessWritePolicy
 }
 
+/// One serial user intent for a display's audio controls. Volume and mute
+/// changes are applied by a single per-display worker so interleaved calls
+/// can never leave the hardware reflecting an older intent.
+private struct AudioWriteRequest: Equatable {
+    var volume: Double?
+    var muted: Bool?
+}
+
 @MainActor
 final class DisplayControlService: ObservableObject {
     static let shared = DisplayControlService()
 
     @Published private(set) var snapshot = DisplayControlSnapshot(timestamp: Date(), displays: [])
     @Published private(set) var colorPresetErrors: [CGDirectDisplayID: String] = [:]
+    /// Non-nil when the most recent refresh failed. A failed refresh keeps
+    /// the last valid snapshot instead of publishing an empty topology, so
+    /// consumers can distinguish "no displays" from "probe failed".
+    @Published private(set) var lastRefreshError: String?
 
     private let provider: DisplayControlProviding
     private let timing: DisplayControlTiming
@@ -125,14 +137,18 @@ final class DisplayControlService: ObservableObject {
         (displayID: CGDirectDisplayID, normalizedValue: Double),
         Never
     >()
+    private let brightnessWriteFailureSubject = PassthroughSubject<
+        (displayID: CGDirectDisplayID, policy: DisplayBrightnessWritePolicy),
+        Never
+    >()
 
     private var pendingControlTargets: [ControlWriteKey: Double] = [:]
     private var controlWorkers: [ControlWriteKey: Task<Void, Never>] = [:]
     private var controlWorkerIDs: [ControlWriteKey: UUID] = [:]
 
-    private var pendingVolumeTargets: [CGDirectDisplayID: Double] = [:]
-    private var volumeWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
-    private var volumeWorkerIDs: [CGDirectDisplayID: UUID] = [:]
+    private var pendingAudioRequests: [CGDirectDisplayID: AudioWriteRequest] = [:]
+    private var audioWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
+    private var audioWorkerIDs: [CGDirectDisplayID: UUID] = [:]
 
     private var pendingPresetTargets: [CGDirectDisplayID: UInt8] = [:]
     private var presetWorkers: [CGDirectDisplayID: Task<Void, Never>] = [:]
@@ -201,13 +217,17 @@ final class DisplayControlService: ObservableObject {
                 let next = try await provider.snapshot()
                 try Task.checkCancellation()
                 snapshot = next
+                lastRefreshError = nil
                 seedValues(from: next)
             } catch is CancellationError {
                 return
             } catch {
                 guard !Task.isCancelled else { return }
                 logger.error("Display control refresh failed: \(error.localizedDescription, privacy: .public)")
-                snapshot = DisplayControlSnapshot(timestamp: Date(), displays: [])
+                // A transient provider failure must not be represented as an
+                // empty topology: keep the last valid snapshot and surface
+                // the error separately.
+                lastRefreshError = error.localizedDescription
             }
         }
     }
@@ -224,6 +244,15 @@ final class DisplayControlService: ObservableObject {
         Never
     > {
         manualBrightnessWriteSubject.eraseToAnyPublisher()
+    }
+
+    /// Reports hardware write failures for brightness requests, including
+    /// the originating policy so scheduled writes can be retried.
+    var brightnessWriteFailures: AnyPublisher<
+        (displayID: CGDirectDisplayID, policy: DisplayBrightnessWritePolicy),
+        Never
+    > {
+        brightnessWriteFailureSubject.eraseToAnyPublisher()
     }
 
     @discardableResult
@@ -324,6 +353,10 @@ final class DisplayControlService: ObservableObject {
             setVolume(displayID: displayID, normalizedValue: normalizedValue)
             return
         }
+        if kind == .mute {
+            setMuted(displayID: displayID, muted: normalizedValue >= 0.5)
+            return
+        }
         enqueueControlWrite(
             displayID: displayID,
             kind: kind,
@@ -344,13 +377,9 @@ final class DisplayControlService: ObservableObject {
         desiredValues[muteKey] = target <= 0 ? 1 : 0
         userTargetKeys.insert(volumeKey)
         userTargetKeys.insert(muteKey)
-        pendingVolumeTargets[displayID] = target
-        guard volumeWorkers[displayID] == nil else { return }
-
-        let workerID = UUID()
-        volumeWorkerIDs[displayID] = workerID
-        volumeWorkers[displayID] = Task { [weak self] in
-            await self?.runVolumeWorker(displayID: displayID, workerID: workerID)
+        enqueueAudioRequest(displayID: displayID) { request in
+            request.volume = target
+            request.muted = target <= 0
         }
     }
 
@@ -382,7 +411,13 @@ final class DisplayControlService: ObservableObject {
     }
 
     func setMuted(displayID: CGDirectDisplayID, muted: Bool) {
-        writeControl(displayID: displayID, kind: .mute, normalizedValue: muted ? 1 : 0)
+        guard !isSuspended else { return }
+        let muteKey = ControlWriteKey(displayID: displayID, kind: .mute)
+        desiredValues[muteKey] = muted ? 1 : 0
+        userTargetKeys.insert(muteKey)
+        enqueueAudioRequest(displayID: displayID) { request in
+            request.muted = muted
+        }
     }
 
     func toggleMute(displayID: CGDirectDisplayID) {
@@ -428,10 +463,13 @@ final class DisplayControlService: ObservableObject {
             displayID: displayID,
             kind: .brightness
         )
+        var failedPolicy: DisplayBrightnessWritePolicy?
 
         do {
-            while let request = latestBrightnessRequests[displayID] {
+            while brightnessWorkerIDs[displayID] == workerID,
+                  let request = latestBrightnessRequests[displayID] {
                 try Task.checkCancellation()
+                failedPolicy = request.policy
                 let target = request.target
                 let next: Double
                 if !request.smooth || transient == nil {
@@ -454,6 +492,7 @@ final class DisplayControlService: ObservableObject {
                     options: options
                 )
                 try Task.checkCancellation()
+                guard brightnessWorkerIDs[displayID] == workerID else { return }
                 transient = value.normalized
                 lastSuccessfulValues[key] = value.normalized
 
@@ -472,7 +511,11 @@ final class DisplayControlService: ObservableObject {
         } catch is CancellationError {
             finishBrightnessWorker(displayID: displayID, workerID: workerID)
         } catch {
+            guard brightnessWorkerIDs[displayID] == workerID else { return }
             logger.error("Brightness write failed: \(error.localizedDescription, privacy: .public)")
+            if let failedPolicy {
+                brightnessWriteFailureSubject.send((displayID, failedPolicy))
+            }
             latestBrightnessRequests[displayID] = nil
             restoreDesiredValue(for: key)
             finishBrightnessWorker(displayID: displayID, workerID: workerID)
@@ -488,7 +531,8 @@ final class DisplayControlService: ObservableObject {
 
     private func runControlWorker(key: ControlWriteKey, workerID: UUID) async {
         do {
-            while let target = pendingControlTargets.removeValue(forKey: key) {
+            while controlWorkerIDs[key] == workerID,
+                  let target = pendingControlTargets.removeValue(forKey: key) {
                 try Task.checkCancellation()
                 let value = try await provider.writeValue(
                     displayID: key.displayID,
@@ -496,12 +540,14 @@ final class DisplayControlService: ObservableObject {
                     normalizedValue: target
                 )
                 try Task.checkCancellation()
+                guard controlWorkerIDs[key] == workerID else { return }
                 lastSuccessfulValues[key] = value.normalized
             }
             finishControlWorker(key: key, workerID: workerID)
         } catch is CancellationError {
             finishControlWorker(key: key, workerID: workerID)
         } catch {
+            guard controlWorkerIDs[key] == workerID else { return }
             logger.error("Display control write failed: \(error.localizedDescription, privacy: .public)")
             pendingControlTargets[key] = nil
             restoreDesiredValue(for: key)
@@ -516,63 +562,149 @@ final class DisplayControlService: ObservableObject {
         scheduleRefreshWhenIdle()
     }
 
-    private func runVolumeWorker(displayID: CGDirectDisplayID, workerID: UUID) async {
-        let volumeKey = ControlWriteKey(displayID: displayID, kind: .volume)
-        let muteKey = ControlWriteKey(displayID: displayID, kind: .mute)
-        do {
-            while let target = pendingVolumeTargets.removeValue(forKey: displayID) {
-                try Task.checkCancellation()
-                if target <= 0 {
-                    let volume = try await provider.writeValue(
-                        displayID: displayID,
-                        kind: .volume,
-                        normalizedValue: 0
-                    )
-                    let mute = try await provider.writeValue(
-                        displayID: displayID,
-                        kind: .mute,
-                        normalizedValue: 1
-                    )
-                    lastSuccessfulValues[volumeKey] = volume.normalized
-                    lastSuccessfulValues[muteKey] = mute.normalized
-                } else {
-                    let mute = try await provider.writeValue(
-                        displayID: displayID,
-                        kind: .mute,
-                        normalizedValue: 0
-                    )
-                    let volume = try await provider.writeValue(
-                        displayID: displayID,
-                        kind: .volume,
-                        normalizedValue: target
-                    )
-                    lastSuccessfulValues[muteKey] = mute.normalized
-                    lastSuccessfulValues[volumeKey] = volume.normalized
-                }
-                try Task.checkCancellation()
-            }
-            finishVolumeWorker(displayID: displayID, workerID: workerID)
-        } catch is CancellationError {
-            finishVolumeWorker(displayID: displayID, workerID: workerID)
-        } catch {
-            logger.error("Volume write failed: \(error.localizedDescription, privacy: .public)")
-            pendingVolumeTargets[displayID] = nil
-            restoreDesiredValue(for: volumeKey)
-            restoreDesiredValue(for: muteKey)
-            finishVolumeWorker(displayID: displayID, workerID: workerID)
+    private func enqueueAudioRequest(
+        displayID: CGDirectDisplayID,
+        mutate: (inout AudioWriteRequest) -> Void
+    ) {
+        var request = pendingAudioRequests[displayID] ?? AudioWriteRequest(volume: nil, muted: nil)
+        mutate(&request)
+        pendingAudioRequests[displayID] = request
+        guard audioWorkers[displayID] == nil else { return }
+
+        let workerID = UUID()
+        audioWorkerIDs[displayID] = workerID
+        audioWorkers[displayID] = Task { [weak self] in
+            await self?.runAudioWorker(displayID: displayID, workerID: workerID)
         }
     }
 
-    private func finishVolumeWorker(displayID: CGDirectDisplayID, workerID: UUID) {
-        guard volumeWorkerIDs[displayID] == workerID else { return }
-        volumeWorkers[displayID] = nil
-        volumeWorkerIDs[displayID] = nil
+    private enum ControlWritability {
+        case writable
+        case notWritable
+        /// The display is absent from the current snapshot; defer to the provider.
+        case unknown
+    }
+
+    private func controlWritability(
+        displayID: CGDirectDisplayID,
+        kind: DisplayControlKind
+    ) -> ControlWritability {
+        guard let capability = snapshot.displays
+            .first(where: { $0.id == displayID })?
+            .controls.first(where: { $0.kind == kind }) else {
+            return .unknown
+        }
+        return capability.status.isWritable ? .writable : .notWritable
+    }
+
+    private enum AudioPartResult {
+        case success
+        case failure(String)
+        case aborted
+    }
+
+    /// Writes one audio control as part of an audio intent. Only commits
+    /// the last-successful bookkeeping when the invoking worker still owns
+    /// the display, so a stale worker cannot pollute a newer session.
+    private func writeAudioPart(
+        displayID: CGDirectDisplayID,
+        kind: DisplayControlKind,
+        normalizedValue: Double,
+        workerID: UUID
+    ) async -> AudioPartResult {
+        do {
+            let value = try await provider.writeValue(
+                displayID: displayID,
+                kind: kind,
+                normalizedValue: normalizedValue
+            )
+            guard !Task.isCancelled,
+                  audioWorkerIDs[displayID] == workerID else {
+                return .aborted
+            }
+            lastSuccessfulValues[ControlWriteKey(displayID: displayID, kind: kind)] = value.normalized
+            return .success
+        } catch is CancellationError {
+            return .aborted
+        } catch {
+            return .failure(error.localizedDescription)
+        }
+    }
+
+    private func runAudioWorker(displayID: CGDirectDisplayID, workerID: UUID) async {
+        let volumeKey = ControlWriteKey(displayID: displayID, kind: .volume)
+        let muteKey = ControlWriteKey(displayID: displayID, kind: .mute)
+
+        while audioWorkerIDs[displayID] == workerID,
+              let request = pendingAudioRequests.removeValue(forKey: displayID) {
+            do {
+                try Task.checkCancellation()
+            } catch {
+                break
+            }
+
+            let muteWritability = controlWritability(displayID: displayID, kind: .mute)
+            let volumeWritability = controlWritability(displayID: displayID, kind: .volume)
+            let muteTarget = request.muted.map { $0 ? 1.0 : 0.0 }
+
+            // Ordering: unmute before raising volume (avoid a pop); mute
+            // after lowering volume (never blast audio at the old level).
+            var orderedParts: [(key: ControlWriteKey, value: Double, writable: Bool)] = []
+            if let muteTarget, muteTarget == 0 {
+                orderedParts.append((muteKey, 0, muteWritability != .notWritable))
+            }
+            if let volume = request.volume {
+                orderedParts.append((volumeKey, volume, volumeWritability != .notWritable))
+            }
+            if let muteTarget, muteTarget == 1 {
+                orderedParts.append((muteKey, 1, muteWritability != .notWritable))
+            }
+
+            for part in orderedParts {
+                guard audioWorkerIDs[displayID] == workerID else {
+                    finishAudioWorker(displayID: displayID, workerID: workerID)
+                    return
+                }
+                if !part.writable {
+                    // The display supports one audio control but not the
+                    // other: skip the unsupported part instead of blocking
+                    // (or rolling back) the supported one.
+                    logger.debug("Skipping unwritable audio part \(part.key.kind.rawValue, privacy: .public) for display \(displayID, privacy: .public).")
+                    restoreDesiredValue(for: part.key)
+                    continue
+                }
+                switch await writeAudioPart(
+                    displayID: displayID,
+                    kind: part.key.kind,
+                    normalizedValue: part.value,
+                    workerID: workerID
+                ) {
+                case .success:
+                    continue
+                case .aborted:
+                    finishAudioWorker(displayID: displayID, workerID: workerID)
+                    return
+                case let .failure(message):
+                    // Partial success stays: only the failed part rolls back.
+                    logger.error("Audio write failed for \(part.key.kind.rawValue, privacy: .public) on display \(displayID, privacy: .public): \(message, privacy: .public)")
+                    restoreDesiredValue(for: part.key)
+                }
+            }
+        }
+        finishAudioWorker(displayID: displayID, workerID: workerID)
+    }
+
+    private func finishAudioWorker(displayID: CGDirectDisplayID, workerID: UUID) {
+        guard audioWorkerIDs[displayID] == workerID else { return }
+        audioWorkers[displayID] = nil
+        audioWorkerIDs[displayID] = nil
         scheduleRefreshWhenIdle()
     }
 
     private func runPresetWorker(displayID: CGDirectDisplayID, workerID: UUID) async {
         do {
-            while let target = pendingPresetTargets.removeValue(forKey: displayID) {
+            while presetWorkerIDs[displayID] == workerID,
+                  let target = pendingPresetTargets.removeValue(forKey: displayID) {
                 try Task.checkCancellation()
                 let result = try await provider.writeColorPreset(
                     displayID: displayID,
@@ -609,7 +741,7 @@ final class DisplayControlService: ObservableObject {
     private func scheduleRefreshWhenIdle() {
         guard brightnessWorkers.isEmpty,
               controlWorkers.isEmpty,
-              volumeWorkers.isEmpty,
+              audioWorkers.isEmpty,
               presetWorkers.isEmpty else {
             return
         }
@@ -651,7 +783,7 @@ final class DisplayControlService: ObservableObject {
         let activeKeys = Set(
             brightnessWorkers.keys.map { ControlWriteKey(displayID: $0, kind: .brightness) }
         ).union(controlWorkers.keys).union(
-            volumeWorkers.keys.flatMap {
+            audioWorkers.keys.flatMap {
                 [
                     ControlWriteKey(displayID: $0, kind: .volume),
                     ControlWriteKey(displayID: $0, kind: .mute),
@@ -917,7 +1049,7 @@ final class DisplayControlService: ObservableObject {
     private func cancelPendingWrites() {
         brightnessWorkers.values.forEach { $0.cancel() }
         controlWorkers.values.forEach { $0.cancel() }
-        volumeWorkers.values.forEach { $0.cancel() }
+        audioWorkers.values.forEach { $0.cancel() }
         presetWorkers.values.forEach { $0.cancel() }
         refreshAfterWritesTask?.cancel()
 
@@ -927,9 +1059,9 @@ final class DisplayControlService: ObservableObject {
         controlWorkers.removeAll()
         controlWorkerIDs.removeAll()
         pendingControlTargets.removeAll()
-        volumeWorkers.removeAll()
-        volumeWorkerIDs.removeAll()
-        pendingVolumeTargets.removeAll()
+        audioWorkers.removeAll()
+        audioWorkerIDs.removeAll()
+        pendingAudioRequests.removeAll()
         presetWorkers.removeAll()
         presetWorkerIDs.removeAll()
         pendingPresetTargets.removeAll()

@@ -454,6 +454,184 @@ final class CoreAudioHALTests: XCTestCase {
             ]))
     }
 
+    func testExecuteAndUpdateRejectStaleAudioServerGeneration() throws {
+        let properties = configuredPropertiesForExecution()
+        let resources = RecordingHALResources(realtimeSnapshot: TBAudioRealtimeSnapshot())
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let intent = AudioRouteTestFixtures.intent()
+        let observation = try hal.observe(HALObservationRequest(intent: intent))
+
+        // coreaudiod restarts between observe and execute/update: every object ID
+        // in the observation is stale. Both paths must refuse to act on it.
+        let changes = hal.changes(for: [.audioServerGeneration])
+        properties.emit(
+            selector: kAudioHardwarePropertyServiceRestarted,
+            objectID: AudioObjectID(kAudioObjectSystemObject)
+        )
+        _ = changes
+
+        XCTAssertThrowsError(
+            try hal.execute(
+                HALTransaction(
+                    kind: .prepareCandidate,
+                    routeID: "output-A",
+                    sourceIDs: [42],
+                    intent: intent,
+                    observation: observation,
+                    replacingKeysByRouteID: [:]
+                )
+            )
+        ) { error in
+            XCTAssertEqual(error as? AudioRuntimeFailure, .audioServerRestarted)
+        }
+        XCTAssertThrowsError(try hal.updateParameters(intent)) { error in
+            XCTAssertEqual(error as? AudioRuntimeFailure, .audioServerRestarted)
+        }
+        XCTAssertTrue(resources.operations.isEmpty, "No resources may be created against stale object IDs")
+    }
+
+    func testDeferredCleanupDoesNotDestroyTapStillOwnedByRetainedRoute() throws {
+        let properties = tapReuseProperties()
+        let resources = RecordingHALResources(
+            realtimeSnapshot: TBAudioRealtimeSnapshot(),
+            destroyAggregateStatuses: [-66748, noErr]
+        )
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+
+        let initialIntent = tapReuseIntent(
+            routeID: "output-A",
+            processObjectID: 42,
+            generation: 1
+        )
+        let initialObservation = try hal.observe(
+            HALObservationRequest(intent: initialIntent)
+        )
+        let initialReceipt = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: initialIntent,
+                observation: initialObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        let originalTapObjectID = try XCTUnwrap(resources.createdTapObjectIDs.first)
+        resources.resetOperations()
+
+        // A generation-bumped replacement tears route A down; the aggregate
+        // destroy fails once, so cleanup defers with the route retained and its
+        // source still owning the harvested tap.
+        let replacingPlan = AudioRoutePlan(
+            outputDeviceUID: "output-A",
+            deviceConfigurationGeneration: 1,
+            sources: [
+                AudioRouteSource(
+                    bundleID: "com.example.player",
+                    processObjectID: 42,
+                    linearGain: 1
+                )
+            ]
+        )
+        let replacingIntent = AudioRuntimeIntent(
+            generation: 2,
+            plansByID: [replacingPlan.id: replacingPlan],
+            mutedRouteIDs: []
+        )
+        let replacingObservation = try hal.observe(
+            HALObservationRequest(intent: replacingIntent)
+        )
+        XCTAssertThrowsError(
+            try hal.execute(
+                HALTransaction(
+                    kind: .prepareCandidate,
+                    routeID: "output-A",
+                    sourceIDs: [42],
+                    intent: replacingIntent,
+                    observation: replacingObservation,
+                    replacingKeysByRouteID: initialReceipt.realizedKeysByRouteID
+                )
+            )
+        )
+        XCTAssertFalse(
+            resources.operations.contains("destroyTap"),
+            "The tap is still owned by the retained route; the transaction must not destroy it"
+        )
+        XCTAssertTrue(resources.destroyedTapObjectIDs.isEmpty)
+
+        // Maintenance finishes the deferred cleanup and destroys the tap once.
+        XCTAssertEqual(hal.performMaintenance(), .succeeded)
+        XCTAssertEqual(resources.destroyedTapObjectIDs, [originalTapObjectID])
+    }
+
+    func testAmbiguousProcessDeviceSetWaitsForMigrationBeforeBindingOutput() throws {
+        let properties = tapReuseProperties()
+        // Process 42 reports two devices, neither of which is the route's output
+        // device — a device migration in progress.
+        properties.set(
+            [AudioObjectID(100), AudioObjectID(110)],
+            objectID: 42,
+            selector: kAudioProcessPropertyDevices,
+            scope: kAudioObjectPropertyScopeOutput
+        )
+        let resources = RecordingHALResources(realtimeSnapshot: TBAudioRealtimeSnapshot())
+        let hal = SystemCoreAudioHAL(
+            propertyAccess: properties,
+            resourceAccess: resources
+        )
+        let intent = tapReuseIntent(routeID: "output-A", processObjectID: 42, generation: 1)
+        let observation = try hal.observe(HALObservationRequest(intent: intent))
+
+        let started = Date()
+        _ = try hal.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: intent,
+                observation: observation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        let elapsed = Date().timeIntervalSince(started)
+
+        // The 225 ms migration budget (9 × 25 ms) must elapse before the tap is
+        // bound to the output device.
+        XCTAssertGreaterThanOrEqual(elapsed, 0.2)
+        XCTAssertEqual(resources.createdTapDeviceUIDs, ["output-A"])
+
+        // A single-device report needs no wait.
+        let singleDeviceProperties = tapReuseProperties()
+        let singleResources = RecordingHALResources(realtimeSnapshot: TBAudioRealtimeSnapshot())
+        let singleHAL = SystemCoreAudioHAL(
+            propertyAccess: singleDeviceProperties,
+            resourceAccess: singleResources
+        )
+        let singleIntent = tapReuseIntent(routeID: "output-A", processObjectID: 42, generation: 1)
+        let singleObservation = try singleHAL.observe(
+            HALObservationRequest(intent: singleIntent)
+        )
+        let singleStarted = Date()
+        _ = try singleHAL.execute(
+            HALTransaction(
+                kind: .prepareCandidate,
+                routeID: "output-A",
+                sourceIDs: [42],
+                intent: singleIntent,
+                observation: singleObservation,
+                replacingKeysByRouteID: [:]
+            )
+        )
+        XCTAssertLessThan(Date().timeIntervalSince(singleStarted), 0.15)
+        XCTAssertEqual(singleResources.createdTapDeviceUIDs, ["device-A"])
+    }
+
     // MARK: - Process tap reuse on output switch
 
     func testProcessTapIsReusedWhenProcessAndCaptureDeviceMatchAcrossOutputSwitch() throws {
@@ -1063,6 +1241,7 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
     private(set) var sourceGains: [Float] = []
     private(set) var sourceMuteStates: [Bool] = []
     private(set) var createdTapObjectIDs: [AudioObjectID] = []
+    private(set) var createdTapDeviceUIDs: [String?] = []
     private(set) var destroyedTapObjectIDs: [AudioObjectID] = []
     private var nextTapObjectID: AudioObjectID = 77
     private let failCaptureStart: Bool
@@ -1115,6 +1294,7 @@ private final class RecordingHALResources: CoreAudioResourceAccess {
         let objectID = nextTapObjectID
         nextTapObjectID += 1
         createdTapObjectIDs.append(objectID)
+        createdTapDeviceUIDs.append(deviceUID)
         return HALTapResource(objectID: objectID, uid: "tap-\(objectID)")
     }
 

@@ -187,10 +187,32 @@ enum Permissions {
 
     // MARK: - Polling
 
+    /// Cancellation handle for an in-flight `await*` poll.
+    /// Cancelling stops the poll silently; the completion is never called.
+    final class PermissionWait {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        fileprivate init() {}
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+    }
+
+    @discardableResult
     static func awaitAccessibility(
         timeout: TimeInterval = 60,
         completion: @escaping (Bool) -> Void
-    ) {
+    ) -> PermissionWait {
         pollTrust(
             timeout: timeout,
             isTrusted: { AXIsProcessTrustedWithOptions(nil) },
@@ -198,10 +220,11 @@ enum Permissions {
         )
     }
 
+    @discardableResult
     static func awaitInputMonitoring(
         timeout: TimeInterval = 60,
         completion: @escaping (Bool) -> Void
-    ) {
+    ) -> PermissionWait {
         pollTrust(
             timeout: timeout,
             isTrusted: {
@@ -212,10 +235,23 @@ enum Permissions {
         )
     }
 
+    @discardableResult
+    static func awaitEventPosting(
+        timeout: TimeInterval = 60,
+        completion: @escaping (Bool) -> Void
+    ) -> PermissionWait {
+        pollTrust(
+            timeout: timeout,
+            isTrusted: { CGPreflightPostEventAccess() },
+            completion: completion
+        )
+    }
+
+    @discardableResult
     static func awaitMediaKeyPermissions(
         timeout: TimeInterval = 90,
         completion: @escaping (Bool) -> Void
-    ) {
+    ) -> PermissionWait {
         pollTrust(
             timeout: timeout,
             isTrusted: { isInputMonitoringTrusted && isAccessibilityTrusted },
@@ -286,19 +322,25 @@ enum Permissions {
 
     // MARK: - Private
 
+    @discardableResult
     private static func pollTrust(
         timeout: TimeInterval,
         isTrusted: @escaping () -> Bool,
         completion: @escaping (Bool) -> Void
-    ) {
+    ) -> PermissionWait {
+        let wait = PermissionWait()
         DispatchQueue.global(qos: .utility).async {
             let deadline = Date().addingTimeInterval(timeout)
             var consecutive = 0
             while Date() < deadline {
+                if wait.isCancelled { return }
                 if isTrusted() {
                     consecutive += 1
                     if consecutive >= 2 {
-                        DispatchQueue.main.async { completion(true) }
+                        DispatchQueue.main.async {
+                            guard !wait.isCancelled else { return }
+                            completion(true)
+                        }
                         return
                     }
                 } else {
@@ -306,8 +348,12 @@ enum Permissions {
                 }
                 Thread.sleep(forTimeInterval: 0.7)
             }
-            DispatchQueue.main.async { completion(false) }
+            DispatchQueue.main.async {
+                guard !wait.isCancelled else { return }
+                completion(false)
+            }
         }
+        return wait
     }
 
     private static func openPrivacyPane(anchors: [String]) {

@@ -19,6 +19,12 @@
 11. **Wi-Fi 信号** — 使用公开 CoreWLAN 每 2 秒读取当前连接的 RSSI、噪声、SNR、链路速率、信道、频段、宽度、PHY 和安全模式；弹窗提供紧凑概览，设置 → Wi-Fi 提供最近 5 分钟的 RSSI / SNR 内存曲线和完整参数。
 12. **自动更新** — 启动时及运行期间每 6 小时从 GitHub Release 检查最新正式版并自动下载，验证附件 SHA-256（GitHub 提供时）、应用版本、Bundle ID 和代码签名后提示重启安装。可在设置 → 关于切换 Beta 通道（可能不稳定）或关闭自动检查/下载；`DEV0.0.0` 开发版只检测和提醒，绝不自动下载。
 13. **剪贴板历史** — 启用后轮询记录文本和图片。使用全局剪贴板快捷键（默认 `⌃⌥V`）可在鼠标右侧打开历史面板；支持实时文本搜索、上下键选择和回车写回并尝试粘贴。图片可浏览和选择，但不参与文本搜索。历史暂存于内存中；模拟粘贴需要 macOS 辅助功能权限。
+14. **图像工具** — 菜单栏图标右键 →「图像工具」打开拖放面板，或使用 `toolbox image` 命令行：
+    - **压缩**：JPEG/PNG/HEIC/TIFF/WebP/AVIF（AVIF 需 macOS 15+）6 档质量、可选最长边缩放、元数据保留/剥离（EXIF 方向自动烘入像素）；结果不小于原文件时自动保留原件（无收益保护），覆盖写入采用临时文件原子替换并保留原文件权限与扩展属性；PNG→WebP 默认无损，保留逐位像素。
+    - **格式转换**：`--format jpeg|png|webp|avif|heic|tiff`；覆盖模式下写入新扩展名文件并先写后删源文件，也可 `--naming suffix` 加后缀另存。
+    - **换 Hash**：在格式规范保留位注入随机注释（JPEG COM/PNG tEXt/WebP JUNK/GIF Comment/HEIC-AVIF free box/TIFF 尾注），不重编码、像素逐位不变，MD5/SHA-1/SHA-256 全部变化，可重复执行；产物经系统解码校验 + 像素一致性校验后才替换。
+    - **安全边界**：动图（多帧）、HDR/宽色域/>8bit/带增益图、超过 24MP 的图像会被拒绝处理而非降级（换 Hash 不受动图与 HDR 限制）；单次最多 1000 个文件，重复输入自动去重。
+    - 命令行示例：`toolbox image compress ~/Desktop/截图 --level 4`、`toolbox image convert a.png --format webp --naming suffix`、`toolbox image rehash b.jpg --json`；支持目录递归（`--no-recursive` 仅顶层）；全部失败时退出码非零。
 
 ## 构建
 

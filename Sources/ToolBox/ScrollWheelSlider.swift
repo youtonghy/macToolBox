@@ -62,6 +62,14 @@ struct ScrollWheelValueAdjuster {
 }
 
 final class RangeExpandableSliderCell: NSSliderCell {
+    static func isDraggingTowardMaximum(
+        lastPoint: NSPoint,
+        currentPoint: NSPoint,
+        isFlipped: Bool
+    ) -> Bool {
+        isFlipped ? currentPoint.y < lastPoint.y : currentPoint.y > lastPoint.y
+    }
+
     override func continueTracking(
         last lastPoint: NSPoint,
         current currentPoint: NSPoint,
@@ -71,18 +79,44 @@ final class RangeExpandableSliderCell: NSSliderCell {
         guard let slider = controlView as? ScrollWheelNSSlider,
               slider.isVertical,
               slider.doubleValue >= slider.maxValue,
-              currentPoint.y > controlView.bounds.maxY else {
+              Self.isDraggingTowardMaximum(
+                  lastPoint: lastPoint,
+                  currentPoint: currentPoint,
+                  isFlipped: controlView.isFlipped
+              ) else {
             return shouldContinue
         }
-        slider.onRequestRangeExpansion?()
+        slider.requestRangeExpansion()
         return shouldContinue
     }
 }
 
 final class ScrollWheelNSSlider: NSSlider {
     var wheelStep = 1.0
+    var ignoresMouseClicks = false
     var onRequestRangeExpansion: (() -> Void)?
+    private(set) var isRangeExpansionPending = false
     private var wheelAdjuster = ScrollWheelValueAdjuster()
+
+    func requestRangeExpansion() {
+        guard !isRangeExpansionPending, let onRequestRangeExpansion else { return }
+        isRangeExpansionPending = true
+        onRequestRangeExpansion()
+    }
+
+    func finishRangeExpansion() {
+        isRangeExpansionPending = false
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard !ignoresMouseClicks else { return }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard !ignoresMouseClicks else { return }
+        super.mouseDragged(with: event)
+    }
 
     override func keyDown(with event: NSEvent) {
         let delta: Double
@@ -94,7 +128,7 @@ final class ScrollWheelNSSlider: NSSlider {
             return
         }
         if delta > 0, doubleValue >= maxValue {
-            onRequestRangeExpansion?()
+            requestRangeExpansion()
             return
         }
         let updated = ScrollWheelValueAdjuster.snappedValue(
@@ -135,7 +169,7 @@ final class ScrollWheelNSSlider: NSSlider {
             isEnabled: true
         )
         if event.scrollingDeltaY > 0, doubleValue >= maxValue {
-            onRequestRangeExpansion?()
+            requestRangeExpansion()
             return
         }
         if updated != doubleValue {
@@ -155,6 +189,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
     private let step: Double
     private let isVertical: Bool
     private let onRequestRangeExpansion: (() -> Void)?
+    private let ignoresMouseClicks: Bool
 
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.controlSize) private var controlSize
@@ -164,7 +199,8 @@ struct ScrollWheelSlider: NSViewRepresentable {
         in range: ClosedRange<Double>,
         step: Double = 1,
         isVertical: Bool = false,
-        onRequestRangeExpansion: (() -> Void)? = nil
+        onRequestRangeExpansion: (() -> Void)? = nil,
+        ignoresMouseClicks: Bool = false
     ) {
         precondition(range.lowerBound <= range.upperBound)
         precondition(step > 0)
@@ -173,6 +209,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
         self.step = step
         self.isVertical = isVertical
         self.onRequestRangeExpansion = onRequestRangeExpansion
+        self.ignoresMouseClicks = ignoresMouseClicks
     }
 
     func makeCoordinator() -> Coordinator {
@@ -189,6 +226,7 @@ struct ScrollWheelSlider: NSViewRepresentable {
         slider.action = #selector(Coordinator.valueChanged(_:))
         slider.isContinuous = true
         slider.isVertical = isVertical
+        slider.ignoresMouseClicks = ignoresMouseClicks
         slider.onRequestRangeExpansion = onRequestRangeExpansion
         return slider
     }
@@ -201,7 +239,9 @@ struct ScrollWheelSlider: NSViewRepresentable {
         context.coordinator.onRequestRangeExpansion = onRequestRangeExpansion
         slider.minValue = range.lowerBound
         slider.onRequestRangeExpansion = onRequestRangeExpansion
+        slider.ignoresMouseClicks = ignoresMouseClicks
         if slider.isVertical, previousMaximum != range.upperBound {
+            slider.finishRangeExpansion()
             NSAnimationContext.runAnimationGroup { animationContext in
                 animationContext.duration = 0.22
                 slider.animator().maxValue = range.upperBound

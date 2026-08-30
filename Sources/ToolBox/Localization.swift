@@ -35,6 +35,7 @@ enum L10n {
     static var openPanel: String { string("打开面板") }
     static var wipeScreen: String { string("擦屏幕") }
     static var backgroundWork: String { string("后台干") }
+    static var imageTools: String { string("图像工具") }
     static var settings: String { string("设置") }
     static var quit: String { string("退出") }
 }

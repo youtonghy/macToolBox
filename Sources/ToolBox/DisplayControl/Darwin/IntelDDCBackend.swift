@@ -35,7 +35,9 @@ final class IntelDDCBackend: DDCTransport {
         let selectedReplyTransactionType: IOOptionBits
         if let replyTransactionType {
             selectedReplyTransactionType = replyTransactionType
-        } else if let replyTransactionType = Self.supportedTransactionType() {
+        } else if let replyTransactionType = Self.supportedTransactionType(framebuffer: framebuffer)
+            ?? Self.supportedTransactionType()
+        {
             selectedReplyTransactionType = replyTransactionType
         } else {
             Self.logger.error("No supported DDC reply transaction type for display \(displayID, privacy: .public).")
@@ -251,6 +253,47 @@ final class IntelDDCBackend: DDCTransport {
         return succeeded ? replyData : nil
     }
 
+    /// Preferred: query the transaction types supported by THIS
+    /// framebuffer's I2C buses. A heterogeneous setup can expose different
+    /// bus types per display, so a global scan is only a fallback.
+    private static func supportedTransactionType(framebuffer: io_service_t) -> IOOptionBits? {
+        var busCount: IOItemCount = 0
+        guard IOFBGetI2CInterfaceCount(framebuffer, &busCount) == KERN_SUCCESS else {
+            return nil
+        }
+
+        var supportsDDCci = false
+        var supportsSimple = false
+        for bus in 0..<busCount {
+            var interface = io_service_t()
+            guard IOFBCopyI2CInterfaceForBus(framebuffer, IOOptionBits(bus), &interface) == KERN_SUCCESS else {
+                continue
+            }
+            defer { IOObjectRelease(interface) }
+
+            var properties: Unmanaged<CFMutableDictionary>?
+            guard IORegistryEntryCreateCFProperties(interface, &properties, kCFAllocatorDefault, IOOptionBits()) == KERN_SUCCESS,
+                  let dict = properties?.takeRetainedValue() as NSDictionary?,
+                  let types = dict[kIOI2CTransactionTypesKey] as? UInt64 else {
+                continue
+            }
+            if (1 << kIOI2CDDCciReplyTransactionType) & types != 0 {
+                supportsDDCci = true
+            }
+            if (1 << kIOI2CSimpleTransactionType) & types != 0 {
+                supportsSimple = true
+            }
+        }
+
+        if supportsDDCci {
+            return IOOptionBits(kIOI2CDDCciReplyTransactionType)
+        }
+        if supportsSimple {
+            return IOOptionBits(kIOI2CSimpleTransactionType)
+        }
+        return nil
+    }
+
     private static func supportedTransactionType() -> IOOptionBits? {
         var iterator = io_iterator_t()
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceNameMatching("IOFramebufferI2CInterface"), &iterator) == KERN_SUCCESS else {
@@ -315,6 +358,29 @@ final class IntelDDCBackend: DDCTransport {
         return false
     }
 
+    struct IntelFramebufferCandidate: Equatable {
+        var port: io_service_t
+        var vendor: UInt32
+        var product: UInt32
+        var serial: UInt32
+    }
+
+    /// Fail-closed framebuffer selection: exactly one candidate may match.
+    /// Multiple framebuffers sharing vendor/product/serial (typically two
+    /// identical monitors whose EDID serial is 0) cannot be distinguished, so
+    /// none is selected and the display is reported as DDC-unavailable
+    /// instead of writing to an arbitrary screen.
+    static func selectUnambiguousFramebuffer(
+        _ candidates: [IntelFramebufferCandidate],
+        displayID: CGDirectDisplayID
+    ) -> io_service_t? {
+        guard candidates.count <= 1 else {
+            Self.logger.error("Ambiguous DDC framebuffer match for display \(displayID, privacy: .public): \(candidates.count, privacy: .public) framebuffers share vendor/product/serial; failing closed.")
+            return nil
+        }
+        return candidates.first?.port
+    }
+
     private static func servicePortUsingDisplayProperties(displayID: CGDirectDisplayID) -> io_service_t? {
         var iterator = io_iterator_t()
         guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(IOFRAMEBUFFER_CONFORMSTO), &iterator) == KERN_SUCCESS else {
@@ -322,6 +388,7 @@ final class IntelDDCBackend: DDCTransport {
         }
         defer { IOObjectRelease(iterator) }
 
+        var candidates: [IntelFramebufferCandidate] = []
         while true {
             let port = IOIteratorNext(iterator)
             guard port != IO_OBJECT_NULL else { break }
@@ -333,9 +400,15 @@ final class IntelDDCBackend: DDCTransport {
                     .map { UInt32(bitPattern: $0) } ?? 0
             }
 
-            guard valueForKey(kDisplayVendorID) == CGDisplayVendorNumber(displayID),
-                  valueForKey(kDisplayProductID) == CGDisplayModelNumber(displayID),
-                  valueForKey(kDisplaySerialNumber) == CGDisplaySerialNumber(displayID) else {
+            let candidate = IntelFramebufferCandidate(
+                port: port,
+                vendor: valueForKey(kDisplayVendorID),
+                product: valueForKey(kDisplayProductID),
+                serial: valueForKey(kDisplaySerialNumber)
+            )
+            guard candidate.vendor == CGDisplayVendorNumber(displayID),
+                  candidate.product == CGDisplayModelNumber(displayID),
+                  candidate.serial == CGDisplaySerialNumber(displayID) else {
                 IOObjectRelease(port)
                 continue
             }
@@ -346,10 +419,14 @@ final class IntelDDCBackend: DDCTransport {
                 continue
             }
 
-            return port
+            candidates.append(candidate)
         }
 
-        return nil
+        let selected = selectUnambiguousFramebuffer(candidates, displayID: displayID)
+        for candidate in candidates where candidate.port != selected {
+            IOObjectRelease(candidate.port)
+        }
+        return selected
     }
 
     private static func ioFramebufferPort(displayID: CGDirectDisplayID) -> io_service_t? {

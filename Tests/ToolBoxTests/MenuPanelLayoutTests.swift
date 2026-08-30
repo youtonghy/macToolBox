@@ -227,6 +227,11 @@ final class MenuPanelLayoutTests: XCTestCase {
     }
 
     func testAudioSectionHeightStaysFixedWhileRowsScrollHorizontally() {
+        XCTAssertEqual(MenuPanelLayout.audioSectionContentHeight, 160)
+        XCTAssertEqual(
+            MenuPanelLayout.audioContentHeight(rowCount: 3, isLiteMode: true),
+            MenuPanelLayout.liteAudioSectionContentHeight
+        )
         XCTAssertEqual(
             MenuPanelLayout.audioContentHeight(rowCount: 3),
             MenuPanelLayout.audioSectionContentHeight

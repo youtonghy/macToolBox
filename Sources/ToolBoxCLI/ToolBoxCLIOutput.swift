@@ -78,11 +78,38 @@ struct ToolBoxCLIResponseRenderer {
                 exitStatus: ToolBoxCLIExitStatus.failure
             )
         }
+        let rendered = renderHumanResult(result)
+        // 图像命令：全部项失败时应以非零码退出，便于脚本感知。
+        if let exitStatus = imageBatchExitStatus(result) {
+            return ToolBoxCLIRenderedOutput(
+                standardOutput: rendered,
+                standardError: standardError,
+                exitStatus: exitStatus
+            )
+        }
         return ToolBoxCLIRenderedOutput(
-            standardOutput: renderHumanResult(result),
+            standardOutput: rendered,
             standardError: standardError,
             exitStatus: ToolBoxCLIExitStatus.success
         )
+    }
+
+    /// 图像批量命令的退出码：items 非空且全部 failed/unsupported → 失败。
+    private func imageBatchExitStatus(_ result: ToolBoxControlResult) -> Int32? {
+        switch result {
+        case let .imageProcess(payload):
+            guard !payload.items.isEmpty || payload.truncatedItemCount > 0 else { return nil }
+            let allFailed = payload.items.allSatisfy { $0.kind == .failed || $0.kind == .unsupported }
+                && payload.truncatedItemCount == 0
+            return allFailed ? ToolBoxCLIExitStatus.failure : nil
+        case let .imageRehash(payload):
+            guard !payload.items.isEmpty || payload.truncatedItemCount > 0 else { return nil }
+            let allFailed = payload.items.allSatisfy { $0.kind == .failed || $0.kind == .unsupported }
+                && payload.truncatedItemCount == 0
+            return allFailed ? ToolBoxCLIExitStatus.failure : nil
+        default:
+            return nil
+        }
     }
 
     func renderClientError(
@@ -207,7 +234,79 @@ struct ToolBoxCLIResponseRenderer {
             return "防休眠：\(onOff(state.isEnabled))\n"
         case let .launchAtLogin(state):
             return "登录时启动：\(onOff(state.isEnabled))\n"
+        case let .imageProcess(result):
+            return renderImageProcessResult(result)
+        case let .imageRehash(result):
+            return renderImageRehashResult(result)
         }
+    }
+
+    private func renderImageProcessResult(_ result: ToolBoxImageProcessResultDTO) -> String {
+        guard !result.items.isEmpty || result.truncatedItemCount > 0 else { return "未找到受支持的图像文件\n" }
+        var lines: [String] = []
+        for item in result.items {
+            let name = (item.source as NSString).lastPathComponent
+            switch item.kind {
+            case .replaced:
+                lines.append("✓ \(name)：\(formatBytes(item.originalBytes)) → \(formatBytes(item.resultBytes))")
+            case .savedAs:
+                let target = ((item.target ?? "") as NSString).lastPathComponent
+                lines.append("✓ \(name) → \(target)：\(formatBytes(item.originalBytes)) → \(formatBytes(item.resultBytes))")
+            case .converted:
+                let target = ((item.target ?? "") as NSString).lastPathComponent
+                lines.append("✓ \(name) → \(target)（源文件已删除）：\(formatBytes(item.originalBytes)) → \(formatBytes(item.resultBytes))")
+            case .noBenefit:
+                lines.append("− \(name)：\(item.detail ?? "结果不小于原文件，已保留原件")")
+            case .unsupported:
+                lines.append("! \(name)：\(item.detail ?? "不支持")")
+            case .failed:
+                lines.append("✗ \(name)：\(item.detail ?? "处理失败")")
+            }
+        }
+        if result.truncatedItemCount > 0 {
+            lines.append("… 结果列表已截断，另有 \(result.truncatedItemCount) 项未列出")
+        }
+        let succeeded = result.items.filter {
+            $0.kind == .replaced || $0.kind == .savedAs || $0.kind == .converted
+        }.count
+        lines.append("")
+        lines.append("共 \(result.items.count + result.truncatedItemCount) 个文件，成功 \(succeeded) 个，节省 \(formatBytes(result.totalBytesSaved))")
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func renderImageRehashResult(_ result: ToolBoxImageRehashResultDTO) -> String {
+        guard !result.items.isEmpty || result.truncatedItemCount > 0 else { return "未找到受支持的图像文件\n" }
+        var lines: [String] = []
+        for item in result.items {
+            let name = (item.source as NSString).lastPathComponent
+            switch item.kind {
+            case .replaced:
+                lines.append("✓ \(name)")
+                lines.append("  前 MD5  \(item.before?.md5 ?? "")")
+                lines.append("  后 MD5  \(item.after?.md5 ?? "")")
+                lines.append("  后 SHA-256  \(item.after?.sha256 ?? "")")
+            case .unsupported:
+                lines.append("! \(name)：\(item.detail ?? "不支持")")
+            case .failed:
+                lines.append("✗ \(name)：\(item.detail ?? "处理失败")")
+            case .noBenefit, .savedAs, .converted:
+                break
+            }
+        }
+        if result.truncatedItemCount > 0 {
+            lines.append("… 结果列表已截断，另有 \(result.truncatedItemCount) 项未列出")
+        }
+        let succeeded = result.items.filter { $0.kind == .replaced }.count
+        lines.append("")
+        lines.append("共 \(result.items.count + result.truncatedItemCount) 个文件，换 Hash 成功 \(succeeded) 个（像素未变）")
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    private func formatBytes(_ bytes: Int) -> String {
+        guard bytes >= 0 else { return "\(bytes) B" }
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(bytes))
     }
 
     private func renderDisplaySummary(_ display: ToolBoxDisplayDTO) -> String {

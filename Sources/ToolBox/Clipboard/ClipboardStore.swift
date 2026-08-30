@@ -22,11 +22,21 @@ final class ClipboardStore: ObservableObject {
         cleanupTimer?.invalidate()
     }
 
-    /// Add new item or update timestamp if duplicate hash exists
-    func addOrUpdate(hash: String, text: String?, image: Data?, types: Set<NSPasteboard.PasteboardType>) {
+    /// Add new item or update timestamp if duplicate hash exists.
+    ///
+    /// Returns false when the item alone exceeds the memory limit; in that
+    /// case nothing is stored and the existing history is left untouched.
+    @discardableResult
+    func addOrUpdate(
+        hash: String,
+        text: String?,
+        image: Data?,
+        types: Set<NSPasteboard.PasteboardType>,
+        imageType: NSPasteboard.PasteboardType? = nil
+    ) -> Bool {
         // Check for duplicate
         if let existingIndex = items.firstIndex(where: { $0.contentHash == hash }) {
-            // Update timestamp of existing item
+            // Update timestamp of existing item, keeping its stored payload
             let existing = items[existingIndex]
             let updated = ClipboardItem(
                 id: existing.id,
@@ -34,11 +44,12 @@ final class ClipboardStore: ObservableObject {
                 contentHash: existing.contentHash,
                 types: existing.types,
                 textContent: existing.textContent,
-                imageData: existing.imageData
+                imageData: existing.imageData,
+                imageType: existing.imageType
             )
             items.remove(at: existingIndex)
             items.insert(updated, at: 0)
-            return
+            return true
         }
 
         // Create new item
@@ -46,8 +57,13 @@ final class ClipboardStore: ObservableObject {
             contentHash: hash,
             types: types,
             textContent: text,
-            imageData: image
+            imageData: image,
+            imageType: imageType
         )
+
+        // A single item larger than the whole budget can never fit; reject it
+        // instead of evicting the entire history and still exceeding the limit.
+        guard item.estimatedSize <= memoryLimit else { return false }
 
         // Check memory limit before adding
         if currentMemoryUsage + item.estimatedSize > memoryLimit {
@@ -57,6 +73,7 @@ final class ClipboardStore: ObservableObject {
         // Insert at beginning (most recent first)
         items.insert(item, at: 0)
         currentMemoryUsage += item.estimatedSize
+        return true
     }
 
     /// Remove items from oldest until enough space is available

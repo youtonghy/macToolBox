@@ -135,7 +135,10 @@ enum DDCFeatureReplyParser {
 
         let maximum = UInt16(bytes[6]) << 8 | UInt16(bytes[7])
         let current = UInt16(bytes[8]) << 8 | UInt16(bytes[9])
-        guard maximum != .max || current != .max else {
+        // 0xFFFF in either field is the MCCS "no value" sentinel; a reply that
+        // uses it in only one field is equally invalid and must be rejected
+        // instead of being clamped into a plausible value downstream.
+        guard maximum != .max, current != .max else {
             return .failure(.invalidSentinel)
         }
         return .success(

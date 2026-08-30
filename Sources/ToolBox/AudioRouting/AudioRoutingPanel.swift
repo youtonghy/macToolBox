@@ -39,7 +39,11 @@ struct AudioRoutingPanel: View {
             ScrollWheelSlider(
                 value: Binding(
                     get: { Double(row.volumePercent) },
-                    set: { service.setVolume(bundleID: row.bundleID, percent: Int($0.rounded())) }
+                    set: { value in
+                        let percent = Int(value.rounded())
+                        service.setVolume(bundleID: row.bundleID, percent: percent)
+                        updateRange(for: row.bundleID, volume: percent, currentMaximum: maxPercent)
+                    }
                 ),
                 in: 0...Double(maxPercent),
                 step: 1,
@@ -52,7 +56,7 @@ struct AudioRoutingPanel: View {
                 }
             )
             .controlSize(.small)
-            .frame(width: 22, height: 76)
+            .frame(width: 22, height: 100)
             .help("音量 \(row.volumePercent)%（0–300%）")
 
             Text("\(row.volumePercent)%")
@@ -73,39 +77,50 @@ struct AudioRoutingPanel: View {
             .accessibilityHint(statusDescription(for: row.state))
         }
         .padding(.vertical, 2)
-        .frame(width: 58, height: 108)
+        .frame(width: 58, height: 152)
+        .onChange(of: row.volumePercent) { _, volume in
+            updateRange(for: row.bundleID, volume: volume, currentMaximum: maxPercent)
+        }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.name)，音量 \(row.volumePercent)%，\(statusDescription(for: row.state))")
     }
 
+    private func updateRange(for bundleID: String, volume: Int, currentMaximum: Int) {
+        let nextMaximum = AudioVolumeScale.initialMaximum(for: volume)
+        guard nextMaximum != currentMaximum else { return }
+        withAnimation(.easeOut(duration: 0.22)) {
+            expandedRanges[bundleID] = nextMaximum
+        }
+    }
+
     private func liteAudioRow(_ row: AudioRoutingRow) -> some View {
-        VStack(spacing: 5) {
-            Button {
-                service.setVolume(bundleID: row.bundleID, percent: 100)
-            } label: {
-                appIcon(for: row)
-            }
-            .buttonStyle(.plain)
-            .help(iconHelp(for: row))
-
-            Text("\(row.volumePercent)%")
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.secondary)
-                .frame(width: 48)
-
+        ZStack {
             ScrollWheelSlider(
                 value: Binding(
                     get: { Double(row.volumePercent) },
                     set: { service.setVolume(bundleID: row.bundleID, percent: Int($0.rounded())) }
                 ),
                 in: 0...300,
-                step: 1
+                step: 1,
+                ignoresMouseClicks: true
             )
-            .frame(width: 42, height: 12)
-            .opacity(0.02)
+            .frame(width: 58, height: 78)
+            .opacity(0)
+            .contentShape(Rectangle())
             .help("点击后使用滚轮或上下键调节音量")
+
+            VStack(spacing: 5) {
+                appIcon(for: row)
+
+                Text("\(row.volumePercent)%")
+                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 48)
+            }
+            .allowsHitTesting(false)
         }
         .frame(width: 58, height: 78)
+        .contentShape(Rectangle())
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(row.name)，音量 \(row.volumePercent)%")
     }
@@ -185,6 +200,7 @@ enum AudioVolumeScale {
         default: nil
         }
     }
+
 }
 
 enum AppIconResolver {

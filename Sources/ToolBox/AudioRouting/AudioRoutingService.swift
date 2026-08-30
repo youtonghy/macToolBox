@@ -33,14 +33,7 @@ private struct TerminalRouteFailure {
     let message: String
     let failedAt: Date
     let retryCount: Int
-    
-    func incrementingRetry(now: Date) -> TerminalRouteFailure {
-        TerminalRouteFailure(
-            message: message,
-            failedAt: now,
-            retryCount: retryCount + 1
-        )
-    }
+    let bundleIDs: Set<String>
 }
 
 struct PendingTaskOwnership<Key: Hashable> {
@@ -98,6 +91,10 @@ struct PendingTaskOwnership<Key: Hashable> {
 @MainActor
 final class AudioRoutingService: ObservableObject {
     static let liteModeDefaultsKey = "audioRouting.liteMode"
+    /// Bounded retry policy for terminal route failures, shared by the activity-edge
+    /// fast path (`recoverTerminalRouteIfNeeded`) and the cooldown-driven retry timer.
+    private static let terminalRouteRetryLimit = 3
+    private let terminalRouteRetryCooldown: TimeInterval
 
     @Published private(set) var rows: [AudioRoutingRow] = []
     /// Menu-bar mixer: only apps that are currently (or recently) playing.
@@ -145,7 +142,9 @@ final class AudioRoutingService: ObservableObject {
     private var audioServerRestartSession: UInt64?
     private var suppressedRestartRegistrySnapshot: AudioRoutingRegistrySnapshot?
     private var stalledPollCounts: [String: Int] = [:]
+    private var captureStalledPollCounts: [String: Int] = [:]
     private var terminalRouteFailures: [String: TerminalRouteFailure] = [:]
+    private var terminalRouteRetryTask: Task<Void, Never>?
     private var pendingRulePersistenceTask: Task<Void, Never>?
     private var pendingVolumeApplyTasks: [String: Task<Void, Never>] = [:]
     private var pendingVolumeTaskOwnership = PendingTaskOwnership<String>()
@@ -172,6 +171,7 @@ final class AudioRoutingService: ObservableObject {
         engine: (any AudioRouteEngineControlling)? = nil,
         persistenceDelay: Duration = .milliseconds(200),
         recentlyActiveWindow: TimeInterval = AudioAppListVisibility.recentlyActiveWindow,
+        terminalRouteRetryCooldown: TimeInterval = 5.0,
         now: @escaping () -> Date = Date.init
     ) {
         self.ruleStore = ruleStore
@@ -180,6 +180,7 @@ final class AudioRoutingService: ObservableObject {
         self.engine = engine
         self.persistenceDelay = persistenceDelay
         self.recentlyActiveWindow = recentlyActiveWindow
+        self.terminalRouteRetryCooldown = terminalRouteRetryCooldown
         self.nowProvider = now
         self.isLiteMode = UserDefaults.standard.bool(forKey: Self.liteModeDefaultsKey)
         // Initialize PendingTaskOwnership with timeout and nowProvider
@@ -197,7 +198,22 @@ final class AudioRoutingService: ObservableObject {
                 engine = AudioRouteController(
                     nativeEngine: SwiftAudioRouteEngineAdapter(
                         runtime: AudioRouteRuntime(hal: SystemCoreAudioHAL())
-                    )
+                    ),
+                    onCleanupRecovered: { [weak self] in
+                        await MainActor.run { [weak self] in
+                            guard let self, self.started else { return }
+                            let session = self.serviceSession
+                            Task { @MainActor [weak self] in
+                                guard let self, self.isCurrentSession(session) else { return }
+                                await self.reconcile(
+                                    processes: self.processRegistry.snapshot,
+                                    devices: self.deviceRegistry.snapshot,
+                                    defaultOutputUID: self.deviceRegistry.defaultOutputUID,
+                                    session: session
+                                )
+                            }
+                        }
+                    }
                 )
             } else {
                 capabilityError = "分应用音频需要 macOS 14.2 或更高版本。"
@@ -589,6 +605,7 @@ final class AudioRoutingService: ObservableObject {
                 processes: latestProcesses,
                 devices: devices
             )
+            recordReconcileFailure(compilation: compilation, message: message)
             routeError = "音频路由启动失败：\(message)"
         case let .cleanupBlocked(message):
             applyFailedReconcileState(
@@ -803,13 +820,13 @@ final class AudioRoutingService: ObservableObject {
         let now = nowProvider()
         let shouldRecover = recoveryCompilation.plans.contains { plan in
             guard let failure = terminalRouteFailures[plan.id] else { return false }
-            
-            // Give up after 3 retries
-            guard failure.retryCount < 3 else { return false }
-            
-            // Enforce 5-second cooldown between retry attempts
+
+            // Give up after the bounded retry limit
+            guard failure.retryCount < Self.terminalRouteRetryLimit else { return false }
+
+            // Enforce the cooldown between retry attempts
             let timeSinceFailure = now.timeIntervalSince(failure.failedAt)
-            return timeSinceFailure >= 5.0
+            return timeSinceFailure >= terminalRouteRetryCooldown
         }
         guard shouldRecover else { return }
 
@@ -822,6 +839,95 @@ final class AudioRoutingService: ObservableObject {
                 session: session
             )
         }
+    }
+
+    private func recordReconcileFailure(
+        compilation: AudioRouteCompilation,
+        message: String
+    ) {
+        let bundleIDsByRouteID = Dictionary(
+            grouping: compilation.resolutions.compactMap { resolution -> (String, String)? in
+                guard case let .planned(routeID?) = resolution.state else { return nil }
+                return (routeID, resolution.bundleID)
+            },
+            by: { $0.0 }
+        ).mapValues { Set($0.map { $0.1 }) }
+        guard !bundleIDsByRouteID.isEmpty else { return }
+        recordRouteFailures(
+            bundleIDsByRouteID: bundleIDsByRouteID,
+            messagesByRouteID: Dictionary(
+                uniqueKeysWithValues: bundleIDsByRouteID.keys.map { ($0, message) }
+            ),
+            now: nowProvider()
+        )
+        scheduleTerminalRouteRetry(session: serviceSession)
+    }
+
+    /// Records (or advances) terminal failures keyed by route ID. Each attempt
+    /// refreshes the failure time and the affected bundle set so the cooldown-driven
+    /// retry always evaluates the currently routed sources.
+    private func recordRouteFailures(
+        bundleIDsByRouteID: [String: Set<String>],
+        messagesByRouteID: [String: String],
+        now: Date
+    ) {
+        for (routeID, bundleIDs) in bundleIDsByRouteID {
+            let message = messagesByRouteID[routeID] ?? "音频路由异常"
+            let retryCount = terminalRouteFailures[routeID]?.retryCount ?? 0
+            terminalRouteFailures[routeID] = TerminalRouteFailure(
+                message: message,
+                failedAt: now,
+                retryCount: retryCount + (terminalRouteFailures[routeID] == nil ? 0 : 1),
+                bundleIDs: bundleIDs
+            )
+        }
+    }
+
+    /// Cooldown-driven retry for terminal route failures. A player that keeps running
+    /// (`pir?`/`piro` steady) never produces the activity edge that
+    /// `recoverTerminalRouteIfNeeded` needs, so without this timer its route stays
+    /// failed until the user replays or touches the slider.
+    private func scheduleTerminalRouteRetry(session: UInt64) {
+        terminalRouteRetryTask?.cancel()
+        terminalRouteRetryTask = nil
+        guard !terminalRouteFailures.isEmpty else { return }
+        let nextAttemptDate = terminalRouteFailures.values
+            .filter { $0.retryCount < Self.terminalRouteRetryLimit }
+            .map { $0.failedAt.addingTimeInterval(terminalRouteRetryCooldown) }
+            .min()
+        guard let nextAttemptDate else { return }
+        let delay = max(0.05, nextAttemptDate.timeIntervalSince(nowProvider()))
+        terminalRouteRetryTask = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, let self, self.isCurrentSession(session) else { return }
+            self.terminalRouteRetryTask = nil
+            await self.attemptTerminalRouteRecovery(session: session)
+        }
+    }
+
+    private func attemptTerminalRouteRecovery(session: UInt64) async {
+        guard !terminalRouteFailures.isEmpty else { return }
+        let now = nowProvider()
+        let hasEligibleFailure = terminalRouteFailures.values.contains {
+            $0.retryCount < Self.terminalRouteRetryLimit
+                && now.timeIntervalSince($0.failedAt) >= terminalRouteRetryCooldown
+        }
+        guard hasEligibleFailure else { return }
+        let producingBundleIDs = Set(latestProcesses.filter(\.isRunningOutput).map(\.bundleID))
+        let affectedBundlesStillActive = terminalRouteFailures.values
+            .flatMap(\.bundleIDs)
+            .contains { producingBundleIDs.contains($0) }
+        guard affectedBundlesStillActive else { return }
+        await reconcile(
+            processes: processRegistry.snapshot,
+            devices: deviceRegistry.snapshot,
+            defaultOutputUID: deviceRegistry.defaultOutputUID,
+            session: session
+        )
     }
 
     private static func preferProcessForPresentation(
@@ -1064,20 +1170,30 @@ final class AudioRoutingService: ObservableObject {
             let isProducingOutput = plan.sources.contains {
                 producingOutputBundleIDs.contains($0.bundleID)
             }
-            // Only count polls that could indicate a broken route. A paused app stops
+            // Track capture and output stalls independently. A paused app stops
             // capture frames but should keep advancing output frames while the IOProc is
-            // alive; a stopped output counter is a dead route regardless of HAL activity.
-            let didStall = snapshot.map { current in
-                previous.map { previous in
-                    current.outputFrameCount == previous.outputFrameCount
-                } ?? false
-            } ?? false
-            stalledPollCounts[plan.id] = didStall ? (stalledPollCounts[plan.id, default: 0] + 1) : 0
+            // alive; conversely a broken tap freezes only capture while output keeps
+            // draining silence — each side needs its own stall counter, otherwise one
+            // advancing side permanently resets the other's count and hides the fault.
+            let outputStalled: Bool
+            let captureStalled: Bool
+            if let snapshot, let previous {
+                outputStalled = snapshot.outputFrameCount == previous.outputFrameCount
+                captureStalled = snapshot.captureFrameCount == previous.captureFrameCount
+            } else {
+                outputStalled = false
+                captureStalled = false
+            }
+            stalledPollCounts[plan.id] = outputStalled ? (stalledPollCounts[plan.id, default: 0] + 1) : 0
+            captureStalledPollCounts[plan.id] = captureStalled
+                ? (captureStalledPollCounts[plan.id, default: 0] + 1)
+                : 0
             healthByRouteID[plan.id] = AudioRouteDiagnosticsEvaluator.evaluate(
                 snapshot: snapshot,
                 previous: previous,
                 startupPollCount: watchdogPollCount,
-                consecutiveStalledPollCount: stalledPollCounts[plan.id, default: 0],
+                consecutiveOutputStalledPollCount: stalledPollCounts[plan.id, default: 0],
+                consecutiveCaptureStalledPollCount: captureStalledPollCounts[plan.id, default: 0],
                 sourceIsProducingOutput: isProducingOutput
             )
         }
@@ -1101,19 +1217,24 @@ final class AudioRoutingService: ObservableObject {
             switch report.status {
             case .applied, .unchanged:
                 appliedPlans = report.plans
-                // Record failures with timestamp and retry count
+                // Record failures with timestamp, retry count, and the bundles that
+                // lost their route so the cooldown-driven retry can check whether any
+                // affected source is still actively playing.
                 let now = nowProvider()
-                for (routeID, message) in failedRouteMessages {
-                    if let existing = terminalRouteFailures[routeID] {
-                        terminalRouteFailures[routeID] = existing.incrementingRetry(now: now)
-                    } else {
-                        terminalRouteFailures[routeID] = TerminalRouteFailure(
-                            message: message,
-                            failedAt: now,
-                            retryCount: 0
-                        )
-                    }
-                }
+                let bundleIDsByFailedRouteID = Dictionary(
+                    grouping: compilation.plans
+                        .filter { failedRouteMessages[$0.id] != nil }
+                        .flatMap { plan in
+                            plan.sources.map { (plan.id, $0.bundleID) }
+                        },
+                    by: { $0.0 }
+                ).mapValues { Set($0.map { $0.1 }) }
+                recordRouteFailures(
+                    bundleIDsByRouteID: bundleIDsByFailedRouteID,
+                    messagesByRouteID: failedRouteMessages,
+                    now: now
+                )
+                scheduleTerminalRouteRetry(session: serviceSession)
                 watchdogCompilation = AudioRouteCompilation(
                     plans: remainingPlans,
                     resolutions: compilation.resolutions
@@ -1122,6 +1243,9 @@ final class AudioRoutingService: ObservableObject {
                     failedRouteMessages[$0.key] == nil
                 }
                 stalledPollCounts = stalledPollCounts.filter {
+                    failedRouteMessages[$0.key] == nil
+                }
+                captureStalledPollCounts = captureStalledPollCounts.filter {
                     failedRouteMessages[$0.key] == nil
                 }
                 routeError = failedRouteMessages.values.sorted().joined(separator: "；")
@@ -1230,6 +1354,7 @@ final class AudioRoutingService: ObservableObject {
             for plan in report.plans {
                 previousDiagnostics[plan.id] = nil
                 stalledPollCounts[plan.id] = 0
+                captureStalledPollCounts[plan.id] = 0
             }
             routeError = nil
             watchdogGeneration = generation
@@ -1277,6 +1402,7 @@ final class AudioRoutingService: ObservableObject {
         watchdogPollCount = 0
         previousDiagnostics = [:]
         stalledPollCounts = [:]
+        captureStalledPollCounts = [:]
     }
 
     private func isCurrentSession(_ session: UInt64?) -> Bool {

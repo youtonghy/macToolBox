@@ -18,6 +18,7 @@ struct ToolBoxCLI: ParsableCommand {
             ToolBoxAudioCommand.self,
             ToolBoxAwakeCommand.self,
             ToolBoxLaunchAtLoginCommand.self,
+            ToolBoxImageCommand.self,
             ToolBoxInstallCommand.self,
             ToolBoxUninstallCommand.self,
         ]

@@ -47,7 +47,7 @@ final class DisplayControlMenuModelTests: XCTestCase {
 
         let model = DisplayControlMenuModel(service: service)
         model.start()
-        XCTAssertEqual(model.statusText, "DDC write-only - current values estimated")
+        XCTAssertEqual(model.statusText, L10n.string("DDC 只写模式，当前值为估算值"))
         model.setValue(kind: .brightness, value: 0.3)
         model.setValue(kind: .brightness, value: 0.7)
 

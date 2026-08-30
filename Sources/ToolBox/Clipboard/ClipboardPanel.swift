@@ -2,17 +2,20 @@ import AppKit
 import SwiftUI
 import ApplicationServices
 import Combine
+import os
 
 @MainActor
 final class ClipboardPanelModel: ObservableObject {
     @Published var query = "" { didSet { normalizeSelection() } }
-    @Published private(set) var selectedIndex: Int?
+    /// Selection tracked by item identity so list mutations (head inserts,
+    /// dedup reordering) never silently rebind what Enter will paste.
+    @Published private(set) var selectedItemID: ClipboardItem.ID?
     let store: ClipboardStore
     private var storeCancellable: AnyCancellable?
 
     init(store: ClipboardStore) {
         self.store = store
-        selectedIndex = store.items.isEmpty ? nil : 0
+        selectedItemID = store.items.first?.id
         storeCancellable = store.objectWillChange.sink { [weak self] _ in
             Task { @MainActor [weak self] in
                 self?.normalizeSelection()
@@ -30,9 +33,14 @@ final class ClipboardPanelModel: ObservableObject {
         }
     }
 
+    var selectedIndex: Int? {
+        guard let selectedItemID else { return nil }
+        return filteredItems.firstIndex(where: { $0.id == selectedItemID })
+    }
+
     var selectedItem: ClipboardItem? {
-        guard let selectedIndex, filteredItems.indices.contains(selectedIndex) else { return nil }
-        return filteredItems[selectedIndex]
+        guard let selectedItemID else { return nil }
+        return filteredItems.first(where: { $0.id == selectedItemID })
     }
 
     var listHeight: CGFloat {
@@ -42,22 +50,26 @@ final class ClipboardPanelModel: ObservableObject {
     var panelHeight: CGFloat { listHeight + 62 }
 
     func moveSelection(by offset: Int) {
-        let count = filteredItems.count
-        guard count > 0 else { selectedIndex = nil; return }
+        let items = filteredItems
+        guard !items.isEmpty else { selectedItemID = nil; return }
         let current = selectedIndex ?? 0
-        selectedIndex = (current + offset + count) % count
+        let next = (current + offset + items.count) % items.count
+        selectedItemID = items[next].id
     }
 
-    func selectFirst() { selectedIndex = filteredItems.isEmpty ? nil : 0 }
+    func selectFirst() { selectedItemID = filteredItems.first?.id }
     func select(index: Int) {
         guard filteredItems.indices.contains(index) else { return }
-        selectedIndex = index
+        selectedItemID = filteredItems[index].id
     }
 
     private func normalizeSelection() {
-        let count = filteredItems.count
-        guard count > 0 else { selectedIndex = nil; return }
-        selectedIndex = min(selectedIndex ?? 0, count - 1)
+        let items = filteredItems
+        guard !items.isEmpty else { selectedItemID = nil; return }
+        if let selectedItemID, items.contains(where: { $0.id == selectedItemID }) { return }
+        // Tracked item disappeared (expired / evicted / cleared): fall back
+        // to the first row.
+        selectedItemID = items[0].id
     }
 }
 
@@ -68,7 +80,7 @@ struct ClipboardPanelView: View {
 
     var body: some View {
         VStack(spacing: 8) {
-            TextField("搜索剪贴板", text: $model.query)
+            TextField(L10n.string("搜索剪贴板"), text: $model.query)
                 .textFieldStyle(.roundedBorder)
                 .lineLimit(1)
                 .focused($searchFocused)
@@ -78,13 +90,13 @@ struct ClipboardPanelView: View {
                     LazyVStack(spacing: 4) {
                         if model.filteredItems.isEmpty {
                             ContentUnavailableView(
-                                model.query.isEmpty ? "暂无剪贴板历史" : "没有匹配结果",
+                                model.query.isEmpty ? L10n.string("暂无剪贴板历史") : L10n.string("没有匹配结果"),
                                 systemImage: model.query.isEmpty ? "clipboard" : "magnifyingglass"
                             )
                             .frame(maxWidth: .infinity, minHeight: model.listHeight)
                         } else {
                             ForEach(Array(model.filteredItems.enumerated()), id: \.element.id) { index, item in
-                                ClipboardRow(item: item, selected: index == model.selectedIndex)
+                                ClipboardRow(item: item, selected: item.id == model.selectedItemID)
                                     .id(item.id)
                                     .contentShape(Rectangle())
                                     .onTapGesture { model.select(index: index) }
@@ -103,9 +115,9 @@ struct ClipboardPanelView: View {
                             .padding(.trailing, 1)
                     }
                 }
-                .onChange(of: model.selectedIndex) { _, index in
-                    if let index, model.filteredItems.indices.contains(index) {
-                        proxy.scrollTo(model.filteredItems[index].id, anchor: .center)
+                .onChange(of: model.selectedItemID) { _, id in
+                    if let id {
+                        proxy.scrollTo(id, anchor: .center)
                     }
                 }
             }
@@ -142,10 +154,10 @@ private struct ClipboardRow: View {
                 Image(systemName: "doc.on.clipboard").frame(width: 28)
             }
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.isImage ? "图片" : (item.textContent ?? "未知内容"))
+                Text(item.isImage ? L10n.string("图片") : (item.textContent ?? L10n.string("未知内容")))
                     .lineLimit(2)
                 if item.isImage {
-                    Text("图像剪贴板")
+                    Text(L10n.string("图像剪贴板"))
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -238,12 +250,16 @@ final class ClipboardPanelController: NSWindowController, NSWindowDelegate {
     }
 
     private func activate(_ item: ClipboardItem) {
-        pasteService.write(item)
+        let changeCount = pasteService.write(item)
         close()
-        pasteService.paste(into: targetApplication)
+        pasteService.paste(into: targetApplication, changeCount: changeCount)
     }
 
     override func close() {
+        // Supersede any permission wait still polling from a previous paste,
+        // and stop pending pastes entirely when the feature is disabled
+        // (ClipboardCoordinator.stop() closes a presented panel here).
+        pasteService.cancelPendingPaste()
         monitors.forEach { NSEvent.removeMonitor($0) }
         monitors.removeAll()
         window?.orderOut(nil)
@@ -258,38 +274,153 @@ private final class ClipboardPanel: NSPanel {
 }
 
 final class ClipboardPasteService {
-    func write(_ item: ClipboardItem, to pasteboard: NSPasteboard = .general) {
+    private static let logger = Logger(subsystem: "ToolBox", category: "ClipboardPaste")
+
+    /// In-flight permission wait. Superseded by each new paste and cancelled
+    /// on close, so stacked Cmd-V sends are impossible.
+    private var pendingWait: Permissions.PermissionWait?
+
+    /// Monotonic paste generation. Every paste captures the current value and
+    /// re-validates it before acting. Cancelling bumps the value so ALL
+    /// in-flight callbacks — permission waits and the delayed Cmd-V closure
+    /// (which a cancel cannot reach directly) — become no-ops.
+    private var pasteGeneration = 0
+
+    /// Writes the item and returns the pasteboard changeCount snapshot, so a
+    /// delayed paste can detect that the user copied something else meanwhile.
+    @discardableResult
+    func write(_ item: ClipboardItem, to pasteboard: NSPasteboard = .general) -> Int {
         pasteboard.clearContents()
         if let text = item.textContent { pasteboard.setString(text, forType: .string) }
-        if let image = item.imageData { pasteboard.setData(image, forType: .png) }
+        if let image = item.imageData {
+            // Declare the type the bytes were actually captured as; writing
+            // TIFF bytes as PNG breaks strict decoders in target apps. The
+            // fallback only fires for items built outside the capture path
+            // with unrecognized bytes — an explicit, documented last resort.
+            pasteboard.setData(image, forType: item.imageType ?? .png)
+        }
+        return pasteboard.changeCount
     }
 
-    func paste(into application: NSRunningApplication?) {
+    func cancelPendingPaste() {
+        // Invalidate every in-flight callback first: a cancel alone cannot
+        // stop a completion already dispatched to the main queue, nor the
+        // delayed Cmd-V closure.
+        pasteGeneration += 1
+        pendingWait?.cancel()
+        pendingWait = nil
+    }
+
+    func paste(into application: NSRunningApplication?, changeCount: Int) {
         guard let application else { return }
+        // One in-flight paste at a time: supersede any earlier wait so repeated
+        // Enter presses can never stack multiple Cmd-V sends.
+        cancelPendingPaste()
+        let generation = pasteGeneration
         application.activate()
         // Enter is an explicit user action, so this is an appropriate time to
         // register the app with TCC and request the required permissions.
         guard Permissions.isAccessibilityTrusted else {
             _ = Permissions.requestAccessibilityOnce()
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard Permissions.isAccessibilityTrusted else { return }
-                self?.sendCommandV()
+            // The TCC prompt can take a while to complete; poll up to 60s
+            // instead of a single 0.5s check that silently abandons the paste.
+            pendingWait = Permissions.awaitAccessibility(timeout: 60) { [weak self] granted in
+                guard let self else { return }
+                guard self.pasteGeneration == generation else { return }
+                guard granted else {
+                    Self.logger.warning("Accessibility not granted within 60s; paste abandoned")
+                    return
+                }
+                self.requestEventPostingThenSend(
+                    application: application,
+                    changeCount: changeCount,
+                    generation: generation
+                )
             }
             return
         }
-        guard Permissions.canPostEvents || Permissions.requestEventPosting() else {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard Permissions.canPostEvents else { return }
-                self?.sendCommandV()
-            }
-            return
-        }
-        sendCommandV()
+        requestEventPostingThenSend(application: application, changeCount: changeCount, generation: generation)
     }
 
-    private func sendCommandV() {
+    private func requestEventPostingThenSend(
+        application: NSRunningApplication,
+        changeCount: Int,
+        generation: Int
+    ) {
+        guard Permissions.canPostEvents || Permissions.requestEventPosting() else {
+            pendingWait = Permissions.awaitEventPosting(timeout: 60) { [weak self] granted in
+                guard let self else { return }
+                guard self.pasteGeneration == generation else { return }
+                guard granted else {
+                    Self.logger.warning("Event posting not granted within 60s; paste abandoned")
+                    return
+                }
+                self.sendCommandV(application: application, changeCount: changeCount, generation: generation)
+            }
+            return
+        }
+        sendCommandV(application: application, changeCount: changeCount, generation: generation)
+    }
+
+    private func sendCommandV(application: NSRunningApplication, changeCount: Int, generation: Int) {
+        guard pasteGeneration == generation else { return }
+        // The user may have copied something else while we waited for TCC;
+        // pasting now would emit the wrong content.
+        guard NSPasteboard.general.changeCount == changeCount else {
+            Self.logger.info("Pasteboard overwritten while waiting for permissions; paste abandoned")
+            return
+        }
+        activateAndSend(application: application, changeCount: changeCount, generation: generation, attempt: 0)
+    }
+
+    /// Bounded retries for the asynchronous part of `activate()`: at fire time
+    /// the target must actually be the active app, otherwise Cmd-V would land
+    /// in whatever app grabbed focus in the meantime.
+    private static let focusSettleMaxAttempts = 3 // ≈0.32s total settle budget
+
+    private func activateAndSend(
+        application: NSRunningApplication,
+        changeCount: Int,
+        generation: Int,
+        attempt: Int
+    ) {
+        guard pasteGeneration == generation else { return }
+        // Focus may have shifted (TCC dialogs, manual app switching); bring
+        // the original target back frontmost so Cmd-V lands in the right app.
+        if application.isTerminated {
+            Self.logger.info("Target application terminated; paste abandoned")
+            return
+        }
+        guard application.isActive || application.activate() else {
+            Self.logger.info("Target application no longer available; paste abandoned")
+            return
+        }
         // Activation is asynchronous; wait briefly so Cmd-V reaches the target app.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) {
+            // close()/stop()/a newer paste may have invalidated this flow while
+            // the activation delay was pending — the token is the only way to
+            // reach in here.
+            guard self.pasteGeneration == generation else { return }
+            guard NSPasteboard.general.changeCount == changeCount else {
+                Self.logger.info("Pasteboard overwritten before Cmd-V was sent; paste abandoned")
+                return
+            }
+            // Re-validate focus INSIDE the window: activation may have been
+            // slower than the delay, the user may have switched apps, or the
+            // target may have quit. Never post Cmd-V into a non-target app.
+            if application.isTerminated || !application.isActive {
+                guard attempt < Self.focusSettleMaxAttempts else {
+                    Self.logger.info("Target app did not regain focus in time; paste abandoned")
+                    return
+                }
+                self.activateAndSend(
+                    application: application,
+                    changeCount: changeCount,
+                    generation: generation,
+                    attempt: attempt + 1
+                )
+                return
+            }
             let source = CGEventSource(stateID: .hidSystemState)
             let down = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: true)
             let up = CGEvent(keyboardEventSource: source, virtualKey: 9, keyDown: false)

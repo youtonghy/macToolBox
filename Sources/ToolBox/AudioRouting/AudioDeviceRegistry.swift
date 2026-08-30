@@ -432,24 +432,49 @@ final class AudioDeviceRegistry: ObservableObject {
                 .map(\.routeSignature)
         )
         let routeConfigurationChanged = routeConfigurationTracker.observe(routeConfiguration)
-        let publishedModelChanged = snapshot != updatedSnapshot || defaultOutputUID != result.defaultOutputUID
 
         if snapshot != updatedSnapshot { snapshot = updatedSnapshot }
         if defaultOutputUID != result.defaultOutputUID { defaultOutputUID = result.defaultOutputUID }
         replaceRouteListeners(objects: monitoredObjects)
 
-        if serviceRestarted {
+        let generationOutcome = Self.generationOutcome(
+            serviceRestarted: serviceRestarted,
+            routeChanged: routeChanged,
+            routeConfigurationChanged: routeConfigurationChanged,
+            hasBluetoothProfileTransition: updatedSnapshot.contains(where: {
+                $0.compatibilityIssue == .bluetoothProfileChanging
+            })
+        )
+        if generationOutcome.advanceServiceGeneration {
             serviceGeneration += 1
-        } else if routeChanged,
-                  routeConfigurationChanged,
-                  !publishedModelChanged,
-                  !updatedSnapshot.contains(where: {
-                      $0.compatibilityIssue == .bluetoothProfileChanging
-                  }) {
+        }
+        if generationOutcome.advanceRouteGeneration {
             routeGeneration += 1
         }
         partialReloadRetryCount = 0
         lastError = nil
+    }
+
+    /// Decides which generation counter a reload must advance. Any real
+    /// route-configuration change (topology or stream format) advances the
+    /// route generation, even when the published snapshot changed in the same
+    /// reload (e.g. a sample-rate switch updates `sampleRate`): the compiled
+    /// plan embeds the generation, so without the bump the controller returns
+    /// `.unchanged` and the route keeps running with stale kernel formats.
+    /// Bluetooth profile transitions stay suppressed until the topology settles.
+    nonisolated static func generationOutcome(
+        serviceRestarted: Bool,
+        routeChanged: Bool,
+        routeConfigurationChanged: Bool,
+        hasBluetoothProfileTransition: Bool
+    ) -> (advanceServiceGeneration: Bool, advanceRouteGeneration: Bool) {
+        if serviceRestarted {
+            return (true, false)
+        }
+        guard routeChanged, routeConfigurationChanged, !hasBluetoothProfileTransition else {
+            return (false, false)
+        }
+        return (false, true)
     }
 
     private func replaceRouteListeners(objects: [HALAudioDeviceQueryObject]) {

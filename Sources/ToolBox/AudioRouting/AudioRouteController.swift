@@ -31,17 +31,27 @@ protocol AudioRouteNativeEngineControlling: AnyObject {
 
 actor AudioRouteController: AudioRouteEngineControlling {
     private let nativeEngine: any AudioRouteNativeEngineControlling
+    /// Invoked exactly once after a previously `cleanupBlocked` controller
+    /// finishes its deferred Core Audio cleanup. The owner should re-reconcile
+    /// its desired plans; the controller itself has lost them by then.
+    private let onCleanupRecovered: @Sendable () async -> Void
     private var appliedPlans: [AudioRoutePlan] = []
     private var generation: UInt64 = 0
     private var cleanupBlockedMessage: String?
     private var maintenanceTask: Task<Void, Never>?
     private var fadeOperation: UInt64 = 0
     private var pendingFadeOperation: UInt64?
+    /// A cancelled fade-out whose unmute the engine rejected. The next reconcile
+    /// must retry the unmute instead of returning `.unchanged` and leaving the
+    /// route muted (silent) indefinitely.
+    private var pendingUnmuteFailure: String?
 
     init(
-        nativeEngine: any AudioRouteNativeEngineControlling
+        nativeEngine: any AudioRouteNativeEngineControlling,
+        onCleanupRecovered: @escaping @Sendable () async -> Void = {}
     ) {
         self.nativeEngine = nativeEngine
+        self.onCleanupRecovered = onCleanupRecovered
     }
 
     private var fadeOutDelay: Duration {
@@ -77,7 +87,9 @@ actor AudioRouteController: AudioRouteEngineControlling {
             )
         }
 
-        guard plans != appliedPlans else {
+        let retryingUnmute = pendingUnmuteFailure != nil
+        pendingUnmuteFailure = nil
+        guard plans != appliedPlans || retryingUnmute else {
             return AudioRouteApplyReport(
                 generation: requestedGeneration,
                 status: .unchanged,
@@ -390,13 +402,27 @@ actor AudioRouteController: AudioRouteEngineControlling {
         guard pendingFadeOperation != nil else { return }
         pendingFadeOperation = nil
         fadeOperation &+= 1
-        try? nativeEngine.update(parameters: nativeParameters(for: appliedPlans))
+        do {
+            try nativeEngine.update(parameters: nativeParameters(for: appliedPlans))
+        } catch {
+            // The newer operation must not silently leave the faded-out route muted.
+            pendingUnmuteFailure = error.localizedDescription
+        }
     }
 
     private func runMaintenance() {
         maintenanceTask = nil
         if nativeEngine.performMaintenance() {
             scheduleMaintenance()
+        } else if cleanupBlockedMessage != nil {
+            // The deferred Core Audio cleanup finally completed. Unblock the
+            // controller, discard the stale applied plans (they refer to routes
+            // the engine could not safely stop), and hand recovery back to the
+            // owner, which still holds the desired plans.
+            cleanupBlockedMessage = nil
+            appliedPlans = []
+            let onCleanupRecovered = onCleanupRecovered
+            Task { await onCleanupRecovered() }
         }
     }
 }

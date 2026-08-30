@@ -154,6 +154,8 @@ struct ToolBoxDisplayCommand: ParsableCommand {
         var mute: ToolBoxOnOffValue?
         @Option(name: .long, help: ArgumentHelp("设置显示器颜色预设。", valueName: "value"))
         var preset: String?
+        @Option(name: .long, help: "写入后轮询回读以确认结果（秒，1...60）。预设写入自带服务端回读验证，无需此选项。")
+        var wait: Int?
         @OptionGroup var options: ToolBoxCLIConnectionOptions
 
         mutating func validate() throws {
@@ -173,6 +175,9 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             if let preset, preset.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw ValidationError("--preset 不能为空。")
             }
+            if let wait, !(1...60).contains(wait) {
+                throw ValidationError("--wait 必须在 1...60 之间。")
+            }
         }
 
         mutating func run() throws {
@@ -190,10 +195,119 @@ struct ToolBoxDisplayCommand: ParsableCommand {
             } else {
                 throw ValidationError("缺少显示器设置。")
             }
-            try runToolBoxRequest(
-                .displaySet(ToolBoxDisplaySetRequestDTO(target: selector.dto, change: change)),
+
+            let executor = ToolBoxCLICommandExecutor()
+            let setStatus = executor.execute(
+                request: .displaySet(ToolBoxDisplaySetRequestDTO(target: selector.dto, change: change)),
                 options: options
             )
+            guard setStatus == ToolBoxCLIExitStatus.success else {
+                throw ExitCode(setStatus)
+            }
+            guard let wait, !isPresetChange(change) else { return }
+
+            let confirmed = Self.waitForReadback(
+                selector: selector.dto,
+                change: change,
+                timeoutSeconds: wait,
+                options: options
+            )
+            let writer = ToolBoxCLIWriter()
+            if case let .unconfirmed(detail) = confirmed {
+                writer.writeStandardError("✗ 回读确认失败：\(detail)\n")
+                throw ExitCode(ToolBoxCLIExitStatus.failure)
+            }
+            writer.writeStandardOutput("✓ 回读确认成功。\n")
+        }
+
+        private func isPresetChange(_ change: ToolBoxDisplayChangeDTO) -> Bool {
+            if case .preset = change { return true }
+            return false
+        }
+
+        private enum ReadbackConfirmation {
+            case confirmed
+            case unconfirmed(String)
+        }
+
+        /// Polls displayGet until the readback matches the requested change.
+        /// Write-only displays cannot be verified and report unconfirmed.
+        private static func waitForReadback(
+            selector: ToolBoxDisplayTargetDTO,
+            change: ToolBoxDisplayChangeDTO,
+            timeoutSeconds: Int,
+            options: ToolBoxCLIConnectionOptions
+        ) -> ReadbackConfirmation {
+            let client = ToolBoxControlClient()
+            let clientOptions = ToolBoxControlClientOptions(
+                shouldLaunchApplication: false,
+                timeout: options.timeout
+            )
+            let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
+
+            while Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.5)
+                guard
+                    let response = try? client.execute(
+                        ToolBoxControlRequestEnvelope(request: .displayGet(selector)),
+                        options: clientOptions
+                    ),
+                    response.error == nil,
+                    let result = response.result,
+                    case .display(let dto) = result,
+                    let verdict = Self.readbackVerdict(for: dto, change: change)
+                else {
+                    continue
+                }
+                return verdict
+            }
+            return .unconfirmed("等待回读超时（\(timeoutSeconds) 秒）")
+        }
+
+        /// Returns nil while the readback has not converged on the target yet
+        /// (keep polling); a verdict ends the wait.
+        private static func readbackVerdict(
+            for dto: ToolBoxDisplayDTO,
+            change: ToolBoxDisplayChangeDTO
+        ) -> ReadbackConfirmation? {
+            switch change {
+            case let .brightness(target):
+                return numericVerdict(for: dto, kind: .brightness, target: target)
+            case let .contrast(target):
+                return numericVerdict(for: dto, kind: .contrast, target: target)
+            case let .volume(target):
+                return numericVerdict(for: dto, kind: .volume, target: target)
+            case let .mute(target):
+                guard let control = dto.controls.first(where: { $0.kind == .mute }) else {
+                    return .unconfirmed("显示器未上报静音控制")
+                }
+                guard control.isReadable, let current = control.currentValue else {
+                    return .unconfirmed("静音状态不可回读（write-only）")
+                }
+                if (current == "true") == target {
+                    return .confirmed
+                }
+                return nil
+            case .preset:
+                return .unconfirmed("预设写入已由服务端回读验证，无需 --wait")
+            }
+        }
+
+        private static func numericVerdict(
+            for dto: ToolBoxDisplayDTO,
+            kind: ToolBoxDisplayControlKind,
+            target: Int
+        ) -> ReadbackConfirmation? {
+            guard let control = dto.controls.first(where: { $0.kind == kind }) else {
+                return .unconfirmed("显示器未上报该控制项")
+            }
+            guard control.isReadable, let current = control.currentValue, let value = Int(current) else {
+                return .unconfirmed("当前值不可回读（write-only）")
+            }
+            if abs(value - target) <= 2 {
+                return .confirmed
+            }
+            return nil
         }
     }
 }

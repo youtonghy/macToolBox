@@ -1,5 +1,12 @@
 import Foundation
 
+/// CLI 协议版本策略：**新增命令不升级版本号**。
+///
+/// endpoint 元数据中的协议版本由 App 写入、存量 CLI 严格校验相等；
+/// 若因新增命令而升级，会让所有已安装的旧 CLI 拒绝新版 App（更差的
+/// 兼容性）。加性命令的降级路径是安全的：旧 App 解码未知 command
+/// 会得到明确的“无法解析 CLI 请求”错误。只有破坏既有命令语义
+/// （字段删除/重命名/行为变更）时才允许升级版本号。
 public enum ToolBoxControlProtocolVersion {
     public static let current = 1
 }
@@ -21,6 +28,8 @@ public enum ToolBoxControlCommand: String, Codable, CaseIterable, Sendable {
     case audioSet = "audio.set"
     case awake
     case launchAtLogin = "launch-at-login"
+    case imageProcess = "image.process"
+    case imageRehash = "image.rehash"
 }
 
 public struct ToolBoxControlRequestEnvelope: Codable, Equatable, Sendable {
@@ -52,6 +61,8 @@ public enum ToolBoxControlRequest: Equatable, Sendable {
     case audioSet(ToolBoxAudioSetRequestDTO)
     case awake(ToolBoxToggleRequestDTO)
     case launchAtLogin(ToolBoxToggleRequestDTO)
+    case imageProcess(ToolBoxImageProcessRequestDTO)
+    case imageRehash(ToolBoxImageRehashRequestDTO)
 }
 
 extension ToolBoxControlRequest: Codable {
@@ -88,6 +99,10 @@ extension ToolBoxControlRequest: Codable {
             self = .awake(try container.decode(ToolBoxToggleRequestDTO.self, forKey: .payload))
         case .launchAtLogin:
             self = .launchAtLogin(try container.decode(ToolBoxToggleRequestDTO.self, forKey: .payload))
+        case .imageProcess:
+            self = .imageProcess(try container.decode(ToolBoxImageProcessRequestDTO.self, forKey: .payload))
+        case .imageRehash:
+            self = .imageRehash(try container.decode(ToolBoxImageRehashRequestDTO.self, forKey: .payload))
         }
     }
 
@@ -124,6 +139,12 @@ extension ToolBoxControlRequest: Codable {
             try container.encode(payload, forKey: .payload)
         case let .launchAtLogin(payload):
             try container.encode(ToolBoxControlCommand.launchAtLogin, forKey: .command)
+            try container.encode(payload, forKey: .payload)
+        case let .imageProcess(payload):
+            try container.encode(ToolBoxControlCommand.imageProcess, forKey: .command)
+            try container.encode(payload, forKey: .payload)
+        case let .imageRehash(payload):
+            try container.encode(ToolBoxControlCommand.imageRehash, forKey: .command)
             try container.encode(payload, forKey: .payload)
         }
     }
@@ -187,6 +208,8 @@ public enum ToolBoxControlResult: Equatable, Sendable {
     case audioRule(ToolBoxAudioRuleDTO)
     case awake(ToolBoxToggleStateDTO)
     case launchAtLogin(ToolBoxToggleStateDTO)
+    case imageProcess(ToolBoxImageProcessResultDTO)
+    case imageRehash(ToolBoxImageRehashResultDTO)
 }
 
 extension ToolBoxControlResult: Codable {
@@ -205,6 +228,8 @@ extension ToolBoxControlResult: Codable {
         case audioRule = "audio.rule"
         case awake
         case launchAtLogin = "launch-at-login"
+        case imageProcess = "image.process"
+        case imageRehash = "image.rehash"
     }
 
     public init(from decoder: Decoder) throws {
@@ -229,6 +254,10 @@ extension ToolBoxControlResult: Codable {
             self = .awake(try container.decode(ToolBoxToggleStateDTO.self, forKey: .payload))
         case .launchAtLogin:
             self = .launchAtLogin(try container.decode(ToolBoxToggleStateDTO.self, forKey: .payload))
+        case .imageProcess:
+            self = .imageProcess(try container.decode(ToolBoxImageProcessResultDTO.self, forKey: .payload))
+        case .imageRehash:
+            self = .imageRehash(try container.decode(ToolBoxImageRehashResultDTO.self, forKey: .payload))
         }
     }
 
@@ -261,6 +290,12 @@ extension ToolBoxControlResult: Codable {
             try container.encode(payload, forKey: .payload)
         case let .launchAtLogin(payload):
             try container.encode(Kind.launchAtLogin, forKey: .kind)
+            try container.encode(payload, forKey: .payload)
+        case let .imageProcess(payload):
+            try container.encode(Kind.imageProcess, forKey: .kind)
+            try container.encode(payload, forKey: .payload)
+        case let .imageRehash(payload):
+            try container.encode(Kind.imageRehash, forKey: .kind)
             try container.encode(payload, forKey: .payload)
         }
     }

@@ -355,13 +355,24 @@ struct BrightnessScheduleSettingsView: View {
             return "未启用"
         case .waitingForDisplays:
             return "等待显示器"
-        case let .active(percent, count, _, overrideCount):
+        case let .active(percent, count, nextTransition, overrideCount):
+            var parts = ["\(percent)% · \(count) 台"]
             if overrideCount > 0 {
-                return "\(percent)% · \(count) 台 · \(overrideCount) 台手动"
+                parts.append("\(overrideCount) 台手动")
             }
-            return "\(percent)% · \(count) 台"
+            if let nextTransition {
+                parts.append("下次 \(Self.transitionTimeFormatter.string(from: nextTransition))")
+            }
+            return parts.joined(separator: " · ")
         }
     }
+
+    private static let transitionTimeFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
 
     private func endLabel(for interval: BrightnessScheduleInterval) -> String {
         if coordinator.configuration.schedule.segments.count == 1 {

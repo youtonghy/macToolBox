@@ -57,6 +57,49 @@ final class DisplayControlCapabilityTests: XCTestCase {
         )
     }
 
+    func testFeatureReplyParserRejectsCurrentOnlySentinel() {
+        // A current of 0xFFFF with a plausible maximum must not be clamped
+        // into "maximum brightness" downstream.
+        let reply = featureReply(command: 0x10, maximum: 100, current: 0xFFFF)
+        XCTAssertEqual(
+            DDCFeatureReplyParser.parse(reply, expectedCommand: 0x10),
+            .failure(.invalidSentinel)
+        )
+    }
+
+    func testFeatureReplyParserRejectsMaximumOnlySentinel() {
+        let reply = featureReply(command: 0x12, maximum: 0xFFFF, current: 40)
+        XCTAssertEqual(
+            DDCFeatureReplyParser.parse(reply, expectedCommand: 0x12),
+            .failure(.invalidSentinel)
+        )
+    }
+
+    func testDecodeMuteValueRejectsUndefinedReplyValues() {
+        for invalid in [UInt16(0), 3, 4, 0xFFFF] {
+            XCTAssertThrowsError(
+                try DarwinDisplayControlProvider.decodeValue(
+                    kind: .mute,
+                    read: DDCReadResult(current: invalid, maximum: 2)
+                )
+            )
+        }
+    }
+
+    func testDecodeMuteValueAcceptsDefinedReplyValues() throws {
+        let muted = try DarwinDisplayControlProvider.decodeValue(
+            kind: .mute,
+            read: DDCReadResult(current: 1, maximum: 2)
+        )
+        XCTAssertEqual(muted.normalized, 1)
+
+        let unmuted = try DarwinDisplayControlProvider.decodeValue(
+            kind: .mute,
+            read: DDCReadResult(current: 2, maximum: 2)
+        )
+        XCTAssertEqual(unmuted.normalized, 0)
+    }
+
     func testCapabilityParserExtractsPresetAndInputSubsets() throws {
         let report = try DDCCapabilityParser.parse(
             "prot(monitor)type(lcd)vcp(02 04 10 12 14(00 01 08 0b 0c) 16 18 1a 60(01 0f 11) 62)"

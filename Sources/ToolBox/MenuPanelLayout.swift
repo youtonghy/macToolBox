@@ -51,6 +51,7 @@ enum MenuPanelLayout {
     static let audioRowSpacing: CGFloat = 6
     static let defaultAudioRowCount = 3
     static let audioSectionContentHeight = audioContentHeight(rowCount: defaultAudioRowCount)
+    static let liteAudioSectionContentHeight: CGFloat = 78
     static let audioSectionHeight = audioSectionContentHeight + sectionChromeHeight
     static let wifiSectionContentHeight: CGFloat = 82
     static let wifiConnectedContentWidth: CGFloat = 370
@@ -73,9 +74,9 @@ enum MenuPanelLayout {
         return listHeight + sectionChromeHeight
     }
 
-    static func audioContentHeight(rowCount: Int) -> CGFloat {
+    static func audioContentHeight(rowCount: Int, isLiteMode: Bool = false) -> CGFloat {
         guard rowCount > 0 else { return 0 }
-        return 116
+        return isLiteMode ? liteAudioSectionContentHeight : 160
     }
 
     static func contentHeight(
@@ -83,7 +84,8 @@ enum MenuPanelLayout {
         showsDisplayControl: Bool,
         showsAudioSection: Bool = true,
         showsColorPreset: Bool = false,
-        audioRowCount: Int = defaultAudioRowCount
+        audioRowCount: Int = defaultAudioRowCount,
+        isAudioLiteMode: Bool = false
     ) -> CGFloat {
         var height = headerHeight
             + outerSpacing
@@ -93,7 +95,7 @@ enum MenuPanelLayout {
             + outerSpacing
             + controlsHeight
 
-        let audioHeight = audioContentHeight(rowCount: audioRowCount)
+        let audioHeight = audioContentHeight(rowCount: audioRowCount, isLiteMode: isAudioLiteMode)
         if showsAudioSection, audioHeight > 0 {
             height += contentSpacing + audioHeight + sectionChromeHeight
         }
@@ -117,14 +119,16 @@ enum MenuPanelLayout {
         showsDisplayControl: Bool,
         showsAudioSection: Bool = true,
         showsColorPreset: Bool = false,
-        audioRowCount: Int = defaultAudioRowCount
+        audioRowCount: Int = defaultAudioRowCount,
+        isAudioLiteMode: Bool = false
     ) -> CGFloat {
         contentHeight(
             cableItemCount: cableItemCount,
             showsDisplayControl: showsDisplayControl,
             showsAudioSection: showsAudioSection,
             showsColorPreset: showsColorPreset,
-            audioRowCount: audioRowCount
+            audioRowCount: audioRowCount,
+            isAudioLiteMode: isAudioLiteMode
         )
             + contentInsets.top
             + contentInsets.bottom
@@ -135,7 +139,8 @@ enum MenuPanelLayout {
         showsDisplayControl: Bool,
         showsAudioSection: Bool = true,
         showsColorPreset: Bool = false,
-        audioRowCount: Int = defaultAudioRowCount
+        audioRowCount: Int = defaultAudioRowCount,
+        isAudioLiteMode: Bool = false
     ) -> NSSize {
         NSSize(
             width: size.width,
@@ -144,7 +149,8 @@ enum MenuPanelLayout {
                 showsDisplayControl: showsDisplayControl,
                 showsAudioSection: showsAudioSection,
                 showsColorPreset: showsColorPreset,
-                audioRowCount: audioRowCount
+                audioRowCount: audioRowCount,
+                isAudioLiteMode: isAudioLiteMode
             )
         )
     }

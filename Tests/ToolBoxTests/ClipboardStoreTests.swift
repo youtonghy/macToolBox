@@ -89,6 +89,44 @@ final class ClipboardStoreTests: XCTestCase {
     }
 
     @MainActor
+    func testOversizedItemIsRejected() {
+        store = ClipboardStore(timeLimit: 3600, memoryLimit: 200)
+
+        let huge = String(repeating: "x", count: 1000)
+        let added = store.addOrUpdate(hash: "huge", text: huge, image: nil, types: [.string])
+
+        XCTAssertFalse(added)
+        XCTAssertEqual(store.itemCount, 0)
+        XCTAssertEqual(store.memoryUsage, 0)
+    }
+
+    @MainActor
+    func testOversizedItemDoesNotEvictHistory() {
+        // Limit large enough for an existing small item, too small for the new one.
+        store = ClipboardStore(timeLimit: 3600, memoryLimit: 500)
+
+        XCTAssertTrue(store.addOrUpdate(hash: "small", text: "abc", image: nil, types: [.string]))
+
+        let huge = String(repeating: "x", count: 1000)
+        XCTAssertFalse(store.addOrUpdate(hash: "huge", text: huge, image: nil, types: [.string]))
+
+        XCTAssertEqual(store.itemCount, 1)
+        XCTAssertEqual(store.items.first?.contentHash, "small")
+    }
+
+    @MainActor
+    func testDedupPreservesImageType() {
+        store.addOrUpdate(hash: "img", text: nil, image: Data([1, 2]), types: [.png], imageType: .png)
+        let originalID = store.items.first?.id
+
+        store.addOrUpdate(hash: "img", text: nil, image: Data([1, 2]), types: [.png], imageType: .tiff)
+
+        XCTAssertEqual(store.itemCount, 1)
+        XCTAssertEqual(store.items.first?.id, originalID)
+        XCTAssertEqual(store.items.first?.imageType, .png)
+    }
+
+    @MainActor
     func testClear() {
         store.addOrUpdate(hash: "h1", text: "Text 1", image: nil, types: [.string])
         store.addOrUpdate(hash: "h2", text: "Text 2", image: nil, types: [.string])

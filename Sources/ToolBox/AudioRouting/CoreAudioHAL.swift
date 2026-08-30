@@ -581,6 +581,9 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
     private let generationLock = NSLock()
     private let realizationLock = NSLock()
     private var audioServerGeneration: UInt64 = 0
+    /// Generation recorded by the most recent `observe()`; parameter updates are
+    /// only valid while the live generation still matches it.
+    private var lastObservedAudioServerGeneration: UInt64 = 0
     private var activeRoutes: [String: RouteResources] = [:]
     private var pendingCleanupRoutes: [String: RouteResources] = [:]
 
@@ -681,6 +684,7 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
                 throw attributed(error, to: routeID, stage: .observe)
             }
         }
+        recordObservedAudioServerGeneration(currentAudioServerGeneration())
         return HALObservationSnapshot(
             audioServerGeneration: currentAudioServerGeneration(),
             routesByID: routes
@@ -688,6 +692,12 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
     }
 
     func execute(_ transaction: HALTransaction) throws -> HALTransactionReceipt {
+        // Audio Server generation fence: the observation may have been captured
+        // before a coreaudiod restart. Every object ID it carries is stale by
+        // now, and executing against them would create half-alive routes.
+        guard currentAudioServerGeneration() == transaction.observation.audioServerGeneration else {
+            throw AudioRuntimeFailure.audioServerRestarted
+        }
         if case .deferred(let failures) = performMaintenance() {
             throw AudioRuntimeFailure.cleanupDeferred(
                 routeID: failures.first?.routeID ?? transaction.routeID,
@@ -749,11 +759,18 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
             let result = cleanup(routes: Array(replacedRoutes.values), sparingTaps: spared)
             if case .deferred(let failures) = result {
                 retainPendingCleanup(replacedRoutes)
-                // The spared taps were detached from their routes (source.tap = nil)
-                // above but never destroyed, and no replacing route will claim them
-                // now that the transaction is aborting — destroy them here or they
-                // leak as live Core Audio process taps.
-                for (_, tap) in harvested {
+                // Destroy only the harvested taps that were actually detached from
+                // their routes (`source.tap` reached nil). A retained route whose
+                // capture IOProc teardown deferred still owns its tap, and
+                // maintenance will destroy it once the source clears — destroying
+                // it here as well would double-destroy the object ID, which is
+                // dangerous when Core Audio has recycled it for a new tap.
+                let retainedTapIDs = Set(
+                    replacedRoutes.values.flatMap { route in
+                        route.sources.compactMap { $0.tap?.objectID }
+                    }
+                )
+                for (_, tap) in harvested where !retainedTapIDs.contains(tap.objectID) {
                     _ = resourceAccess.destroyProcessTap(tap)
                 }
                 throw AudioRuntimeFailure.cleanupDeferred(
@@ -863,6 +880,11 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
     }
 
     func updateParameters(_ intent: AudioRuntimeIntent) throws {
+        // Same fence as `execute`: the parameters address kernels realized under
+        // the observation this intent was compiled against.
+        guard observationStillCurrent() else {
+            throw AudioRuntimeFailure.audioServerRestarted
+        }
         try updateParameters(intent, routeIDs: Set(intent.plansByID.keys))
     }
 
@@ -1036,6 +1058,37 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         return nil
     }
 
+    /// Poll interval and attempt budget for `kAudioProcessPropertyDevices` during
+    /// output-device migration: 9 × 25 ms = 225 ms worst case.
+    private static let processDeviceMigrationPollInterval: TimeInterval = 0.025
+    private static let processDeviceMigrationPollCount = 9
+
+    /// Polls the process's device set while it reports multiple devices that do
+    /// not include the route's output device. Returns the latest device list —
+    /// either once the migration completes (the output device appears) or when
+    /// the 225 ms budget is exhausted, after which the caller binds the output
+    /// device anyway.
+    private func waitForProcessDeviceMigration(
+        processObjectID: UInt32,
+        outputDeviceID: AudioObjectID,
+        initialDevices: [AudioObjectID]
+    ) -> [AudioObjectID] {
+        var devices = initialDevices
+        for _ in 0..<Self.processDeviceMigrationPollCount {
+            Thread.sleep(forTimeInterval: Self.processDeviceMigrationPollInterval)
+            guard let refreshed = try? values(
+                objectID: processObjectID,
+                selector: kAudioProcessPropertyDevices,
+                scope: kAudioObjectPropertyScopeOutput
+            ) as [AudioObjectID]? else {
+                break
+            }
+            devices = refreshed
+            if devices.contains(outputDeviceID) { break }
+        }
+        return devices
+    }
+
     private func prepareRoute(
         routeID: String,
         plan: AudioRoutePlan,
@@ -1100,10 +1153,23 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
             for source in plan.sources {
                 let sourceResources = SourceResources()
                 resources.sources.append(sourceResources)
-                let processDevices =
+                var processDevices =
                     observation.processDeviceIDsByObjectID[
                         source.processObjectID
                     ] ?? []
+                // Acceptance (per-app-audio-acceptance.md): when the process still
+                // reports a multi-device set that does not include the route's
+                // output device, it is usually mid device migration (the default
+                // output just switched). Wait at most 225 ms for the process to
+                // move before binding; after the timeout, bind the new device.
+                if !processDevices.contains(observation.outputDeviceID),
+                    processDevices.count > 1 {
+                    processDevices = waitForProcessDeviceMigration(
+                        processObjectID: source.processObjectID,
+                        outputDeviceID: observation.outputDeviceID,
+                        initialDevices: processDevices
+                    )
+                }
                 let selectedDevice = selectCaptureDevice(
                     processObjectID: source.processObjectID,
                     outputDeviceID: observation.outputDeviceID,
@@ -1568,6 +1634,18 @@ final class SystemCoreAudioHAL: CoreAudioHALPort, @unchecked Sendable {
         generationLock.lock()
         defer { generationLock.unlock() }
         return audioServerGeneration
+    }
+
+    private func recordObservedAudioServerGeneration(_ generation: UInt64) {
+        generationLock.lock()
+        lastObservedAudioServerGeneration = generation
+        generationLock.unlock()
+    }
+
+    private func observationStillCurrent() -> Bool {
+        generationLock.lock()
+        defer { generationLock.unlock() }
+        return lastObservedAudioServerGeneration == audioServerGeneration
     }
 
     private func advanceAudioServerGeneration() {

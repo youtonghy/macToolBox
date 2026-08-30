@@ -308,7 +308,8 @@ enum AudioRouteDiagnosticsEvaluator {
         snapshot: AudioRouteDiagnosticsSnapshot?,
         previous: AudioRouteDiagnosticsSnapshot?,
         startupPollCount: Int,
-        consecutiveStalledPollCount: Int,
+        consecutiveOutputStalledPollCount: Int,
+        consecutiveCaptureStalledPollCount: Int,
         sourceIsProducingOutput: Bool = true
     ) -> AudioRouteDiagnosticsHealth {
         guard let snapshot else {
@@ -328,9 +329,18 @@ enum AudioRouteDiagnosticsEvaluator {
         // fatal so the watchdog tears down and rebuilds, which re-runs
         // `observe()` with a settled device topology.
         if !hasCapture, hasOutput, sourceIsProducingOutput {
-            if snapshot.sourceFatalCount > 0, consecutiveStalledPollCount >= stallPollCount {
+            if snapshot.sourceFatalCount > 0, consecutiveCaptureStalledPollCount >= stallPollCount {
                 return .fatal(.captureFatal)
             }
+        }
+        // An output IOProc that never rendered a single frame while the source is
+        // confirmed producing output is a dead route: nothing can be heard through
+        // it. Release it once both the startup grace and the stall window elapse.
+        // (A capture-only route must NOT take this path: protected content keeps
+        // capture silent legitimately and stays `.awaitingAudio`.)
+        if sourceIsProducingOutput, hasCapture, !hasOutput,
+           startupPollCount >= startupGracePollCount + stallPollCount {
+            return .stalled
         }
         guard hasCapture && hasOutput else {
             return startupPollCount >= startupGracePollCount ? .awaitingAudio : .starting
@@ -341,7 +351,7 @@ enum AudioRouteDiagnosticsEvaluator {
             let outputAdvanced = snapshot.outputFrameCount != previous.outputFrameCount
             // A dead output IOProc is always fatal for the route: nothing can be heard
             // through it again, so release it and let the original path resume.
-            if !outputAdvanced, consecutiveStalledPollCount >= stallPollCount {
+            if !outputAdvanced, consecutiveOutputStalledPollCount >= stallPollCount {
                 return .stalled
             }
             // A quiet capture path is only a failure while HAL still reports the source
@@ -350,7 +360,7 @@ enum AudioRouteDiagnosticsEvaluator {
             // saved per-app gain until the slider is touched again.
             if !captureAdvanced {
                 guard sourceIsProducingOutput else { return .awaitingAudio }
-                if consecutiveStalledPollCount >= stallPollCount { return .stalled }
+                if consecutiveCaptureStalledPollCount >= stallPollCount { return .stalled }
             }
         }
         return .active

@@ -30,6 +30,9 @@ private struct DisplayTopologySignature: Hashable {
     var brightnessWritable: Bool
     var rawMinimum: UInt16?
     var rawMaximum: UInt16?
+    /// Included so a same-ID replug (new registry connection) is treated as
+    /// a topology change even when every other field matches.
+    var connectionToken: UInt64?
 }
 
 /// Applies a validated brightness schedule to all controllable external displays.
@@ -42,6 +45,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
     private let service: DisplayControlService
     private let store: BrightnessScheduleStore
     private let clock: BrightnessScheduleClock
+    private let retryClock: BrightnessScheduleClock
     private let observesSystemEvents: Bool
     private let logger = Logger(subsystem: "ToolBox", category: "BrightnessSchedule")
 
@@ -53,18 +57,31 @@ final class BrightnessScheduleCoordinator: ObservableObject {
     private var lastSignatures: [CGDirectDisplayID: DisplayTopologySignature] = [:]
     private var isSleepSuspended = false
     private var awaitingPostWakeSnapshot = false
-    private var wakeMarker = Date.distantPast
     private var wakeFallbackWorkItem: DispatchWorkItem?
+
+    private struct ScheduledWriteRetry {
+        var attempts: Int
+    }
+
+    private var scheduledWriteRetries: [CGDirectDisplayID: ScheduledWriteRetry] = [:]
+    private var retryFireDate: Date?
+    private var retryGeneration: UInt64 = 0
+
+    /// Exponential backoff for failed scheduled writes; after the last step
+    /// the display gives up until the next schedule trigger.
+    static let retryDelays: [TimeInterval] = [2, 8, 30, 120, 300]
 
     init(
         service: DisplayControlService,
         store: BrightnessScheduleStore = BrightnessScheduleStore(),
         clock: BrightnessScheduleClock = FoundationBrightnessScheduleClock(),
+        retryClock: BrightnessScheduleClock = FoundationBrightnessScheduleClock(),
         observesSystemEvents: Bool = true
     ) {
         self.service = service
         self.store = store
         self.clock = clock
+        self.retryClock = retryClock
         self.observesSystemEvents = observesSystemEvents
         let loaded = store.load()
         configuration = loaded.configuration
@@ -88,6 +105,12 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             }
             .store(in: &cancellables)
 
+        service.brightnessWriteFailures
+            .sink { [weak self] event in
+                self?.handleScheduledWriteFailure(displayID: event.displayID, policy: event.policy)
+            }
+            .store(in: &cancellables)
+
         if observesSystemEvents {
             registerNotifications()
         }
@@ -101,7 +124,11 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         wakeFallbackWorkItem?.cancel()
         wakeFallbackWorkItem = nil
         clock.cancel()
+        retryClock.cancel()
         timerGeneration += 1
+        retryGeneration += 1
+        retryFireDate = nil
+        scheduledWriteRetries.removeAll()
         overrides.removeAll()
         lastSignatures.removeAll()
         isSleepSuspended = false
@@ -124,12 +151,18 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         case commit
         case timer
         case snapshot
+        case retry
         case wake
         case clockChange
         case sleep
     }
 
-    private func reconcile(reason: ReconcileReason) {
+    /// Reconciles against the given snapshot. Callers that react to a
+    /// @Published emission MUST pass the emitted value: during the sink
+    /// callback `service.snapshot` still holds the previous snapshot
+    /// (@Published emits on willSet).
+    private func reconcile(reason: ReconcileReason, snapshot publishedSnapshot: DisplayControlSnapshot? = nil) {
+        let snapshot = publishedSnapshot ?? service.snapshot
         guard wantsRunning else { return }
 
         if reason == .sleep {
@@ -158,17 +191,44 @@ final class BrightnessScheduleCoordinator: ObservableObject {
             return
         }
 
+        // PLAN: on clock/zone changes, recalculate expiry for still-valid
+        // same-segment overrides so they track the recomputed boundary.
+        if reason == .clockChange {
+            for (displayID, override) in overrides where override.segmentID == match.activeSegment.id {
+                overrides[displayID] = ManualBrightnessOverride(
+                    displayID: override.displayID,
+                    normalizedValue: override.normalizedValue,
+                    segmentID: override.segmentID,
+                    expiresAt: match.nextTransition
+                )
+            }
+        }
+
         expireOverrides(activeSegmentID: match.activeSegment.id, now: now)
 
-        let eligible = eligibleDisplays(in: service.snapshot)
-        let signatures = signatures(from: service.snapshot)
+        let eligible = eligibleDisplays(in: snapshot)
+        let signatures = signatures(from: snapshot)
         let writeTargets = displaysToWrite(
             reason: reason,
             eligible: eligible,
             signatures: signatures
         )
 
+        // A fresh write from a full-scope trigger restarts the retry budget;
+        // retry- and snapshot-driven writes must not (they would reset the
+        // budget on every failed attempt and loop forever).
+        let resetsRetryBudget: Bool
+        switch reason {
+        case .start, .commit, .timer, .wake, .clockChange:
+            resetsRetryBudget = true
+        case .snapshot, .retry, .sleep:
+            resetsRetryBudget = false
+        }
+
         for display in writeTargets {
+            if resetsRetryBudget {
+                scheduledWriteRetries[display.id] = nil
+            }
             let value = effectiveNormalizedValue(
                 for: display.id,
                 scheduled: match.activeSegment.normalizedBrightness
@@ -205,7 +265,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         switch reason {
         case .start, .commit, .timer, .wake, .clockChange:
             return eligible
-        case .snapshot:
+        case .snapshot, .retry:
             return eligible.filter { display in
                 let signature = signatures[display.id]
                 let previous = lastSignatures[display.id]
@@ -259,7 +319,11 @@ final class BrightnessScheduleCoordinator: ObservableObject {
 
     private func handleSnapshot(_ snapshot: DisplayControlSnapshot) {
         if awaitingPostWakeSnapshot {
-            if snapshot.timestamp > wakeMarker {
+            // Settle on the first non-empty post-wake snapshot. Comparing
+            // wall-clock timestamps would deadlock when the clock steps back
+            // (NTP resync after wake); the 5s fallback force-settles when no
+            // usable snapshot ever arrives.
+            if !snapshot.displays.isEmpty {
                 awaitingPostWakeSnapshot = false
                 wakeFallbackWorkItem?.cancel()
                 wakeFallbackWorkItem = nil
@@ -268,7 +332,7 @@ final class BrightnessScheduleCoordinator: ObservableObject {
                 // presence; discard overrides for displays that did not return.
                 let liveIDs = Set(snapshot.displays.map(\.id))
                 overrides = overrides.filter { liveIDs.contains($0.key) }
-                reconcile(reason: .wake)
+                reconcile(reason: .wake, snapshot: snapshot)
             }
             return
         }
@@ -277,10 +341,50 @@ final class BrightnessScheduleCoordinator: ObservableObject {
         // Keep overrides until the first settled post-wake snapshot so that the
         // effective value is restored instead of falling back to the schedule.
         if !isSleepSuspended {
+            // Defensive: an empty snapshot combined with a refresh error means
+            // the probe failed, not that all displays vanished.
+            if snapshot.displays.isEmpty, service.lastRefreshError != nil {
+                return
+            }
             let liveIDs = Set(snapshot.displays.map(\.id))
             overrides = overrides.filter { liveIDs.contains($0.key) }
         }
-        reconcile(reason: .snapshot)
+        reconcile(reason: .snapshot, snapshot: snapshot)
+    }
+
+    // MARK: - Scheduled write failure retry
+
+    private func handleScheduledWriteFailure(displayID: CGDirectDisplayID, policy: DisplayBrightnessWritePolicy) {
+        guard wantsRunning, configuration.isEnabled, policy == .scheduled else { return }
+
+        var state = scheduledWriteRetries[displayID] ?? ScheduledWriteRetry(attempts: 0)
+        guard state.attempts < Self.retryDelays.count else {
+            logger.error("Scheduled brightness retry budget exhausted for display \(displayID, privacy: .public); waiting for the next schedule trigger.")
+            return
+        }
+        let delay = Self.retryDelays[state.attempts]
+        state.attempts += 1
+        scheduledWriteRetries[displayID] = state
+
+        // Drop the recorded signature so the next reconcile rewrites this
+        // display instead of skipping it as unchanged.
+        lastSignatures[displayID] = nil
+        let fireDate = clock.now.addingTimeInterval(delay)
+        scheduleRetryTimer(at: fireDate)
+    }
+
+    private func scheduleRetryTimer(at date: Date) {
+        if let existing = retryFireDate, existing <= date { return }
+        retryFireDate = date
+        retryGeneration += 1
+        let generation = retryGeneration
+        retryClock.schedule(at: date, generation: generation) { [weak self] firedGeneration in
+            Task { @MainActor in
+                guard let self, self.retryGeneration == firedGeneration else { return }
+                self.retryFireDate = nil
+                self.reconcile(reason: .retry)
+            }
+        }
     }
 
     // MARK: - Timer
@@ -330,7 +434,8 @@ final class BrightnessScheduleCoordinator: ObservableObject {
                 serialNumber: display.serialNumber,
                 brightnessWritable: brightness?.status.isWritable == true,
                 rawMinimum: brightness?.value?.rawMinimum,
-                rawMaximum: brightness?.value?.rawMaximum
+                rawMaximum: brightness?.value?.rawMaximum,
+                connectionToken: display.connectionToken
             )
         }
         return result
@@ -409,7 +514,6 @@ final class BrightnessScheduleCoordinator: ObservableObject {
 
     private func handleWake() {
         // Coalesce duplicate wake notifications.
-        wakeMarker = clock.now
         awaitingPostWakeSnapshot = true
         isSleepSuspended = true
         clock.cancel()
@@ -417,9 +521,17 @@ final class BrightnessScheduleCoordinator: ObservableObject {
 
         wakeFallbackWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard self.awaitingPostWakeSnapshot else { return }
+            guard let self, self.awaitingPostWakeSnapshot else { return }
             self.service.refresh()
+            // If the refresh fails (no snapshot published) or reports an
+            // empty erroring topology, force-settle so the coordinator never
+            // remains suspended indefinitely.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self, self.awaitingPostWakeSnapshot else { return }
+                self.awaitingPostWakeSnapshot = false
+                self.isSleepSuspended = false
+                self.reconcile(reason: .wake)
+            }
         }
         wakeFallbackWorkItem = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)

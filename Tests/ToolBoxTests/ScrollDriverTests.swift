@@ -55,6 +55,7 @@ final class ScrollDriverTests: XCTestCase {
             windowID: 7,
             displayID: 1,
             topologyGeneration: 9,
+            topologySignature: 123,
             roiGlobal: CGRect(x: 20, y: 30, width: 100, height: 80),
             windowGlobalFrame: CGRect(x: 0, y: 0, width: 400, height: 500)
         )

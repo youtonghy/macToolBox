@@ -12,6 +12,33 @@ final class ScrollWheelSliderTests: XCTestCase {
         XCTAssertNil(AudioVolumeScale.nextMaximum(after: 300))
     }
 
+    func testAudioVolumeScaleChoosesSmallestRangeContainingVolume() {
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 100), 100)
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 101), 200)
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 200), 200)
+        XCTAssertEqual(AudioVolumeScale.initialMaximum(for: 201), 300)
+    }
+
+    func testVerticalDragDirectionDetectsMovementTowardMaximum() {
+        let lowerPoint = NSPoint(x: 10, y: 40)
+        let upperPoint = NSPoint(x: 10, y: 45)
+
+        XCTAssertTrue(
+            RangeExpandableSliderCell.isDraggingTowardMaximum(
+                lastPoint: lowerPoint,
+                currentPoint: upperPoint,
+                isFlipped: false
+            )
+        )
+        XCTAssertFalse(
+            RangeExpandableSliderCell.isDraggingTowardMaximum(
+                lastPoint: upperPoint,
+                currentPoint: lowerPoint,
+                isFlipped: false
+            )
+        )
+    }
+
     func testDiscreteWheelMovesOneStepInEitherDirection() {
         var adjuster = ScrollWheelValueAdjuster(preciseThreshold: 10)
 

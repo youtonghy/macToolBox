@@ -184,9 +184,9 @@ private enum Arm64DDCConstants {
 }
 
 extension Arm64DDCBackend {
-    static func serviceMatches(displayIDs: [CGDirectDisplayID]) -> [Arm64DDCServiceMatch] {
+    static func serviceMatches(displayIDs: [CGDirectDisplayID]) -> (matches: [Arm64DDCServiceMatch], ambiguousDisplayIDs: Set<CGDirectDisplayID>) {
         let services = ioregServicesForMatching()
-        var scoredCandidates: [Int: [Arm64DDCServiceMatch]] = [:]
+        var candidates: [Arm64DDCServiceMatch] = []
 
         for displayID in displayIDs {
             for service in services {
@@ -197,24 +197,42 @@ extension Arm64DDCBackend {
                     ioregProductName: service.productName,
                     ioregSerialNumber: service.serialNumber
                 )
-                let match = Arm64DDCServiceMatch(
-                    displayID: displayID,
-                    service: service.service,
-                    connectionToken: service.connectionToken,
-                    serviceLocation: service.serviceLocation,
-                    discouraged: checkIfDiscouraged(ioregService: service),
-                    dummy: checkIfDummy(ioregService: service),
-                    matchScore: score
+                candidates.append(
+                    Arm64DDCServiceMatch(
+                        displayID: displayID,
+                        service: service.service,
+                        connectionToken: service.connectionToken,
+                        serviceLocation: service.serviceLocation,
+                        discouraged: checkIfDiscouraged(ioregService: service),
+                        dummy: checkIfDummy(ioregService: service),
+                        matchScore: score
+                    )
                 )
-                scoredCandidates[score, default: []].append(match)
             }
+        }
+
+        return resolveAssignments(candidates: candidates)
+    }
+
+    /// Greedy assignment of DDC services to displays with fail-closed
+    /// ambiguity detection. A display is only bound to a service when that
+    /// service is the *unique* highest-scoring candidate for the display;
+    /// identical monitors without serial numbers produce score ties, and
+    /// binding those arbitrarily risks writing to the wrong physical screen,
+    /// so tied displays are reported as ambiguous and left unassigned.
+    static func resolveAssignments(
+        candidates: [Arm64DDCServiceMatch]
+    ) -> (matches: [Arm64DDCServiceMatch], ambiguousDisplayIDs: Set<CGDirectDisplayID>) {
+        var byScore: [Int: [Arm64DDCServiceMatch]] = [:]
+        for candidate in candidates {
+            byScore[candidate.matchScore, default: []].append(candidate)
         }
 
         var matches: [Arm64DDCServiceMatch] = []
         var takenDisplayIDs = Set<CGDirectDisplayID>()
         var takenLocations = Set<Int>()
         for score in stride(from: maxMatchScore, to: 0, by: -1) {
-            for candidate in scoredCandidates[score] ?? [] {
+            for candidate in byScore[score] ?? [] {
                 guard !takenDisplayIDs.contains(candidate.displayID),
                       !takenLocations.contains(candidate.serviceLocation) else {
                     continue
@@ -224,7 +242,23 @@ extension Arm64DDCBackend {
                 matches.append(candidate)
             }
         }
-        return matches
+
+        var ambiguousDisplayIDs = Set<CGDirectDisplayID>()
+        for binding in matches {
+            let hasTiedAlternative = candidates.contains { candidate in
+                candidate.displayID == binding.displayID
+                    && candidate.serviceLocation != binding.serviceLocation
+                    && candidate.matchScore >= binding.matchScore
+            }
+            if hasTiedAlternative {
+                ambiguousDisplayIDs.insert(binding.displayID)
+            }
+        }
+
+        guard ambiguousDisplayIDs.isEmpty else {
+            return (matches.filter { !ambiguousDisplayIDs.contains($0.displayID) }, ambiguousDisplayIDs)
+        }
+        return (matches, [])
     }
 
     private static func performCleanDDCI(
@@ -266,17 +300,19 @@ extension Arm64DDCBackend {
             : Arm64DDCConstants.ddcAddress << 1 ^ Arm64DDCConstants.dataAddress
         packet[packet.count - 1] = checksum(seed: checksumSeed, data: packet, start: 0, end: packet.count - 2)
 
-        for _ in 0...retryAttempts {
+        for _ in 0..<max(Int(retryAttempts), 1) {
             var writeSucceeded = false
             for _ in 0..<max(writeCycles, 1) {
                 usleep(writeSleepMicros)
+                // Any successful cycle means the packet was transmitted; a
+                // later redundant cycle must not overwrite an earlier success.
                 writeSucceeded = IOAVServiceWriteI2C(
                     service,
                     UInt32(Arm64DDCConstants.ddcAddress),
                     UInt32(Arm64DDCConstants.dataAddress),
                     &packet,
                     UInt32(packet.count)
-                ) == 0
+                ) == 0 || writeSucceeded
             }
 
             var readSucceeded = false

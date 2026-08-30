@@ -323,6 +323,56 @@ final class AudioRoutingServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testRouteGenerationChangeRebuildsRouteWithNewDeviceConfigurationGeneration() async throws {
+        let suiteName = "test.audioRoutingService.routeGeneration.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = AudioRuleStore(defaults: defaults, key: suiteName)
+        try store.save([AppAudioRule(bundleID: "us.zoom.xos", volumePercent: 200)])
+
+        let processRegistry = FakeAudioProcessRegistry(snapshot: [
+            AudioProcessSnapshot(
+                objectID: 42,
+                pid: 1234,
+                bundleID: "us.zoom.xos",
+                name: "zoom.us",
+                isRunningOutput: true
+            )
+        ])
+        let deviceRegistry = FakeAudioDeviceRegistry(
+            snapshot: [AudioOutputDevice(uid: "speakers", name: "Speakers", isAvailable: true)],
+            defaultOutputUID: "speakers"
+        )
+        let engine = WatchdogAudioRouteEngine()
+        let service = AudioRoutingService(
+            ruleStore: store,
+            processRegistry: processRegistry,
+            deviceRegistry: deviceRegistry,
+            engine: engine
+        )
+
+        service.start()
+        await engine.waitUntilReconcileCount(1)
+        let initialPlans = await engine.currentPlans()
+        XCTAssertEqual(initialPlans.first?.deviceConfigurationGeneration, 0)
+
+        // A device route-configuration change (e.g. 44.1 → 48 kHz) bumps the
+        // registry generation; the next compiled plan must carry it so the
+        // controller treats the topology as changed and rebuilds the route.
+        deviceRegistry.publishRouteGeneration(1)
+        await engine.waitUntilReconcileCount(2)
+
+        let rebuiltPlans = await engine.currentPlans()
+        XCTAssertEqual(
+            rebuiltPlans.first?.deviceConfigurationGeneration,
+            1,
+            "A route-generation bump must change the compiled plan so the route is rebuilt"
+        )
+        _ = await service.shutdown()
+    }
+
+    @MainActor
     func testAudioServerRestartBlocksRuntimeGainUpdates() async throws {
         let suiteName = "test.audioRoutingService.restartRuntimeGain.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1236,6 +1286,165 @@ final class AudioRoutingServiceTests: XCTestCase {
     }
 
     @MainActor
+    func testFailedReconcileRetriesOnCooldownWithoutActivityEdge() async throws {
+        let clock = TestClock(start: Date(timeIntervalSince1970: 5_000))
+        let harness = try makeServiceHarness(
+            volumePercent: 200,
+            isRunningOutput: true,
+            terminalRouteRetryCooldown: 0.05,
+            now: { clock.now }
+        )
+        await harness.engine.failNextReconcileKeepingCurrentPlans(message: "route apply exploded")
+        harness.service.start()
+        await harness.engine.waitUntilReconcileCount(1)
+        // Let the failure report land so the retry timer gets scheduled.
+        try await Task.sleep(for: .milliseconds(20))
+
+        // No process snapshot ever changes — no `pir?`/`piro` edge — yet the
+        // cooldown timer alone must retry the route.
+        clock.advance(by: 0.06)
+        await harness.engine.waitUntilReconcileCount(2)
+
+        // The retry succeeded; no further retries must fire afterwards.
+        try await Task.sleep(for: .milliseconds(200))
+        let reconcileCount = await harness.engine.reconcileCount()
+        XCTAssertEqual(reconcileCount, 2, "Successful recovery must stop the retry loop")
+        _ = await harness.service.shutdown()
+        harness.cleanup()
+    }
+
+    @MainActor
+    func testFailedReconcileRetriesAreBounded() async throws {
+        let clock = TestClock(start: Date(timeIntervalSince1970: 5_000))
+        let harness = try makeServiceHarness(
+            volumePercent: 200,
+            isRunningOutput: true,
+            terminalRouteRetryCooldown: 0.05,
+            now: { clock.now }
+        )
+        await harness.engine.failEveryReconcile(message: "route apply exploded")
+        harness.service.start()
+
+        // Initial attempt plus three bounded retries.
+        for attempt in 1...3 {
+            await harness.engine.waitUntilReconcileCount(attempt)
+            try await Task.sleep(for: .milliseconds(20))
+            clock.advance(by: 0.06)
+        }
+        await harness.engine.waitUntilReconcileCount(4)
+        try await Task.sleep(for: .milliseconds(20))
+
+        // Retry budget exhausted: no attempt beyond the fourth.
+        clock.advance(by: 1.0)
+        try await Task.sleep(for: .milliseconds(300))
+        let reconcileCount = await harness.engine.reconcileCount()
+        XCTAssertEqual(
+            reconcileCount,
+            4,
+            "Retry loop must give up after the bounded retry limit"
+        )
+        _ = await harness.service.shutdown()
+        harness.cleanup()
+    }
+
+    @MainActor
+    func testCleanupBlockedControllerRecoversAfterMaintenanceCompletes() async throws {
+        let native = FakeNativeAudioRouteEngine()
+        let recoverySignal = RecoverySignal()
+        let controller = AudioRouteController(
+            nativeEngine: native,
+            onCleanupRecovered: { await recoverySignal.increment() }
+        )
+
+        let plan = AudioRoutePlan(
+            outputDeviceUID: "speakers",
+            sources: [AudioRouteSource(bundleID: "us.zoom.xos", processObjectID: 42, linearGain: 2)]
+        )
+        let applied = await controller.reconcile(plans: [plan], generation: 1)
+        XCTAssertEqual(applied.status, .applied)
+
+        // The next apply fails and its stopAll also fails → cleanupBlocked.
+        native.reconcileError = TestError.applyFailed
+        native.stopReport = AudioRouteStopReport(succeeded: false, errorMessage: "cleanup pending")
+        let changedPlan = AudioRoutePlan(
+            outputDeviceUID: "speakers",
+            sources: [AudioRouteSource(bundleID: "us.zoom.xos", processObjectID: 43, linearGain: 2)]
+        )
+        let blocked = await controller.reconcile(plans: [changedPlan], generation: 2)
+        guard case let .cleanupBlocked(message) = blocked.status else {
+            return XCTFail("Expected cleanupBlocked, got \(blocked.status)")
+        }
+        XCTAssertTrue(message.contains("cleanup pending"))
+        native.reconcileError = nil
+        native.stopReport = AudioRouteStopReport(succeeded: true, errorMessage: nil)
+
+        // While blocked, updates are rejected.
+        let blockedUpdate = await controller.update(parameters: [
+            AudioRouteRuntimeParameters(
+                generation: 3,
+                routeID: "speakers",
+                processObjectID: 42,
+                targetGain: 1
+            )
+        ])
+        guard case .cleanupBlocked = blockedUpdate.status else {
+            return XCTFail("Expected cleanupBlocked update, got \(blockedUpdate.status)")
+        }
+
+        // performMaintenance reports completion after the schedule delay → the
+        // blocked state clears and the recovery callback fires exactly once.
+        var attempts = 0
+        while await recoverySignal.count() == 0 && attempts < 50 {
+            try await Task.sleep(for: .milliseconds(50))
+            attempts += 1
+        }
+        let recoveredCount = await recoverySignal.count()
+        XCTAssertEqual(recoveredCount, 1, "Cleanup recovery must fire the callback exactly once")
+
+        let reapplied = await controller.reconcile(plans: [plan], generation: 4)
+        XCTAssertEqual(reapplied.status, .applied)
+    }
+
+    @MainActor
+    func testCancelledFadeOutUnmuteFailureSurfacesOnNextReconcile() async throws {
+        let native = FakeNativeAudioRouteEngine()
+        native.fadeOutDelay = .milliseconds(80)
+        let controller = AudioRouteController(nativeEngine: native)
+
+        let plan = AudioRoutePlan(
+            outputDeviceUID: "speakers",
+            sources: [AudioRouteSource(bundleID: "us.zoom.xos", processObjectID: 42, linearGain: 2)]
+        )
+        let applied = await controller.reconcile(plans: [plan], generation: 1)
+        XCTAssertEqual(applied.status, .applied)
+
+        // A removal reconcile starts a fade-out and suspends for the fade duration.
+        let removalTask = Task {
+            await controller.reconcile(plans: [], generation: 2)
+        }
+        while native.fadeOutCalls.isEmpty {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+
+        // While the fade is in flight, a newer reconcile cancels it, and the
+        // engine rejects the unmute update. The failure must surface loudly
+        // instead of leaving the route muted behind an `.unchanged` report.
+        native.updateError = TestError.applyFailed
+        let restore = await controller.reconcile(plans: [plan], generation: 3)
+        guard case .failed = restore.status else {
+            return XCTFail("Expected failed after unmute error, got \(restore.status)")
+        }
+        native.updateError = nil
+
+        let removalReport = await removalTask.value
+        XCTAssertEqual(removalReport.status, .stale)
+
+        // The failure does not linger: an identical plan applies cleanly again.
+        let clean = await controller.reconcile(plans: [plan], generation: 4)
+        XCTAssertEqual(clean.status, .applied)
+    }
+
+    @MainActor
     func testInFlightReconcileCannotOverwriteNewerActivityFlags() async throws {
         let suiteName = "test.audioRoutingService.activityRace.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
@@ -1450,6 +1659,7 @@ final class AudioRoutingServiceTests: XCTestCase {
         hasSavedRule: Bool = true,
         persistenceDelay: Duration = .milliseconds(200),
         recentlyActiveWindow: TimeInterval = AudioAppListVisibility.recentlyActiveWindow,
+        terminalRouteRetryCooldown: TimeInterval = 5.0,
         now: @escaping () -> Date = Date.init
     ) throws -> ServiceHarness {
         let suiteName = "test.audioRoutingService.\(UUID().uuidString)"
@@ -1482,6 +1692,7 @@ final class AudioRoutingServiceTests: XCTestCase {
             engine: engine,
             persistenceDelay: persistenceDelay,
             recentlyActiveWindow: recentlyActiveWindow,
+            terminalRouteRetryCooldown: terminalRouteRetryCooldown,
             now: now
         )
         return ServiceHarness(
@@ -1605,6 +1816,18 @@ private final class TestClock {
     }
 }
 
+private actor RecoverySignal {
+    private var signalCount = 0
+
+    func increment() {
+        signalCount += 1
+    }
+
+    func count() -> Int {
+        signalCount
+    }
+}
+
 @MainActor
 private struct ServiceHarness {
     let service: AudioRoutingService
@@ -1626,6 +1849,8 @@ private final class FakeNativeAudioRouteEngine: AudioRouteNativeEngineControllin
     var fadeOutCalls: [[String]] = []
     var fadeOutAllCallCount = 0
     var reconcileError: Error?
+    var updateError: Error?
+    var fadeOutDelay: Duration = .zero
     var stopReport = AudioRouteStopReport(succeeded: true, errorMessage: nil)
 
     func beginFadeOut(routeIDs: [String]) {
@@ -1647,6 +1872,7 @@ private final class FakeNativeAudioRouteEngine: AudioRouteNativeEngineControllin
     }
 
     func update(parameters: [AudioRouteNativeRuntimeParameters]) throws {
+        if let updateError { throw updateError }
         parameterUpdates.append(parameters)
     }
 
@@ -1654,7 +1880,7 @@ private final class FakeNativeAudioRouteEngine: AudioRouteNativeEngineControllin
         []
     }
 
-    var fadeOutDuration: Duration { .zero }
+    var fadeOutDuration: Duration { fadeOutDelay }
 
     func performMaintenance() -> Bool { false }
 
@@ -1786,6 +2012,10 @@ private final class FakeAudioDeviceRegistry: AudioDeviceRegistryProviding {
         serviceGenerationSubject.send(generation)
     }
 
+    func publishRouteGeneration(_ generation: Int) {
+        routeGenerationSubject.send(generation)
+    }
+
     func start() {}
     func stop() {}
     func refreshAfterAudioServerRestart() {}
@@ -1915,6 +2145,7 @@ private actor WatchdogAudioRouteEngine: AudioRouteEngineControlling {
     private var shouldBlockNextStop = false
     private var shouldRejectNextUpdateAsStale = false
     private var nextReconcileFailureMessage: String?
+    private var persistentReconcileFailureMessage: String?
     private var nextReconcileCleanupBlockedMessage: String?
     private var stopContinuation: CheckedContinuation<Void, Never>?
 
@@ -1924,6 +2155,9 @@ private actor WatchdogAudioRouteEngine: AudioRouteEngineControlling {
         resumeReconcileWaiters()
         if let message = nextReconcileFailureMessage {
             nextReconcileFailureMessage = nil
+            return AudioRouteApplyReport(generation: generation, status: .failed(message), plans: self.plans)
+        }
+        if let message = persistentReconcileFailureMessage {
             return AudioRouteApplyReport(generation: generation, status: .failed(message), plans: self.plans)
         }
         if let message = nextReconcileCleanupBlockedMessage {
@@ -2026,6 +2260,10 @@ private actor WatchdogAudioRouteEngine: AudioRouteEngineControlling {
 
     func failNextReconcileKeepingCurrentPlans(message: String) {
         nextReconcileFailureMessage = message
+    }
+
+    func failEveryReconcile(message: String) {
+        persistentReconcileFailureMessage = message
     }
 
     func cleanupBlockNextReconcileKeepingCurrentPlans(message: String) {

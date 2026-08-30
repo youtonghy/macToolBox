@@ -20,6 +20,54 @@ final class AudioRegistryProjectionTests: XCTestCase {
         XCTAssertEqual(AudioDeviceRegistry.routeSettleDelay, .seconds(1))
     }
 
+    func testSampleRateChangeAdvancesRouteGenerationEvenWhenPublishedModelChanges() {
+        // 44.1 → 48 kHz changes both the route signature (stream formats) and the
+        // published snapshot (`sampleRate`). The route generation must still
+        // advance: the compiled plan embeds it, and without the bump the
+        // controller returns `.unchanged` and the route keeps the old kernel
+        // formats forever.
+        let outcome = AudioDeviceRegistry.generationOutcome(
+            serviceRestarted: false,
+            routeChanged: true,
+            routeConfigurationChanged: true,
+            hasBluetoothProfileTransition: false
+        )
+        XCTAssertEqual(outcome.advanceServiceGeneration, false)
+        XCTAssertEqual(outcome.advanceRouteGeneration, true)
+    }
+
+    func testBluetoothProfileTransitionDoesNotAdvanceRouteGeneration() {
+        let outcome = AudioDeviceRegistry.generationOutcome(
+            serviceRestarted: false,
+            routeChanged: true,
+            routeConfigurationChanged: true,
+            hasBluetoothProfileTransition: true
+        )
+        XCTAssertEqual(outcome.advanceServiceGeneration, false)
+        XCTAssertEqual(outcome.advanceRouteGeneration, false)
+    }
+
+    func testUnchangedRouteConfigurationDoesNotAdvanceRouteGeneration() {
+        let outcome = AudioDeviceRegistry.generationOutcome(
+            serviceRestarted: false,
+            routeChanged: true,
+            routeConfigurationChanged: false,
+            hasBluetoothProfileTransition: false
+        )
+        XCTAssertEqual(outcome.advanceRouteGeneration, false)
+    }
+
+    func testServiceRestartAdvancesServiceGenerationOnly() {
+        let outcome = AudioDeviceRegistry.generationOutcome(
+            serviceRestarted: true,
+            routeChanged: true,
+            routeConfigurationChanged: true,
+            hasBluetoothProfileTransition: false
+        )
+        XCTAssertEqual(outcome.advanceServiceGeneration, true)
+        XCTAssertEqual(outcome.advanceRouteGeneration, false)
+    }
+
     func testRouteConfigurationTrackerIgnoresDuplicateHALNotifications() {
         var tracker = AudioDeviceRouteConfigurationTracker()
         let initial = AudioDeviceRouteConfiguration(
