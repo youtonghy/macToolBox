@@ -90,8 +90,25 @@ struct SelectionSessionState: Equatable, Sendable {
             && lhs.captureBounds == rhs.captureBounds
     }
 
-    mutating func replaceSelection(with regions: [SelectedRegionSnapshot], manualRegion: CGRect?) {
+    /// Records the current state as a single undo entry. Called once at the
+    /// start of an adjustment gesture (handle drag or arrow-key nudge) so live
+    /// `adjustRegion` updates don't flood the undo stack per mouse event.
+    mutating func pushUndoSnapshot() {
         undoStack.append(currentValue)
+    }
+
+    mutating func replaceSelection(with regions: [SelectedRegionSnapshot], manualRegion: CGRect?) {
+        replaceSelection(with: regions, manualRegion: manualRegion, recordsUndo: true)
+    }
+
+    mutating func replaceSelection(
+        with regions: [SelectedRegionSnapshot],
+        manualRegion: CGRect?,
+        recordsUndo: Bool
+    ) {
+        if recordsUndo {
+            undoStack.append(currentValue)
+        }
         selectedRegions = regions
         self.manualRegion = manualRegion
         recomputeBounds()
@@ -136,6 +153,8 @@ enum SelectionAction: Equatable, Sendable {
     case setCaptureMode(SelectionCaptureMode)
     case deleteLast
     case undo
+    /// Marks the start of an adjustment gesture; snapshots state once for undo.
+    case beginAdjustment
     case manualDrag(CGRect)
     case adjustRegion(CGRect)
     case confirm

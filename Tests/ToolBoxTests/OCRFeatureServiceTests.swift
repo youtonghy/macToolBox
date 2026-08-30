@@ -5,6 +5,56 @@ import XCTest
 @testable import ToolBoxCore
 
 final class OCRFeatureServiceTests: XCTestCase {
+    func testSystemVisionRebaseMapsTileCoordinatesIntoFullImageSpace() throws {
+        // Tile occupies rows 1280..<1380 of a 100×5000 long screenshot.
+        let tile = CGRect(x: 0, y: 1_280, width: 100, height: 100)
+        let fullSize = CGSize(width: 100, height: 5_000)
+        let line = try OCRTextLine(
+            text: "hello",
+            confidence: 0.9,
+            normalizedPolygon: [
+                CGPoint(x: 0, y: 0),
+                CGPoint(x: 1, y: 0),
+                CGPoint(x: 1, y: 1),
+                CGPoint(x: 0, y: 1),
+            ]
+        )
+
+        let rebased = OCRFeatureService.rebased([line], from: tile, to: fullSize)
+
+        XCTAssertEqual(rebased.count, 1)
+        XCTAssertEqual(rebased[0].normalizedPolygon, [
+            CGPoint(x: 0, y: 1_280.0 / 5_000.0),
+            CGPoint(x: 1, y: 1_280.0 / 5_000.0),
+            CGPoint(x: 1, y: 1_380.0 / 5_000.0),
+            CGPoint(x: 0, y: 1_380.0 / 5_000.0),
+        ])
+    }
+
+    func testSystemVisionDeduplicateDropsOverlapDuplicatesKeepsDistinct() throws {
+        func line(_ text: String, y: CGFloat) throws -> OCRTextLine {
+            try OCRTextLine(
+                text: text,
+                confidence: 0.9,
+                normalizedPolygon: [
+                    CGPoint(x: 0.1, y: y),
+                    CGPoint(x: 0.5, y: y),
+                    CGPoint(x: 0.5, y: y + 0.02),
+                    CGPoint(x: 0.1, y: y + 0.02),
+                ]
+            )
+        }
+
+        let first = try line("dup", y: 0.5)
+        let nearDuplicate = try line("dup", y: 0.501)   // same text, IoU > 0.5
+        let elsewhere = try line("dup", y: 0.1)          // same text, no overlap
+        let otherText = try line("other", y: 0.5)        // overlapping but different text
+
+        let result = OCRFeatureService.deduplicated([first, nearDuplicate, elsewhere, otherText])
+
+        XCTAssertEqual(result.map(\.text), ["dup", "dup", "other"])
+    }
+
     func testDescriptorReportsSignedCatalogSizeAndAbsentState() async throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("ocr-feature-tests-\(UUID().uuidString)", isDirectory: true)

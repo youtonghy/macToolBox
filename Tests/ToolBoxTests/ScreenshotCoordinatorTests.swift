@@ -106,6 +106,32 @@ final class ScreenshotCoordinatorTests: XCTestCase {
         XCTAssertNotNil(handedOff)
     }
 
+    func testCompositionFailureEndsSelectionSessionAndClosesOverlay() async throws {
+        let overlay = FakeOverlay()
+        var sessionEndedCount = 0
+        let coordinator = ScreenshotCoordinator(
+            permission: FakePermission(granted: true),
+            captureProvider: FakeCaptureProvider(result: .success([try frame()])),
+            overlay: overlay,
+            compose: { _, _ in throw ScreenshotCaptureError.bitmapContextUnavailable },
+            onSelectionSessionEnded: { sessionEndedCount += 1 }
+        )
+        await coordinator.startRegionCapture()
+        XCTAssertEqual(sessionEndedCount, 0)
+
+        overlay.send(.adjustRegion(CGRect(x: 0, y: 0, width: 20, height: 20)))
+        overlay.send(.confirm)
+        for _ in 0..<10 where coordinator.state == .selecting {
+            await Task.yield()
+        }
+
+        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertEqual(coordinator.lastError, .composition(.bitmapContextUnavailable))
+        XCTAssertEqual(overlay.closeCount, 1)
+        XCTAssertEqual(coordinator.frozenFrameCount, 0)
+        XCTAssertEqual(sessionEndedCount, 1)
+    }
+
     func testRegionAdjustmentDoesNotLeaveSelectionStage() async throws {
         let overlay = FakeOverlay()
         let coordinator = ScreenshotCoordinator(

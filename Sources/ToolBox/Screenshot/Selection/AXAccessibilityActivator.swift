@@ -120,10 +120,16 @@ final class AXAccessibilityActivator: @unchecked Sendable {
     }
 
     private func restore(_ record: AXActivationRecord, application: AXUIElement) {
-        if record.setManualAccessibility {
+        // Re-read before writing and only clear the attribute if it is still in
+        // the state we left it (true). If another client already turned it off
+        // — or re-purposed it — a blind `false` write could override external
+        // state made between activation and restore.
+        if record.setManualAccessibility,
+           readAttribute(application, Self.manualAccessibilityAttribute) == true {
             _ = setAttribute(application, Self.manualAccessibilityAttribute, false)
         }
-        if record.setEnhancedUserInterface {
+        if record.setEnhancedUserInterface,
+           readAttribute(application, Self.enhancedUserInterfaceAttribute) == true {
             _ = setAttribute(application, Self.enhancedUserInterfaceAttribute, false)
         }
     }

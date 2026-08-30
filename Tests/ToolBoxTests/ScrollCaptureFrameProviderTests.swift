@@ -31,6 +31,34 @@ final class ScrollCaptureFrameProviderTests: XCTestCase {
         XCTAssertGreaterThan(first, last)
     }
 
+    @MainActor
+    func testCaptureStableFrameThrowsWhenNeverStable() async throws {
+        let provider = DefaultScrollCaptureFrameProvider(
+            captureProvider: AlternatingCaptureProvider(),
+            sampleCadence: .zero,
+            maximumSamples: 3
+        )
+
+        do {
+            _ = try await provider.captureStableFrame(target: unstableTarget)
+            XCTFail("Expected frameNeverStable")
+        } catch let error as ScrollCaptureError {
+            XCTAssertEqual(error, .frameNeverStable)
+        }
+    }
+
+    private var unstableTarget: ScrollCaptureTargetSnapshot {
+        ScrollCaptureTargetSnapshot(
+            ownerPID: 42,
+            windowID: 7,
+            displayID: 1,
+            topologyGeneration: 9,
+            topologySignature: 123,
+            roiGlobal: CGRect(x: 0, y: 0, width: 10, height: 10),
+            windowGlobalFrame: CGRect(x: 0, y: 0, width: 100, height: 100)
+        )
+    }
+
     private func makeGradient(width: Int, height: Int) -> CGImage {
         let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
         for y in 0..<height {
@@ -45,5 +73,31 @@ final class ScrollCaptureFrameProviderTests: XCTestCase {
             throw ScrollCaptureError.invalidStrip
         }
         return bytes[y * image.bytesPerRow + x * 4]
+    }
+}
+
+/// Returns alternating black/white images so the stability detector never
+/// reports a quiet sample.
+@MainActor
+private final class AlternatingCaptureProvider: ScreenCaptureProviding {
+    private var counter = 0
+
+    func captureDisplays() async throws -> [DisplayCaptureFrame] { [] }
+
+    func captureRegion(_ region: CGRect, displayID: CGDirectDisplayID) async throws -> CGImage {
+        counter += 1
+        let gray: CGFloat = counter % 2 == 1 ? 0 : 1
+        let context = CGContext(
+            data: nil,
+            width: 8,
+            height: 8,
+            bitsPerComponent: 8,
+            bytesPerRow: 8 * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        )!
+        context.setFillColor(gray: gray, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 8, height: 8))
+        return context.makeImage()!
     }
 }

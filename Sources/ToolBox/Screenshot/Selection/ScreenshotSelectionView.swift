@@ -153,6 +153,14 @@ final class ScreenshotSelectionView: NSView {
     private var mouseScreenPoint: CGPoint?
     private var magnifierWindow: NSWindow?
     private var draggingHandle: HandlePosition?
+    /// Bounds captured when a handle drag begins. Every drag event recomputes the
+    /// adjusted rect from this origin plus the total pointer displacement, so the
+    /// result stays correct even though `state.captureBounds` updates mid-gesture.
+    private var adjustOriginBounds: CGRect?
+    /// Whether `.beginAdjustment` has been dispatched for the current gesture,
+    /// so a whole handle drag records exactly one undo entry (lazily, on the
+    /// first valid adjustment).
+    private var adjustmentUndoRecorded = false
     private var shiftPressed = false
     private var hierarchyScrollAccumulator: CGFloat = 0
     /// Tracks the last hovered candidate key to avoid redundant full-screen redraws
@@ -205,6 +213,8 @@ final class ScreenshotSelectionView: NSView {
         dragCurrent = nil
         pendingClickCandidate = nil
         draggingHandle = nil
+        adjustOriginBounds = nil
+        adjustmentUndoRecorded = false
         mouseScreenPoint = nil
     }
 
@@ -485,6 +495,8 @@ final class ScreenshotSelectionView: NSView {
             draggingHandle = handle
             dragStart = point
             dragCurrent = point
+            adjustOriginBounds = state.captureBounds
+            adjustmentUndoRecorded = false
             return
         }
 
@@ -512,23 +524,30 @@ final class ScreenshotSelectionView: NSView {
         let current = globalPoint(for: event)
         dragCurrent = current
 
-        if let handle = draggingHandle, let bounds = state.captureBounds {
-            // Adjust selection via handle drag
-            var newRect = bounds
+        if let handle = draggingHandle,
+           let originBounds = adjustOriginBounds ?? state.captureBounds {
+            // Adjust selection via handle drag. Each event derives the new rect
+            // from the gesture-start bounds plus the total displacement; applying
+            // the cumulative delta to the already-updated bounds would accelerate.
+            var newRect = originBounds
             let dx = current.x - start.x
             let dy = current.y - start.y
             switch handle {
-            case .topLeft: newRect = CGRect(x: bounds.minX + dx, y: bounds.minY + dy, width: bounds.width - dx, height: bounds.height - dy)
-            case .topRight: newRect = CGRect(x: bounds.minX, y: bounds.minY + dy, width: bounds.width + dx, height: bounds.height - dy)
-            case .bottomLeft: newRect = CGRect(x: bounds.minX + dx, y: bounds.minY, width: bounds.width - dx, height: bounds.height + dy)
-            case .bottomRight: newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width + dx, height: bounds.height + dy)
-            case .top: newRect = CGRect(x: bounds.minX, y: bounds.minY + dy, width: bounds.width, height: bounds.height - dy)
-            case .bottom: newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height + dy)
-            case .left: newRect = CGRect(x: bounds.minX + dx, y: bounds.minY, width: bounds.width - dx, height: bounds.height)
-            case .right: newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width + dx, height: bounds.height)
+            case .topLeft: newRect = CGRect(x: originBounds.minX + dx, y: originBounds.minY + dy, width: originBounds.width - dx, height: originBounds.height - dy)
+            case .topRight: newRect = CGRect(x: originBounds.minX, y: originBounds.minY + dy, width: originBounds.width + dx, height: originBounds.height - dy)
+            case .bottomLeft: newRect = CGRect(x: originBounds.minX + dx, y: originBounds.minY, width: originBounds.width - dx, height: originBounds.height + dy)
+            case .bottomRight: newRect = CGRect(x: originBounds.minX, y: originBounds.minY, width: originBounds.width + dx, height: originBounds.height + dy)
+            case .top: newRect = CGRect(x: originBounds.minX, y: originBounds.minY + dy, width: originBounds.width, height: originBounds.height - dy)
+            case .bottom: newRect = CGRect(x: originBounds.minX, y: originBounds.minY, width: originBounds.width, height: originBounds.height + dy)
+            case .left: newRect = CGRect(x: originBounds.minX + dx, y: originBounds.minY, width: originBounds.width - dx, height: originBounds.height)
+            case .right: newRect = CGRect(x: originBounds.minX, y: originBounds.minY, width: originBounds.width + dx, height: originBounds.height)
             }
             let standardized = newRect.standardized
             if standardized.width >= 4, standardized.height >= 4 {
+                if !adjustmentUndoRecorded {
+                    onAction(.beginAdjustment)
+                    adjustmentUndoRecorded = true
+                }
                 onAction(.adjustRegion(standardized))
             }
         }
@@ -538,6 +557,10 @@ final class ScreenshotSelectionView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         hideMagnifier()
+        defer {
+            adjustOriginBounds = nil
+            adjustmentUndoRecorded = false
+        }
         guard let start = dragStart, draggingHandle == nil else {
             dragStart = nil
             dragCurrent = nil
@@ -552,7 +575,10 @@ final class ScreenshotSelectionView: NSView {
         draggingHandle = nil
         pendingClickCandidate = nil
         needsDisplay = true
-        if rect.width >= 3 || rect.height >= 3 {
+        // Commit as a drag only when both dimensions are non-zero: the reducer
+        // rejects zero-area rects, and dispatching one would surface a selection
+        // error instead of falling through to the click path.
+        if (rect.width >= 3 || rect.height >= 3), rect.width > 0, rect.height > 0 {
             onAction(.manualDrag(rect))
         } else if let pendingCandidate {
             onAction(.click(pendingCandidate, additive: false))
@@ -634,14 +660,16 @@ final class ScreenshotSelectionView: NSView {
         if shift {
             return
         } else if ctrl {
-            // Expand: move the opposite edge outward
+            // Expand: move the opposite edge outward. Right/Up grow the rect in
+            // AppKit's coordinate system (y increases upward).
             var newRect = bounds
             if dx < 0 { newRect = CGRect(x: bounds.minX + dx, y: bounds.minY, width: bounds.width - dx, height: bounds.height) }
-            if dx > 0 { newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width - dx, height: bounds.height) }
+            if dx > 0 { newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width + dx, height: bounds.height) }
             if dy < 0 { newRect = CGRect(x: bounds.minX, y: bounds.minY + dy, width: bounds.width, height: bounds.height - dy) }
-            if dy > 0 { newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height - dy) }
+            if dy > 0 { newRect = CGRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: bounds.height + dy) }
             let std = newRect.standardized
             if std.width >= 4, std.height >= 4 {
+                onAction(.beginAdjustment)
                 onAction(.adjustRegion(std))
             }
         } else {

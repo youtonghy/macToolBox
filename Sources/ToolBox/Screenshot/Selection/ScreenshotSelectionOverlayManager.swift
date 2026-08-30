@@ -28,7 +28,12 @@ protocol ScreenshotSelectionOverlayManaging: AnyObject {
 @MainActor
 final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManaging {
     private let activateApplication: Bool
-    private let restorePreviousApplication: () -> Void
+    private let customRestorePreviousApplication: (() -> Void)?
+    private let frontmostApplication: () -> NSRunningApplication?
+    /// The app that was frontmost when `show()` was last called. Cancelling the
+    /// overlay should return focus to what the user had before THIS capture,
+    /// not to whatever was frontmost when the manager was created.
+    private var applicationToRestore: NSRunningApplication?
     private var panels: [CGDirectDisplayID: ScreenshotSelectionPanel] = [:]
     private var views: [CGDirectDisplayID: ScreenshotSelectionView] = [:]
     private var closed = true
@@ -38,14 +43,18 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
 
     init(
         activateApplication: Bool = true,
+        frontmostApplication: @escaping () -> NSRunningApplication? = {
+            NSWorkspace.shared.frontmostApplication
+        },
         restorePreviousApplication: (() -> Void)? = nil
     ) {
         self.activateApplication = activateApplication
-        let previous = NSWorkspace.shared.frontmostApplication
-        self.restorePreviousApplication = restorePreviousApplication ?? {
-            previous?.activate()
-        }
+        self.frontmostApplication = frontmostApplication
+        customRestorePreviousApplication = restorePreviousApplication
     }
+
+    /// The application cancel would restore right now (test hook).
+    var pendingRestoreApplication: NSRunningApplication? { applicationToRestore }
 
     var panelCount: Int { panels.count }
 
@@ -62,6 +71,7 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
     ) throws {
         guard !frames.isEmpty else { throw ScreenshotSelectionOverlayError.emptyFrames }
         close(cancelled: false)
+        applicationToRestore = frontmostApplication()
         self.onAction = onAction
         self.onHover = onHover
         self.onCancel = onCancel
@@ -87,6 +97,10 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
             panel.animationBehavior = .none
             panel.isReleasedWhenClosed = false
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            // NSPanels don't accept mouse-moved events by default; without
+            // this the hover candidate / magnifier tracking areas never fire
+            // until the panel is clicked and made key.
+            panel.acceptsMouseMovedEvents = true
             let view = ScreenshotSelectionView(
                 frame: CGRect(origin: .zero, size: displayFrame.size),
                 displayFrame: displayFrame,
@@ -151,6 +165,13 @@ final class ScreenshotSelectionOverlayManager: ScreenshotSelectionOverlayManagin
         panels.values.forEach { $0.close() }
         panels.removeAll()
         views.removeAll()
-        if cancelled { restorePreviousApplication() }
+        if cancelled {
+            if let customRestorePreviousApplication {
+                customRestorePreviousApplication()
+            } else {
+                applicationToRestore?.activate()
+            }
+            applicationToRestore = nil
+        }
     }
 }

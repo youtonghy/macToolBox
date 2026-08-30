@@ -12,7 +12,8 @@ final class ScrollCaptureTargetTests: XCTestCase {
 
         let target = try ScrollCaptureTargetSnapshot.make(
             selection: state,
-            containingWindow: candidate(source: .window, rect: CGRect(x: 0, y: 0, width: 400, height: 500))
+            containingWindow: candidate(source: .window, rect: CGRect(x: 0, y: 0, width: 400, height: 500)),
+            topologySignature: 123
         )
 
         XCTAssertEqual(target.ownerPID, 42)
@@ -31,7 +32,8 @@ final class ScrollCaptureTargetTests: XCTestCase {
             XCTAssertThrowsError(
                 try ScrollCaptureTargetSnapshot.make(
                     selection: state,
-                    containingWindow: candidate(source: .window, rect: CGRect(x: 0, y: 0, width: 400, height: 500))
+                    containingWindow: candidate(source: .window, rect: CGRect(x: 0, y: 0, width: 400, height: 500)),
+                    topologySignature: 123
                 )
             ) { XCTAssertEqual($0 as? ScrollCaptureTargetError, .ineligibleSelection) }
         }
@@ -43,13 +45,14 @@ final class ScrollCaptureTargetTests: XCTestCase {
             state: &state,
             action: .manualDrag(CGRect(x: 30, y: 40, width: 100, height: 120))
         )
-        XCTAssertThrowsError(try ScrollCaptureTargetSnapshot.make(selection: state, containingWindow: nil)) {
+        XCTAssertThrowsError(try ScrollCaptureTargetSnapshot.make(selection: state, containingWindow: nil, topologySignature: 123)) {
             XCTAssertEqual($0 as? ScrollCaptureTargetError, .containingWindowUnavailable)
         }
         XCTAssertNoThrow(
             try ScrollCaptureTargetSnapshot.make(
                 selection: state,
-                containingWindow: candidate(source: .window, rect: CGRect(x: 0, y: 0, width: 400, height: 500))
+                containingWindow: candidate(source: .window, rect: CGRect(x: 0, y: 0, width: 400, height: 500)),
+                topologySignature: 123
             )
         )
     }

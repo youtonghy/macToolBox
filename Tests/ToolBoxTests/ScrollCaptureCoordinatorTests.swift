@@ -96,12 +96,154 @@ final class ScrollCaptureCoordinatorTests: XCTestCase {
         XCTAssertEqual(result.source.pixelSize.height, 4)
     }
 
+    func testUnstableFramePausesAutomaticModeUntilUserDecides() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let provider = NeverStableFrameProvider(
+            stableFrame: sample(rows: [.red, .green, .blue, .yellow], time: 1)
+        )
+        let coordinator = ScrollCaptureCoordinator(
+            frameProvider: provider,
+            automaticDriver: FakeScrollDriver(results: Array(repeating: .movementRequested, count: 8)),
+            manualDriver: ManualScrollDriver(),
+            rootDirectory: root,
+            match: { _, _ in
+                OverlapMatch(classification: .noMovement, overlapRowCount: 4, newRowCount: 0, confidence: 1, normalizedError: 0)
+            },
+            validate: { _ in }
+        )
+        let task = Task { try await coordinator.capture(target: target()) }
+        for _ in 0..<200 where coordinator.state != .paused(.unstableFrame) {
+            try await Task.sleep(for: .milliseconds(1))
+        }
+
+        XCTAssertEqual(coordinator.state, .paused(.unstableFrame))
+        XCTAssertEqual(provider.stableCallCount, 1)
+
+        coordinator.finishPartial()
+        let result = try await task.value
+
+        XCTAssertEqual(result.completion, .userFinished)
+        XCTAssertEqual(result.source.pixelSize.height, 4)
+    }
+
+    func testUnstableFrameInManualModeKeepsWaitingWithoutPausing() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stable = sample(rows: [.red, .green, .blue, .yellow], time: 1)
+        let provider = EventuallyStableFrameProvider(stableFrame: stable, unstableAttempts: 2)
+        let coordinator = ScrollCaptureCoordinator(
+            frameProvider: provider,
+            automaticDriver: FakeScrollDriver(results: Array(repeating: .movementRequested, count: 100_000)),
+            manualDriver: FakeScrollDriver(results: Array(repeating: .waitingForManualMovement, count: 100_000)),
+            rootDirectory: root,
+            match: { previous, current in
+                previous == current
+                    ? OverlapMatch(classification: .noMovement, overlapRowCount: 4, newRowCount: 0, confidence: 1, normalizedError: 0)
+                    : OverlapMatch(classification: .forward, overlapRowCount: 2, newRowCount: 2, confidence: 1, normalizedError: 0)
+            },
+            validate: { _ in }
+        )
+        let task = Task { try await coordinator.capture(target: target(), initialMode: .manual) }
+        // Two unstable cycles must be absorbed by re-waiting, not by pausing.
+        for _ in 0..<2_000 where provider.stableCallCount < 3 {
+            await Task.yield()
+        }
+
+        XCTAssertGreaterThanOrEqual(provider.stableCallCount, 3)
+        XCTAssertNotEqual(coordinator.state, .paused(.unstableFrame))
+
+        coordinator.finishPartial()
+        _ = try await task.value
+    }
+
+    func testControlPanelPlacementAvoidsROI() {
+        let visible = CGRect(x: 0, y: 0, width: 1_000, height: 800)
+        let panelSize = NSSize(width: 310, height: 84)
+        let topRight = CGPoint(x: 1_000 - 310 - 16, y: 800 - 84 - 16)
+
+        // ROI in the middle: top-right corner doesn't cover it.
+        XCTAssertEqual(
+            ScrollCaptureControlController.placementOrigin(
+                roi: CGRect(x: 350, y: 300, width: 300, height: 200),
+                visibleFrames: [visible],
+                panelSize: panelSize
+            ),
+            topRight
+        )
+
+        // ROI covering the right half: top-right and bottom-right both intersect,
+        // so bottom-left is chosen.
+        XCTAssertEqual(
+            ScrollCaptureControlController.placementOrigin(
+                roi: CGRect(x: 500, y: 100, width: 500, height: 600),
+                visibleFrames: [visible],
+                panelSize: panelSize
+            ),
+            CGPoint(x: 16, y: 16)
+        )
+
+        // ROI covering the whole screen: fall back to top-right.
+        XCTAssertEqual(
+            ScrollCaptureControlController.placementOrigin(
+                roi: CGRect(x: 0, y: 0, width: 1_000, height: 800),
+                visibleFrames: [visible],
+                panelSize: panelSize
+            ),
+            topRight
+        )
+
+        // No ROI: centered on the first screen.
+        XCTAssertEqual(
+            ScrollCaptureControlController.placementOrigin(
+                roi: nil,
+                visibleFrames: [visible],
+                panelSize: panelSize
+            ),
+            CGPoint(x: (1_000 - 310) / 2, y: (800 - 84) / 2)
+        )
+    }
+
+    func testStandaloneCancelStopsCaptureWithoutCancellingOwningTask() async throws {
+        let root = temporaryRoot()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let stable = sample(rows: [.red, .green, .blue, .yellow], time: 1)
+        let coordinator = ScrollCaptureCoordinator(
+            frameProvider: FakeScrollFrameProvider(samples: Array(repeating: stable, count: 100_000)),
+            automaticDriver: FakeScrollDriver(results: Array(repeating: .movementRequested, count: 100_000)),
+            manualDriver: FakeScrollDriver(results: Array(repeating: .waitingForManualMovement, count: 100_000)),
+            rootDirectory: root,
+            match: { _, _ in
+                OverlapMatch(classification: .noMovement, overlapRowCount: 4, newRowCount: 0, confidence: 1, normalizedError: 0)
+            },
+            validate: { _ in }
+        )
+        let task = Task { try await coordinator.capture(target: target(), initialMode: .manual) }
+        for _ in 0..<2_000 where coordinator.state == .idle {
+            await Task.yield()
+        }
+        XCTAssertNotEqual(coordinator.state, .idle)
+
+        // Cancel the coordinator only — the owning task stays alive, so only
+        // the internal cancel-request flag can stop the loop.
+        coordinator.cancel()
+
+        do {
+            _ = try await task.value
+            XCTFail("expected capture to end with cancellation")
+        } catch let error as ScrollCaptureError {
+            XCTAssertEqual(error, .cancelled)
+        }
+        XCTAssertEqual(coordinator.state, .cancelled)
+    }
+
     private func target() -> ScrollCaptureTargetSnapshot {
         ScrollCaptureTargetSnapshot(
             ownerPID: 42,
             windowID: 7,
             displayID: 1,
             topologyGeneration: 9,
+            topologySignature: 123,
             roiGlobal: CGRect(x: 0, y: 0, width: 2, height: 4),
             windowGlobalFrame: CGRect(x: 0, y: 0, width: 200, height: 300)
         )
@@ -144,6 +286,39 @@ private final class FakeScrollFrameProvider: ScrollCaptureFrameProviding {
     private func next() throws -> ScrollCaptureFrame {
         guard !samples.isEmpty else { throw ScrollCaptureError.captureFailed }
         return samples.removeFirst()
+    }
+}
+
+/// `captureStableFrame` never stabilizes (persistent animation).
+private final class NeverStableFrameProvider: ScrollCaptureFrameProviding {
+    let stableFrame: ScrollCaptureFrame
+    private(set) var stableCallCount = 0
+    init(stableFrame: ScrollCaptureFrame) { self.stableFrame = stableFrame }
+    func captureInitialFrame(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame { stableFrame }
+    func captureStableFrame(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame {
+        stableCallCount += 1
+        throw ScrollCaptureError.frameNeverStable
+    }
+}
+
+/// Throws `frameNeverStable` for the first `unstableAttempts` stable captures,
+/// then keeps returning `stableFrame` (user finished scrolling).
+private final class EventuallyStableFrameProvider: ScrollCaptureFrameProviding {
+    let stableFrame: ScrollCaptureFrame
+    private var unstableAttempts: Int
+    private(set) var stableCallCount = 0
+    init(stableFrame: ScrollCaptureFrame, unstableAttempts: Int) {
+        self.stableFrame = stableFrame
+        self.unstableAttempts = unstableAttempts
+    }
+    func captureInitialFrame(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame { stableFrame }
+    func captureStableFrame(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame {
+        stableCallCount += 1
+        if unstableAttempts > 0 {
+            unstableAttempts -= 1
+            throw ScrollCaptureError.frameNeverStable
+        }
+        return stableFrame
     }
 }
 

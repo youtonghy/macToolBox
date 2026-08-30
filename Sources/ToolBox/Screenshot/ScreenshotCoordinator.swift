@@ -173,15 +173,9 @@ final class ScreenshotCoordinator {
         } catch let error as SelectionError {
             lastError = .selection(error)
         } catch let error as ScreenshotCaptureError {
-            frames.removeAll()
-            overlay.close(cancelled: false)
-            state = .idle
-            lastError = .composition(error)
+            failSelection(.composition(error))
         } catch {
-            frames.removeAll()
-            overlay.close(cancelled: false)
-            state = .idle
-            lastError = .overlay
+            failSelection(.overlay)
         }
     }
 
@@ -198,15 +192,9 @@ final class ScreenshotCoordinator {
             } catch let error as SelectionError {
                 self.lastError = .selection(error)
             } catch let error as ScreenshotCaptureError {
-                self.frames.removeAll()
-                self.overlay.close(cancelled: false)
-                self.state = .idle
-                self.lastError = .composition(error)
+                self.failSelection(.composition(error))
             } catch {
-                self.frames.removeAll()
-                self.overlay.close(cancelled: false)
-                self.state = .idle
-                self.lastError = .overlay
+                self.failSelection(.overlay)
             }
         }
     }
@@ -215,7 +203,7 @@ final class ScreenshotCoordinator {
         switch action {
         case .click(_, additive: false), .manualDrag, .confirm:
             return selectionState.captureMode
-        case .click(_, additive: true), .cycleCandidate, .setCaptureMode, .deleteLast, .undo, .adjustRegion:
+        case .click(_, additive: true), .cycleCandidate, .setCaptureMode, .deleteLast, .undo, .beginAdjustment, .adjustRegion:
             return nil
         }
     }
@@ -233,7 +221,8 @@ final class ScreenshotCoordinator {
             guard generation == sessionGeneration, state == .selecting else { return }
             let target = try ScrollCaptureTargetSnapshot.make(
                 selection: selection,
-                containingWindow: containingWindow
+                containingWindow: containingWindow,
+                topologySignature: ScrollTopologySignature.current()
             )
             frames.removeAll()
             endSelectionSession()
@@ -274,7 +263,7 @@ final class ScreenshotCoordinator {
                     height: child.progressHeight
                 )
             }
-            scrollControls.show()
+            scrollControls.show(avoiding: target.roiGlobal)
             let result = try await child.capture(
                 target: target,
                 initialMode: automatic ? .automatic : .manual
@@ -372,6 +361,17 @@ final class ScreenshotCoordinator {
             hierarchyIndex: 0,
             globalRect: frame.geometry.globalFramePoints
         )
+    }
+
+    /// Fails out of an active selection session. Mirrors `cancel()`'s session
+    /// cleanup — including `endSelectionSession()` — so a failed composition
+    /// doesn't leave AX opt-in attributes enabled or a hover task running.
+    private func failSelection(_ error: ScreenshotCoordinatorError) {
+        frames.removeAll()
+        endSelectionSession()
+        overlay.close(cancelled: false)
+        state = .idle
+        lastError = error
     }
 
     private func fail(_ error: ScreenshotCoordinatorError) {

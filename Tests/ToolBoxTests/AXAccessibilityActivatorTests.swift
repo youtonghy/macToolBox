@@ -102,6 +102,29 @@ final class AXAccessibilityActivatorTests: XCTestCase {
         XCTAssertEqual(recorder.writes.count, writeCount, "second activation must be a no-op")
     }
 
+    func testRestoreSkipsAttributesAlreadyTurnedOffByAnotherClient() {
+        let recorder = Recorder()
+        recorder.initialValues = [
+            AXAccessibilityActivator.manualAccessibilityAttribute: false,
+            AXAccessibilityActivator.enhancedUserInterfaceAttribute: false,
+        ]
+        let activator = makeActivator(recorder)
+        activator.activate(application: dummyElement, pid: 42)
+        // Between activation and restore another client flips both attributes
+        // back off — our restore must not write anything (and in particular
+        // must not fight over state it no longer owns).
+        recorder.initialValues[AXAccessibilityActivator.manualAccessibilityAttribute] = false
+        recorder.initialValues[AXAccessibilityActivator.enhancedUserInterfaceAttribute] = false
+
+        activator.restoreAll { _ in AXUIElementCreateApplication(42) }
+
+        XCTAssertTrue(
+            recorder.writes.filter { !$0.value }.isEmpty,
+            "restore must re-read and skip attributes already disabled externally"
+        )
+        XCTAssertNil(activator.record(for: 42))
+    }
+
     func testRestoreOnlyClearsFlagsThisProcessEnabled() {
         let recorder = Recorder()
         recorder.initialValues = [

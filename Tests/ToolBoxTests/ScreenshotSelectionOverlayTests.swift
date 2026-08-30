@@ -231,6 +231,8 @@ final class ScreenshotSelectionOverlayTests: XCTestCase {
         XCTAssertFalse(manager.panel(for: 2)!.canBecomeKey)
         XCTAssertEqual(manager.panel(for: 1)!.animationBehavior, .none)
         XCTAssertFalse(manager.panel(for: 1)!.isReleasedWhenClosed)
+        XCTAssertTrue(manager.panel(for: 1)!.acceptsMouseMovedEvents,
+                      "hover tracking areas need mouse-moved events before the panel is key")
 
         manager.beginInteraction(on: 2)
         XCTAssertFalse(manager.panel(for: 1)!.canBecomeKey)
@@ -255,6 +257,33 @@ final class ScreenshotSelectionOverlayTests: XCTestCase {
         XCTAssertEqual(manager.panelCount, 0)
     }
 
+    func testCancelRestoresApplicationCapturedAtShowTimeNotAtInit() throws {
+        var frontmostCalls = 0
+        let manager = ScreenshotSelectionOverlayManager(
+            activateApplication: false,
+            frontmostApplication: {
+                frontmostCalls += 1
+                return NSRunningApplication(
+                    processIdentifier: ProcessInfo.processInfo.processIdentifier
+                )
+            }
+        )
+        XCTAssertNil(manager.pendingRestoreApplication)
+
+        try manager.show(frames: [try frame(id: 1, x: 0)], state: .empty)
+        XCTAssertEqual(frontmostCalls, 1)
+        XCTAssertNotNil(manager.pendingRestoreApplication)
+
+        // A second capture session must re-capture the frontmost app at its own
+        // show() — not reuse the app recorded when the manager was created.
+        manager.close(cancelled: false)
+        try manager.show(frames: [try frame(id: 1, x: 0)], state: .empty)
+        XCTAssertEqual(frontmostCalls, 2)
+
+        manager.close(cancelled: true)
+        XCTAssertNil(manager.pendingRestoreApplication)
+    }
+
     func testClosingOverlayClosesVisibleMagnifierWindow() throws {
         let existingWindowNumbers = Set(NSApp.windows.map(\.windowNumber))
         let manager = ScreenshotSelectionOverlayManager(activateApplication: false)
@@ -274,6 +303,66 @@ final class ScreenshotSelectionOverlayTests: XCTestCase {
         manager.close(cancelled: false)
 
         XCTAssertFalse(magnifierWindow.isVisible)
+    }
+
+    func testHandleDragDerivesRectFromGestureOriginWithoutAcceleration() throws {
+        var state = SelectionSessionState.empty
+        try SelectionReducer.reduce(state: &state, action: .click(candidate(), additive: false))
+        var actions: [SelectionAction] = []
+        let view = selectionView(
+            image: try solidImage(width: 100, height: 100, green: 255),
+            state: state,
+            onAction: { actions.append($0) }
+        )
+
+        // Candidate rect is (10, 10, 30×30); the top-right handle sits at its corner.
+        view.mouseDown(with: try mouseEvent(type: .leftMouseDown, point: CGPoint(x: 40, y: 10)))
+        view.mouseDragged(with: try mouseEvent(type: .leftMouseDragged, point: CGPoint(x: 45, y: 15)))
+        view.mouseDragged(with: try mouseEvent(type: .leftMouseDragged, point: CGPoint(x: 50, y: 20)))
+        view.mouseUp(with: try mouseEvent(type: .leftMouseUp, point: CGPoint(x: 50, y: 20)))
+
+        XCTAssertEqual(actions, [
+            .beginAdjustment,
+            .adjustRegion(CGRect(x: 10, y: 15, width: 35, height: 25)),
+            .adjustRegion(CGRect(x: 10, y: 20, width: 40, height: 20)),
+        ])
+    }
+
+    func testCtrlArrowKeysExpandSelectionInAllFourDirections() throws {
+        var state = SelectionSessionState.empty
+        try SelectionReducer.reduce(state: &state, action: .click(candidate(), additive: false))
+        var actions: [SelectionAction] = []
+        let view = selectionView(
+            image: try solidImage(width: 100, height: 100, green: 255),
+            state: state,
+            onAction: { actions.append($0) }
+        )
+
+        view.keyDown(with: try keyEvent(keyCode: 124, flags: .control)) // Right
+        view.keyDown(with: try keyEvent(keyCode: 126, flags: .control)) // Up
+
+        XCTAssertEqual(actions, [
+            .beginAdjustment,
+            .adjustRegion(CGRect(x: 10, y: 10, width: 31, height: 30)),
+            .beginAdjustment,
+            .adjustRegion(CGRect(x: 10, y: 10, width: 30, height: 31)),
+        ])
+    }
+
+    func testZeroDimensionDragIsNotCommittedAsManualRegion() throws {
+        var actions: [SelectionAction] = []
+        let view = selectionView(
+            image: try solidImage(width: 100, height: 100, green: 255),
+            onAction: { actions.append($0) }
+        )
+
+        // Perfectly horizontal drag (height 0): the reducer would reject a
+        // zero-area rect, so the view must not dispatch it as a manual drag.
+        view.mouseDown(with: try mouseEvent(type: .leftMouseDown, point: CGPoint(x: 10, y: 10)))
+        view.mouseDragged(with: try mouseEvent(type: .leftMouseDragged, point: CGPoint(x: 60, y: 10)))
+        view.mouseUp(with: try mouseEvent(type: .leftMouseUp, point: CGPoint(x: 60, y: 10)))
+
+        XCTAssertTrue(actions.isEmpty)
     }
 
     private func frame(id: CGDirectDisplayID, x: CGFloat) throws -> DisplayCaptureFrame {

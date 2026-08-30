@@ -186,9 +186,10 @@ actor OCRFeatureService: OCRFeatureServing {
         
         // System Vision pipeline: no download, no worker, always available
         if selection.pipeline == .systemVision {
-            let engine = SystemVisionOCREngine()
-            let fullImage = try source.copyPixels(in: CGRect(origin: .zero, size: source.pixelSize))
-            let document = try await engine.recognize(image: fullImage)
+            let document = try await recognizeWithSystemVision(
+                engine: SystemVisionOCREngine(),
+                source: source
+            )
             return .text(document)
         }
         
@@ -236,6 +237,79 @@ actor OCRFeatureService: OCRFeatureServing {
             throw OCRFeatureServiceError.modelUnavailable(selection)
         }
         return manifest
+    }
+
+    /// Vision has no built-in tiling: feeding a near-512 MiB long screenshot as
+    /// one CGImage would materialize it (plus Vision's own buffers) on the heap.
+    /// Tile with the same planner the local Paddle engine uses, then merge
+    /// tile-local lines back into full-image coordinates.
+    private func recognizeWithSystemVision(
+        engine: SystemVisionOCREngine,
+        source: ScreenshotImageSource
+    ) async throws -> TextOCRDocument {
+        let planner = try PaddleOCRTilePlanner()
+        let fullSize = source.pixelSize
+        let tiles = planner.tiles(for: fullSize)
+        guard !tiles.isEmpty else {
+            throw OCRFeatureServiceError.modelUnavailable(
+                OCRModelSelection(pipeline: .systemVision, variantID: "default")
+            )
+        }
+        var lines: [OCRTextLine] = []
+        for tile in tiles {
+            try Task.checkCancellation()
+            let image = try source.copyPixels(in: tile)
+            let document = try await engine.recognize(image: image)
+            lines.append(contentsOf: Self.rebased(document.lines, from: tile, to: fullSize))
+        }
+        return TextOCRDocument(lines: Self.deduplicated(lines))
+    }
+
+    /// Maps tile-normalized polygons (0…1 within the tile) to full-image
+    /// normalized coordinates.
+    static func rebased(
+        _ lines: [OCRTextLine],
+        from tile: CGRect,
+        to fullSize: CGSize
+    ) -> [OCRTextLine] {
+        lines.compactMap { line in
+            let polygon = line.normalizedPolygon.map { point in
+                CGPoint(
+                    x: (tile.minX + point.x * tile.width) / fullSize.width,
+                    y: (tile.minY + point.y * tile.height) / fullSize.height
+                )
+            }
+            return try? OCRTextLine(
+                text: line.text,
+                confidence: line.confidence,
+                normalizedPolygon: polygon
+            )
+        }
+    }
+
+    /// Drops near-identical lines detected twice in overlapping tile regions.
+    static func deduplicated(_ lines: [OCRTextLine]) -> [OCRTextLine] {
+        var accepted: [OCRTextLine] = []
+        for line in lines {
+            let isDuplicate = accepted.contains(where: { existing in
+                existing.text == line.text
+                    && intersectionOverUnion(of: existing.bounds, and: line.bounds) > 0.5
+            })
+            if !isDuplicate {
+                accepted.append(line)
+            }
+        }
+        return accepted
+    }
+
+    static func intersectionOverUnion(of lhs: CGRect, and rhs: CGRect) -> CGFloat {
+        let intersection = lhs.intersection(rhs)
+        guard !intersection.isNull else { return 0 }
+        let unionArea = lhs.width * lhs.height
+            + rhs.width * rhs.height
+            - intersection.width * intersection.height
+        guard unionArea > 0 else { return 0 }
+        return (intersection.width * intersection.height) / unionArea
     }
 
     private func catalog() throws -> OCRModelCatalog {

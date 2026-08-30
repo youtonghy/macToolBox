@@ -8,6 +8,10 @@ enum ScrollCaptureMode: Equatable, Sendable {
 enum ScrollCaptureIssue: Equatable, Sendable {
     case lowConfidence
     case reverseMovement
+    /// The ROI never stabilized within the sampling budget (persistent
+    /// animation or scroll inertia). Stitching an unstable frame would
+    /// duplicate or tear content, so the user must decide how to proceed.
+    case unstableFrame
 }
 
 enum ScrollCaptureCompletion: Equatable, Sendable {
@@ -47,6 +51,9 @@ final class ScrollCaptureCoordinator {
     private let match: @Sendable (LumaFrame, LumaFrame) throws -> OverlapMatch
     private let validate: (ScrollCaptureTargetSnapshot) throws -> Void
     private var pauseContinuation: CheckedContinuation<PauseAction, Never>?
+    /// Set by `cancel()` so the capture loop stops even when the owning task
+    /// itself was never cancelled. Checked at every loop iteration.
+    private var cancelRequested = false
 
     var onStateChange: (ScrollCaptureState) -> Void = { _ in }
     private(set) var state: ScrollCaptureState = .idle {
@@ -85,6 +92,7 @@ final class ScrollCaptureCoordinator {
         guard state == .idle else { throw ScrollCaptureError.captureFailed }
         mode = initialMode
         finishRequested = false
+        cancelRequested = false
         var sessionDirectory: URL?
         do {
             state = .acquiringTarget
@@ -105,6 +113,10 @@ final class ScrollCaptureCoordinator {
 
             while true {
                 try Task.checkCancellation()
+                // `cancel()` may be invoked without the owning task being
+                // cancelled (standalone use); honour the request at the next
+                // loop checkpoint so the capture actually stops.
+                if cancelRequested { throw CancellationError() }
                 if finishRequested {
                     return try finish(store: store, completion: .userFinished)
                 }
@@ -120,7 +132,21 @@ final class ScrollCaptureCoordinator {
                 }
 
                 state = .waitingForStability
-                let current = try await frameProvider.captureStableFrame(target: target)
+                let current: ScrollCaptureFrame
+                do {
+                    current = try await frameProvider.captureStableFrame(target: target)
+                } catch ScrollCaptureError.frameNeverStable {
+                    // In manual mode the user may simply still be scrolling —
+                    // keep waiting. In automatic mode, persistent motion can't
+                    // be resolved by posting more scroll events: pause.
+                    if mode == .manual { continue }
+                    switch await pause(for: .unstableFrame) {
+                    case .retry: continue
+                    case .switchToManual: mode = .manual; continue
+                    case .finish: return try finish(store: store, completion: .userFinished)
+                    case .cancel: throw CancellationError()
+                    }
+                }
                 guard current.image.width == previous.image.width,
                       current.image.height == previous.image.height else {
                     throw ScrollCaptureError.frameDimensionsChanged
@@ -190,6 +216,7 @@ final class ScrollCaptureCoordinator {
         resumePause(with: .finish)
     }
     func cancel() {
+        cancelRequested = true
         if pauseContinuation != nil {
             resumePause(with: .cancel)
         } else if state != .idle {

@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import ImageIO
+import UniformTypeIdentifiers
 import XCTest
 @testable import ToolBoxCore
 
@@ -177,6 +178,87 @@ final class AnnotationRendererTests: XCTestCase {
         }
     }
 
+    func testSourceExportBandsMatchWholeImageExportByteForByte() throws {
+        // Build a real file-backed long screenshot: 2×6 with distinct row colors.
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("source-export-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ScrollCaptureStripStore(
+            initialImage: try gradientRows(width: 2, height: 4),
+            rootDirectory: root
+        )
+        try store.append(try gradientRows(width: 2, height: 2, offset: 4))
+        let recorder = RecordingDelegateSource(
+            inner: try store.makeImageSource()
+        )
+        let directory = FileManager.default.temporaryDirectory
+        let wholeURL = directory.appendingPathComponent("source-export-whole-\(UUID().uuidString).png")
+        let bandedURL = directory.appendingPathComponent("source-export-banded-\(UUID().uuidString).png")
+        defer {
+            try? FileManager.default.removeItem(at: wholeURL)
+            try? FileManager.default.removeItem(at: bandedURL)
+        }
+
+        // Baseline: the pre-banding implementation — one full-image copyPixels
+        // handed straight to ImageIO.
+        let whole = try recorder.innerCopyPixels(in: CGRect(origin: .zero, size: recorder.pixelSize))
+        let wholeDestination = try XCTUnwrap(CGImageDestinationCreateWithURL(
+            wholeURL as CFURL, UTType.png.identifier as CFString, 1, nil
+        ))
+        CGImageDestinationAddImage(wholeDestination, whole, nil)
+        XCTAssertTrue(CGImageDestinationFinalize(wholeDestination))
+
+        // bytesPerRow = 8; bandMaximumBytes = 32 → 4-row bands → 2 bands.
+        try ScreenshotPNGExporter(bandMaximumBytes: 32).export(source: recorder, to: bandedURL)
+
+        XCTAssertEqual(recorder.requestCount, 2)
+        XCTAssertLessThanOrEqual(recorder.maximumRequestedBytes, 32)
+
+        let wholeImage = try XCTUnwrap(pngImage(at: wholeURL))
+        let bandedImage = try XCTUnwrap(pngImage(at: bandedURL))
+        XCTAssertEqual(bandedImage.width, wholeImage.width)
+        XCTAssertEqual(bandedImage.height, wholeImage.height)
+        for row in 0..<wholeImage.height {
+            XCTAssertEqual(
+                try pngRow(image: bandedImage, row: row),
+                try pngRow(image: wholeImage, row: row),
+                "banded export must be byte-equivalent to the whole-image export at row \(row)"
+            )
+        }
+    }
+
+    private func pngImage(at url: URL) throws -> CGImage? {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    private func pngRow(image: CGImage, row: Int) throws -> [UInt8] {
+        let data = try XCTUnwrap(image.dataProvider?.data)
+        let bytes = try XCTUnwrap(CFDataGetBytePtr(data))
+        return Array(UnsafeBufferPointer(
+            start: bytes + row * image.bytesPerRow,
+            count: image.width * 4
+        ))
+    }
+
+    private func gradientRows(width: Int, height: Int, offset: Int = 0) throws -> CGImage {
+        let context = try XCTUnwrap(CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: width * 4,
+            space: CGColorSpace(name: CGColorSpace.sRGB)!,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ))
+        for row in 0..<height {
+            let gray = CGFloat((offset + row) % 256) / 255
+            context.setFillColor(red: gray, green: gray, blue: gray, alpha: 1)
+            context.fill(CGRect(x: 0, y: row, width: width, height: 1))
+        }
+        return try XCTUnwrap(context.makeImage())
+    }
+
     private func makeImage(
         width: Int,
         height: Int,
@@ -321,5 +403,30 @@ private final class InvalidSizeImageSource: ScreenshotImageSource {
 
     func copyPixels(in rect: CGRect) throws -> CGImage {
         throw AnnotationError.invalidGeometry
+    }
+}
+
+/// Delegates to a real file-backed source while recording the size of every
+/// `copyPixels` request, so banding tests can assert bounded reads.
+private final class RecordingDelegateSource: ScreenshotImageSource, @unchecked Sendable {
+    let id = UUID()
+    let pixelSize: CGSize
+    private(set) var maximumRequestedBytes = 0
+    private(set) var requestCount = 0
+    private let inner: ScreenshotImageSource
+
+    init(inner: ScreenshotImageSource) {
+        self.inner = inner
+        pixelSize = inner.pixelSize
+    }
+
+    func copyPixels(in rect: CGRect) throws -> CGImage {
+        requestCount += 1
+        maximumRequestedBytes = max(maximumRequestedBytes, Int(rect.width) * Int(rect.height) * 4)
+        return try inner.copyPixels(in: rect)
+    }
+
+    func innerCopyPixels(in rect: CGRect) throws -> CGImage {
+        try inner.copyPixels(in: rect)
     }
 }

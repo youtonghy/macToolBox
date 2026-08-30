@@ -342,23 +342,29 @@ final class ScreenshotEditorModel: ObservableObject {
                     throw error
                 }
                 self?.errorMessage = nil
-                
+
+                // Clear the exporting flag before auto-close so the controller's
+                // close() guard (which rejects while exporting) accepts the close.
+                self?.setExporting(false)
                 if autoClose {
                     self?.onClose()
                 }
             } catch {
                 self?.errorMessage = self?.localized(error)
+                self?.setExporting(false)
             }
-            self?.setExporting(false)
         }
     }
 
     func save(autoClose: Bool = false) {
+        // Check the busy flag before presenting the modal panel — otherwise an
+        // in-flight export (e.g. the hidden Cmd+S shortcut, which stays active
+        // while controls are disabled) pops a save dialog on top of it.
+        guard !isExporting else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "ToolBox Screenshot.png"
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard !isExporting else { return }
         setExporting(true)
         let document = state.document
         let exporter = exporter
@@ -368,14 +374,15 @@ final class ScreenshotEditorModel: ObservableObject {
                     try exporter.export(document: document, to: url)
                 }.value
                 self?.errorMessage = nil
-                
+
+                self?.setExporting(false)
                 if autoClose {
                     self?.onClose()
                 }
             } catch {
                 self?.errorMessage = self?.localized(error)
+                self?.setExporting(false)
             }
-            self?.setExporting(false)
         }
     }
 

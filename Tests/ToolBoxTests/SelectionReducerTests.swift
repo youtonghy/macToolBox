@@ -3,6 +3,32 @@ import XCTest
 @testable import ToolBoxCore
 
 final class SelectionReducerTests: XCTestCase {
+    func testAdjustmentGestureRecordsSingleUndoEntry() throws {
+        var state = SelectionSessionState.empty
+        try SelectionReducer.reduce(state: &state, action: .click(candidate(id: "first"), additive: false))
+        let original = state.captureBounds
+
+        // One gesture: `.beginAdjustment` once, then live adjustRegion events.
+        try SelectionReducer.reduce(state: &state, action: .beginAdjustment)
+        XCTAssertEqual(state.captureBounds, original)
+        try SelectionReducer.reduce(state: &state, action: .adjustRegion(CGRect(x: 2, y: 2, width: 30, height: 30)))
+        try SelectionReducer.reduce(state: &state, action: .adjustRegion(CGRect(x: 4, y: 4, width: 40, height: 40)))
+        XCTAssertEqual(state.captureBounds, CGRect(x: 4, y: 4, width: 40, height: 40))
+        XCTAssertEqual(state.selectedRegions.isEmpty, true)
+
+        // A single undo restores the pre-gesture selection.
+        try SelectionReducer.reduce(state: &state, action: .undo)
+        XCTAssertEqual(state.captureBounds, original)
+        XCTAssertEqual(state.selectedRegions.count, 1)
+
+        // Bare `adjustRegion` without `.beginAdjustment` adds no undo entry:
+        // the only remaining history is the pre-click empty snapshot.
+        try SelectionReducer.reduce(state: &state, action: .adjustRegion(CGRect(x: 1, y: 1, width: 10, height: 10)))
+        try SelectionReducer.reduce(state: &state, action: .undo)
+        XCTAssertNil(state.captureBounds)
+        XCTAssertTrue(state.selectedRegions.isEmpty)
+    }
+
     func testCaptureModeDefaultsToStaticAndCanSwitchToScroll() throws {
         var state = SelectionSessionState.empty
         XCTAssertEqual(state.captureMode, .staticCapture)

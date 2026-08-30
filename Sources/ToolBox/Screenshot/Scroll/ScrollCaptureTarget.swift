@@ -16,6 +16,10 @@ struct ScrollCaptureTargetSnapshot: Equatable, Sendable {
     let windowID: CGWindowID
     let displayID: CGDirectDisplayID
     let topologyGeneration: UInt64
+    /// Display-topology signature captured when the target was created.
+    /// Recomputed live by the observer; a mismatch means displays were
+    /// re-arranged, re-scaled, or hot-plugged since the capture began.
+    let topologySignature: UInt64
     let roiGlobal: CGRect
     let windowGlobalFrame: CGRect
 
@@ -25,7 +29,8 @@ struct ScrollCaptureTargetSnapshot: Equatable, Sendable {
 
     static func make(
         selection: SelectionSessionState,
-        containingWindow: SelectionCandidate?
+        containingWindow: SelectionCandidate?,
+        topologySignature: UInt64
     ) throws -> Self {
         guard let roi = selection.captureBounds,
               roi.isFinite,
@@ -59,6 +64,7 @@ struct ScrollCaptureTargetSnapshot: Equatable, Sendable {
             windowID: windowID,
             displayID: window.displayID,
             topologyGeneration: window.topologyGeneration,
+            topologySignature: topologySignature,
             roiGlobal: roi,
             windowGlobalFrame: window.globalRect
         )

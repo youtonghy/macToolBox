@@ -148,6 +148,30 @@ final class ScreenshotEditorPreviewTests: XCTestCase {
         return image
     }
 
+    @MainActor
+    func testCopyAutoCloseClearsExportingFlagBeforeClosing() async throws {
+        let image = try verticallySplitImage(width: 40, height: 20)
+        let document = ScreenshotDocument(baseImage: CGImageScreenshotSource(image: image))
+        let preview = try ScreenshotEditorPreviewBuilder().makeBasePreview(document: document)
+        let model = try ScreenshotEditorModel(document: document, preview: preview)
+
+        var closeCount = 0
+        var exportingAtClose: [Bool] = []
+        model.onClose = { [weak model] in
+            closeCount += 1
+            exportingAtClose.append(model?.isExporting ?? true)
+        }
+
+        model.copy(autoClose: true)
+        for _ in 0..<100 where closeCount == 0 {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+
+        XCTAssertEqual(closeCount, 1)
+        XCTAssertEqual(exportingAtClose, [false],
+                       "onClose must run after isExporting clears, or the controller rejects the close")
+    }
+
     private func pixel(in image: CGImage, x: Int, rowFromTop: Int) -> [UInt8] {
         guard let data = image.dataProvider?.data,
               let bytes = CFDataGetBytePtr(data)

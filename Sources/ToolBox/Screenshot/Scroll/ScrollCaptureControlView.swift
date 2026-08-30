@@ -12,7 +12,7 @@ final class ScrollCaptureControlController {
     private let retryButton = NSButton(title: "重试", target: nil, action: nil)
     private let manualButton = NSButton(title: "手动", target: nil, action: nil)
 
-    func show() {
+    func show(avoiding roi: CGRect? = nil) {
         close()
         let finishButton = NSButton(title: "完成", target: self, action: #selector(finish))
         let cancelButton = NSButton(title: "取消", target: self, action: #selector(cancel))
@@ -45,9 +45,55 @@ final class ScrollCaptureControlController {
         panel.isMovableByWindowBackground = true
         panel.hidesOnDeactivate = false
         panel.contentView = stack
-        panel.center()
+        let panelSize = panel.frame.size
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        panel.setFrameOrigin(
+            Self.placementOrigin(roi: roi, visibleFrames: visibleFrames, panelSize: panelSize)
+        )
         self.panel = panel
         panel.orderFrontRegardless()
+    }
+
+    /// Picks the panel origin on the screen containing the ROI, preferring
+    /// corners that don't cover the ROI — the panel would otherwise intercept
+    /// the auto-scroll events posted at the ROI center or the user's manual
+    /// scrolling. Pure over its inputs for unit testing.
+    ///
+    /// - Without an ROI (or no matching screen), centers on the first screen.
+    /// - Corner order: top-right, bottom-right, bottom-left, top-left, with a
+    ///   12 pt avoidance margin; if every corner intersects the ROI, falls
+    ///   back to the top-right corner of the ROI's screen.
+    static func placementOrigin(
+        roi: CGRect?,
+        visibleFrames: [CGRect],
+        panelSize: NSSize
+    ) -> CGPoint {
+        guard let first = visibleFrames.first else { return .zero }
+        let margin: CGFloat = 16
+        let avoidance: CGFloat = 12
+        let candidates: (CGRect) -> [CGPoint] = { visible in
+            [
+                CGPoint(x: visible.maxX - panelSize.width - margin, y: visible.maxY - panelSize.height - margin),
+                CGPoint(x: visible.maxX - panelSize.width - margin, y: visible.minY + margin),
+                CGPoint(x: visible.minX + margin, y: visible.minY + margin),
+                CGPoint(x: visible.minX + margin, y: visible.maxY - panelSize.height - margin),
+            ]
+        }
+        guard let roi else {
+            return CGPoint(
+                x: first.midX - panelSize.width / 2,
+                y: first.midY - panelSize.height / 2
+            )
+        }
+        let screen = visibleFrames.first { $0.contains(CGPoint(x: roi.midX, y: roi.midY)) } ?? first
+        let origins = candidates(screen)
+        for origin in origins {
+            let frame = CGRect(origin: origin, size: panelSize).insetBy(dx: -avoidance, dy: -avoidance)
+            if !frame.intersects(roi) {
+                return origin
+            }
+        }
+        return origins[0]
     }
 
     func update(state: ScrollCaptureState, mode: ScrollCaptureMode, height: Int) {
@@ -64,6 +110,9 @@ final class ScrollCaptureControlController {
             retryButton.isHidden = false
         case .paused(.reverseMovement):
             statusLabel.stringValue = "检测到反向滚动"
+            retryButton.isHidden = false
+        case .paused(.unstableFrame):
+            statusLabel.stringValue = "画面持续变化，等待稳定"
             retryButton.isHidden = false
         default: break
         }

@@ -35,13 +35,18 @@ enum SelectionReducer {
         case .undo:
             state.restoreUndo()
 
+        case .beginAdjustment:
+            state.pushUndoSnapshot()
+
         case let .manualDrag(rect):
             guard isValid(rect) else { throw SelectionError.invalidRegion }
             state.replaceSelection(with: [], manualRegion: rect)
 
         case let .adjustRegion(rect):
             guard isValid(rect) else { throw SelectionError.invalidRegion }
-            state.replaceSelection(with: [], manualRegion: rect)
+            // Undo is recorded once per gesture via `.beginAdjustment`, not per
+            // live drag event, so the undo stack isn't flooded during a handle drag.
+            state.replaceSelection(with: [], manualRegion: rect, recordsUndo: false)
 
         case .confirm:
             guard state.captureBounds != nil else { throw SelectionError.emptySelection }

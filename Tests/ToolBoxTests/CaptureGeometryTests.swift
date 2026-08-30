@@ -214,3 +214,37 @@ final class CaptureGeometryTests: XCTestCase {
         )
     }
 }
+
+@MainActor
+final class ScreenCaptureRegionGeometryTests: XCTestCase {
+    func testDisplayLocalSourceRectConvertsGlobalAppKitToTopLeftLocal() {
+        let screen = CGRect(x: 100, y: 200, width: 400, height: 300)
+
+        // Region flush with the screen's top-left corner → local origin (0, 0).
+        XCTAssertEqual(
+            ScreenCaptureProvider.displayLocalSourceRect(
+                globalRegion: CGRect(x: 100, y: 470, width: 50, height: 30),
+                screenFrame: screen
+            ),
+            CGRect(x: 0, y: 0, width: 50, height: 30)
+        )
+
+        // Region flush with the screen's bottom-right corner.
+        XCTAssertEqual(
+            ScreenCaptureProvider.displayLocalSourceRect(
+                globalRegion: CGRect(x: 450, y: 200, width: 50, height: 30),
+                screenFrame: screen
+            ),
+            CGRect(x: 350, y: 270, width: 50, height: 30)
+        )
+
+        // Passing the whole screen frame must yield the full local rect.
+        XCTAssertEqual(
+            ScreenCaptureProvider.displayLocalSourceRect(
+                globalRegion: screen,
+                screenFrame: screen
+            ),
+            CGRect(x: 0, y: 0, width: 400, height: 300)
+        )
+    }
+}

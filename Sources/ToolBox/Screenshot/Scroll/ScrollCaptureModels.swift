@@ -3,6 +3,7 @@ import Foundation
 enum ScrollCaptureError: Error, Equatable {
     case invalidLumaFrame
     case frameDimensionsChanged
+    case frameNeverStable
     case nonMonotonicTimestamp
     case insufficientComparableContent
     case invalidStrip

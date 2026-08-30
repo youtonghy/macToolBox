@@ -85,18 +85,17 @@ final class DefaultScrollCaptureFrameProvider: ScrollCaptureFrameProviding {
 
     func captureStableFrame(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame {
         var detector = FrameStabilityDetector()
-        var last: ScrollCaptureFrame?
         for _ in 0..<maximumSamples {
             try Task.checkCancellation()
             let frame = try await capture(target: target)
-            last = frame
             if try detector.observe(frame.luma, timestamp: frame.timestamp) == .stable {
                 return frame
             }
             try await Task.sleep(for: sampleCadence)
         }
-        guard let last else { throw ScrollCaptureError.captureFailed }
-        return last
+        // Never stabilized (persistent animation or scroll inertia). Returning
+        // the last frame would stitch a moving frame as if it were stable.
+        throw ScrollCaptureError.frameNeverStable
     }
 
     private func capture(target: ScrollCaptureTargetSnapshot) async throws -> ScrollCaptureFrame {
