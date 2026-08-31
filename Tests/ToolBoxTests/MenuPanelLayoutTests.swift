@@ -395,6 +395,216 @@ final class MenuPanelLayoutTests: XCTestCase {
         XCTAssertEqual(runtimeInsets.right, MenuPanelLayout.contentInsets.right)
     }
 
+    // MARK: - Configurable element layout
+
+    func testConfigurableLayoutMatchesLegacyFlagsAcrossSectionCombinations() {
+        let combinations: [(cables: Int, display: Bool, audio: Bool, preset: Bool, lite: Bool)] = [
+            (3, true, true, true, false),
+            (1, true, true, false, false),
+            (0, false, true, false, false),
+            (2, true, false, true, false),
+            (1, false, false, false, false),
+            (3, true, true, true, true),
+        ]
+
+        for combination in combinations {
+            let legacy = MenuPanelLayout.contentHeight(
+                cableItemCount: combination.cables,
+                showsDisplayControl: combination.display,
+                showsAudioSection: combination.audio,
+                showsColorPreset: combination.preset,
+                audioRowCount: combination.audio ? 3 : 0,
+                isAudioLiteMode: combination.lite
+            )
+            let context = MenuBarElementRuntimeContext(
+                cableItemCount: combination.cables,
+                audioRowCount: combination.audio ? 3 : 0,
+                isAudioLiteMode: combination.lite,
+                hasExternalDisplay: combination.display,
+                showsColorPreset: combination.preset
+            )
+            let configurable = MenuPanelLayout.contentHeight(
+                elements: MenuBarElementProjection.visibleElements(
+                    from: MenuBarLayoutConfiguration.default().entries,
+                    context: context
+                ),
+                context: context
+            )
+
+            XCTAssertEqual(legacy, configurable, "combination: \(combination)")
+        }
+    }
+
+    func testContentHeightFollowsConfiguredElementOrder() {
+        let context = MenuBarElementRuntimeContext(
+            cableItemCount: 1,
+            audioRowCount: 3,
+            isAudioLiteMode: false,
+            hasExternalDisplay: true,
+            showsColorPreset: true
+        )
+        let reversed = MenuBarElementID.defaultOrder.reversed()
+
+        let defaultHeight = MenuPanelLayout.contentHeight(
+            elements: Array(MenuBarElementID.defaultOrder),
+            context: context
+        )
+        let reversedHeight = MenuPanelLayout.contentHeight(
+            elements: Array(reversed),
+            context: context
+        )
+
+        // Reordering never changes the total height: spacing depends only on
+        // quick-controls adjacency, and every element stays adjacent to a
+        // regular section in both orders.
+        XCTAssertEqual(defaultHeight, reversedHeight)
+    }
+
+    func testQuickControlsKeepsOuterSpacingWhereverPlaced() {
+        let context = MenuBarElementRuntimeContext(
+            cableItemCount: 1,
+            audioRowCount: 3,
+            isAudioLiteMode: false,
+            hasExternalDisplay: true,
+            showsColorPreset: true
+        )
+        let withQuickControlsFirst = MenuBarLayoutConfiguration(entries: [
+            MenuBarElementEntry(id: .quickControls),
+            MenuBarElementEntry(id: .chipPower),
+            MenuBarElementEntry(id: .appAudio),
+            MenuBarElementEntry(id: .cableStatus),
+            MenuBarElementEntry(id: .wifiSignal),
+            MenuBarElementEntry(id: .displayControl),
+        ])
+        let visible = MenuBarElementProjection.visibleElements(
+            from: withQuickControlsFirst.entries,
+            context: context
+        )
+
+        XCTAssertEqual(visible.first, .quickControls)
+        XCTAssertEqual(
+            MenuPanelLayout.spacing(after: nil, element: .quickControls),
+            MenuPanelLayout.outerSpacing
+        )
+        XCTAssertEqual(
+            MenuPanelLayout.spacing(after: .quickControls, element: .chipPower),
+            MenuPanelLayout.outerSpacing
+        )
+        XCTAssertEqual(
+            MenuPanelLayout.spacing(after: .chipPower, element: .appAudio),
+            MenuPanelLayout.contentSpacing
+        )
+
+        // The legacy default order has the same total height because swapping
+        // the quick-controls position swaps two outer spacings symmetrically.
+        XCTAssertEqual(
+            MenuPanelLayout.contentHeight(elements: visible, context: context),
+            MenuPanelLayout.contentHeight(
+                elements: MenuBarElementProjection.visibleElements(
+                    from: MenuBarLayoutConfiguration.default().entries,
+                    context: context
+                ),
+                context: context
+            )
+        )
+    }
+
+    func testPanelHeightIgnoresHiddenAndUnavailableElements() {
+        let context = MenuBarElementRuntimeContext(
+            cableItemCount: 0,
+            audioRowCount: 0,
+            isAudioLiteMode: false,
+            hasExternalDisplay: false,
+            showsColorPreset: false
+        )
+        let compactExpected = MenuPanelLayout.panelHeight(
+            elements: [.chipPower, .wifiSignal, .quickControls],
+            context: context
+        )
+
+        // Runtime-unavailable elements drop out of the shared projection even
+        // when the user keeps them enabled, so the panel never reserves space
+        // for them.
+        let projected = MenuBarElementProjection.visibleElements(
+            from: MenuBarLayoutConfiguration.default().entries,
+            context: context
+        )
+        XCTAssertEqual(projected, [.chipPower, .wifiSignal, .quickControls])
+        XCTAssertEqual(
+            MenuPanelLayout.panelHeight(elements: projected, context: context),
+            compactExpected
+        )
+    }
+
+    func testPanelWithEverythingHiddenKeepsOnlyHeaderArea() {
+        let context = MenuBarElementRuntimeContext()
+
+        XCTAssertEqual(
+            MenuPanelLayout.panelHeight(elements: [], context: context),
+            MenuPanelLayout.headerHeight
+                + MenuPanelLayout.contentInsets.top
+                + MenuPanelLayout.contentInsets.bottom
+        )
+        XCTAssertLessThan(
+            MenuPanelLayout.panelHeight(elements: [], context: context),
+            80
+        )
+    }
+
+    func testDynamicElementReturnsToConfiguredPositionAfterRecovery() {
+        var configuration = MenuBarLayoutConfiguration.default()
+        configuration.entries.swapAt(4, 0) // chipPower <-> displayControl
+        let entries = configuration.entries
+
+        let offline = MenuBarElementRuntimeContext()
+        let online = MenuBarElementRuntimeContext(
+            cableItemCount: 2,
+            audioRowCount: 3,
+            isAudioLiteMode: false,
+            hasExternalDisplay: true,
+            showsColorPreset: true
+        )
+
+        // Offline only the always-available elements stay, in configured order.
+        XCTAssertEqual(
+            MenuBarElementProjection.visibleElements(from: entries, context: offline),
+            [.wifiSignal, .chipPower, .quickControls]
+        )
+        // Online every element is back — chipPower stays at its configured
+        // slot after displayControl.
+        XCTAssertEqual(
+            MenuBarElementProjection.visibleElements(from: entries, context: online),
+            [.displayControl, .appAudio, .cableStatus, .wifiSignal, .chipPower, .quickControls]
+        )
+
+        // The panel grows back by exactly the three data-driven sections.
+        let offlineHeight = MenuPanelLayout.panelHeight(
+            elements: MenuBarElementProjection.visibleElements(from: entries, context: offline),
+            context: offline
+        )
+        let onlineHeight = MenuPanelLayout.panelHeight(
+            elements: MenuBarElementProjection.visibleElements(from: entries, context: online),
+            context: online
+        )
+        XCTAssertEqual(
+            onlineHeight - offlineHeight,
+            MenuPanelLayout.contentSpacing * 3
+                + MenuPanelLayout.audioSectionHeight
+                + MenuPanelLayout.cableSectionHeight(itemCount: 2)
+                + MenuPanelLayout.displaySectionHeight(showsColorPreset: true)
+        )
+    }
+
+    func testPanelContentWidthMatchesSectionDesignWidth() {
+        XCTAssertEqual(
+            MenuPanelLayout.panelContentWidth,
+            MenuPanelLayout.size.width
+                - MenuPanelLayout.contentInsets.left
+                - MenuPanelLayout.contentInsets.right
+        )
+        XCTAssertEqual(MenuPanelLayout.panelContentWidth, 532)
+    }
+
     func testDisplayPresetRowAppearsImmediatelyBelowContrast() {
         XCTAssertEqual(
             DisplayControlPanelLayout.rows(showsPreset: false),

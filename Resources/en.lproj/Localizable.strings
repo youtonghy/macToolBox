@@ -77,3 +77,27 @@
 "转换并覆盖时写入新扩展名文件，成功后删除源文件（先写后删）。" = "Convert-and-overwrite writes a file with the new extension, then deletes the source only after success.";
 
 "DDC 只写模式，当前值为估算值" = "DDC write-only – current values are estimated";
+
+"自定义" = "Customize";
+"菜单栏布局" = "Menu Bar Layout";
+"拖拽调整顺序，开关控制显示" = "Drag to reorder; toggles control visibility";
+"卡片即菜单栏真实内容，实时更新；布局修改立即同步到菜单栏。" = "Cards show the live menu-bar content in real time; layout edits sync to the menu bar instantly.";
+"默认布局" = "Default Layout";
+"恢复默认布局" = "Restore Default Layout";
+"芯片功耗 → 应用音频 → 线缆状态 → Wi-Fi → 显示器控制 → 快捷控制" = "Chip Power → App Audio → Cables → Wi-Fi → Displays → Quick Controls";
+"恢复" = "Restore";
+"拖拽调整顺序" = "Drag to reorder";
+"第 %d 位" = "Position %d";
+"当前不可用，菜单栏暂不显示；恢复后自动回到原位置" = "Currently unavailable and hidden from the menu bar; it returns to its position once data is back";
+"在菜单栏显示“%@”" = "Show “%@” in the menu bar";
+"菜单栏暂不显示该组件，数据恢复后自动回到原位置" = "Hidden from the menu bar for now; it returns automatically when data is available";
+"当前没有应用音频数据" = "No app audio right now";
+"未检测到线缆" = "No cables detected";
+"未检测到外接显示器" = "No external display detected";
+"当前不可用" = "Currently unavailable";
+"芯片功耗" = "Chip Power";
+"应用音频" = "App Audio";
+"线缆状态" = "Cable Status";
+"Wi-Fi 信号" = "Wi-Fi Signal";
+"显示器控制" = "Display Control";
+"快捷控制" = "Quick Controls";

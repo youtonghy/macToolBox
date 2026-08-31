@@ -30,6 +30,10 @@ enum MenuPanelLayout {
     static let verticalGap: CGFloat = 8
 
     static let outerSpacing: CGFloat = 12
+    /// Content width available to sections inside the menu-bar panel.
+    static var panelContentWidth: CGFloat {
+        size.width - contentInsets.left - contentInsets.right
+    }
     static let contentSpacing: CGFloat = 10
     static let sectionSpacing: CGFloat = 7
     static let sectionPadding: CGFloat = 10
@@ -68,6 +72,81 @@ enum MenuPanelLayout {
         showsColorPreset ? displayPresetSectionHeight : displaySectionHeight
     }
 
+    // MARK: - Configurable element layout
+
+    /// Height contributed by a single visible menu-bar element, or 0 when the
+    /// element currently has no content to show.
+    static func elementHeight(
+        _ element: MenuBarElementID,
+        context: MenuBarElementRuntimeContext
+    ) -> CGFloat {
+        switch element {
+        case .chipPower:
+            return hardwareSectionHeight
+        case .appAudio:
+            let audioHeight = audioContentHeight(
+                rowCount: context.audioRowCount,
+                isLiteMode: context.isAudioLiteMode
+            )
+            guard audioHeight > 0 else { return 0 }
+            return audioHeight + sectionChromeHeight
+        case .cableStatus:
+            return cableSectionHeight(itemCount: context.cableItemCount)
+        case .wifiSignal:
+            return wifiSectionHeight
+        case .displayControl:
+            return displaySectionHeight(showsColorPreset: context.showsColorPreset)
+        case .quickControls:
+            return controlsHeight
+        }
+    }
+
+    /// Vertical spacing between two adjacent visible elements. The compact
+    /// quick-controls row keeps the outer spacing on both sides wherever it is
+    /// placed; regular sections use the tighter content spacing.
+    static func spacing(after previous: MenuBarElementID?, element: MenuBarElementID) -> CGFloat {
+        guard let previous else { return outerSpacing }
+        if element == .quickControls || previous == .quickControls {
+            return outerSpacing
+        }
+        return contentSpacing
+    }
+
+    /// Content height for an arbitrary ordered list of visible elements.
+    /// With no visible element only the header area remains.
+    static func contentHeight(
+        elements: [MenuBarElementID],
+        context: MenuBarElementRuntimeContext
+    ) -> CGFloat {
+        var height = headerHeight
+        var previous: MenuBarElementID?
+        for element in elements {
+            let elementHeightValue = elementHeight(element, context: context)
+            guard elementHeightValue > 0 else { continue }
+            height += spacing(after: previous, element: element) + elementHeightValue
+            previous = element
+        }
+        return height
+    }
+
+    static func panelHeight(
+        elements: [MenuBarElementID],
+        context: MenuBarElementRuntimeContext
+    ) -> CGFloat {
+        contentHeight(elements: elements, context: context)
+            + contentInsets.top
+            + contentInsets.bottom
+    }
+
+    static func panelSize(
+        elements: [MenuBarElementID],
+        context: MenuBarElementRuntimeContext
+    ) -> NSSize {
+        NSSize(width: size.width, height: panelHeight(elements: elements, context: context))
+    }
+
+    // MARK: - Legacy flags-based layout
+
     static func cableSectionHeight(itemCount: Int) -> CGFloat {
         let listHeight = HardwareMenuLayout.cableListHeight(itemCount: itemCount)
         guard listHeight > 0 else { return 0 }
@@ -87,31 +166,21 @@ enum MenuPanelLayout {
         audioRowCount: Int = defaultAudioRowCount,
         isAudioLiteMode: Bool = false
     ) -> CGFloat {
-        var height = headerHeight
-            + outerSpacing
-            + hardwareSectionHeight
-            + contentSpacing
-            + wifiSectionHeight
-            + outerSpacing
-            + controlsHeight
-
-        let audioHeight = audioContentHeight(rowCount: audioRowCount, isLiteMode: isAudioLiteMode)
-        if showsAudioSection, audioHeight > 0 {
-            height += contentSpacing + audioHeight + sectionChromeHeight
-        }
-
-        let visibleCableCount = min(max(0, cableItemCount), HardwareMenuLayout.maxCableItemCount)
-        if visibleCableCount > 0 {
-            height += contentSpacing + cableSectionHeight(itemCount: visibleCableCount)
-        }
-
-        if showsDisplayControl {
-            height += contentSpacing + displaySectionHeight(
-                showsColorPreset: showsColorPreset
-            )
-        }
-
-        return height
+        // Project the legacy section flags onto the default element order and
+        // delegate to the configurable layout math, keeping both paths
+        // byte-for-byte identical.
+        let context = MenuBarElementRuntimeContext(
+            cableItemCount: cableItemCount,
+            audioRowCount: showsAudioSection ? audioRowCount : 0,
+            isAudioLiteMode: isAudioLiteMode,
+            hasExternalDisplay: showsDisplayControl,
+            showsColorPreset: showsColorPreset
+        )
+        let elements = MenuBarElementProjection.visibleElements(
+            from: MenuBarLayoutConfiguration.default().entries,
+            context: context
+        )
+        return contentHeight(elements: elements, context: context)
     }
 
     static func panelHeight(

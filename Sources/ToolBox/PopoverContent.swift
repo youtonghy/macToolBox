@@ -3,59 +3,51 @@ import SwiftUI
 
 struct PopoverContent: View {
     @ObservedObject var state: FeatureState
+    @ObservedObject var customization: MenuBarCustomizationModel
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
 
+    private var runtimeContext: MenuBarElementRuntimeContext {
+        MenuBarElementRuntimeContext(
+            cableItemCount: hardware.cableItems.count,
+            audioRowCount: audioRouting.menuRows.count,
+            isAudioLiteMode: audioRouting.isLiteMode,
+            hasExternalDisplay: displayControl.hasExternalDisplay,
+            showsColorPreset: displayControl.presetAvailable
+        )
+    }
+
+    /// User-enabled elements in configured order, filtered by the current
+    /// runtime availability signals.
+    private var visibleElements: [MenuBarElementID] {
+        MenuBarElementProjection.visibleElements(
+            from: customization.entries,
+            context: runtimeContext
+        )
+    }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: MenuPanelLayout.outerSpacing) {
+        let elements = visibleElements
+
+        return VStack(alignment: .leading, spacing: 0) {
             header
 
-            VStack(alignment: .leading, spacing: MenuPanelLayout.contentSpacing) {
-                hardwareSection
-
-                if !audioRouting.menuRows.isEmpty {
-                    section(title: "应用音频") {
-                        AudioRoutingPanel(service: audioRouting)
-                            .frame(
-                                height: MenuPanelLayout.audioContentHeight(
-                                    rowCount: audioRouting.menuRows.count,
-                                    isLiteMode: audioRouting.isLiteMode
-                                ),
-                                alignment: .topLeading
-                            )
-                    }
-                }
-
-                if !hardware.cableItems.isEmpty {
-                    section(title: "线缆状态") {
-                        CableListView(items: hardware.visibleCableItems)
-                            .frame(height: hardware.cableListHeight)
-                    }
-                }
-
-                section(
-                    title: "Wi-Fi 信号",
-                    subtitle: wifiSignal.snapshot.state == .connected
-                        ? "\(wifiSignal.snapshot.identityText) · \(wifiSignal.snapshot.band.displayText)"
-                        : "当前连接"
-                ) {
-                    WiFiSignalPopoverView(model: wifiSignal)
-                }
-
-                if displayControl.hasExternalDisplay {
-                    section(
-                        title: "显示器控制",
-                        subtitle: displayControl.selectedDisplayName
-                    ) {
-                        DisplayControlPanel(model: displayControl)
-                    }
-                }
+            ForEach(elements) { element in
+                MenuBarElementSectionView(
+                    element: element,
+                    hardware: hardware,
+                    displayControl: displayControl,
+                    audioRouting: audioRouting,
+                    focusMode: focusMode,
+                    wifiSignal: wifiSignal,
+                    state: state,
+                    isInteractive: true
+                )
+                .padding(.top, spacing(before: element, in: elements))
             }
-
-            controlsBar
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.clear)
@@ -69,145 +61,23 @@ struct PopoverContent: View {
             .frame(height: MenuPanelLayout.headerHeight, alignment: .center)
     }
 
-    private var hardwareSection: some View {
-        section(title: "芯片功耗") {
-            HStack(spacing: 10) {
-                PowerChartRepresentable(
-                    title: "CPU",
-                    samples: hardware.samples(for: .cpu),
-                    displayText: hardware.displayText(for: .cpu),
-                    isAverageMode: hardware.isAverageMode(.cpu),
-                    accentColor: .systemOrange,
-                    onToggle: { hardware.toggleDisplayMode(for: .cpu) }
-                )
-                .frame(maxWidth: .infinity, minHeight: MenuPanelLayout.chartHeight, idealHeight: MenuPanelLayout.chartHeight, maxHeight: MenuPanelLayout.chartHeight)
-                .clipped()
-
-                PowerChartRepresentable(
-                    title: "GPU",
-                    samples: hardware.samples(for: .gpu),
-                    displayText: hardware.displayText(for: .gpu),
-                    isAverageMode: hardware.isAverageMode(.gpu),
-                    accentColor: .systemTeal,
-                    onToggle: { hardware.toggleDisplayMode(for: .gpu) }
-                )
-                .frame(maxWidth: .infinity, minHeight: MenuPanelLayout.chartHeight, idealHeight: MenuPanelLayout.chartHeight, maxHeight: MenuPanelLayout.chartHeight)
-                .clipped()
-            }
+    /// Vertical spacing between the header/previous element and this element.
+    /// Mirrors `MenuPanelLayout.spacing(before:in:)` exactly: the compact
+    /// quick-controls row keeps its outer spacing wherever it is placed,
+    /// regular sections use the tighter content spacing.
+    private func spacing(before element: MenuBarElementID, in elements: [MenuBarElementID]) -> CGFloat {
+        guard let index = elements.firstIndex(of: element), index > 0 else {
+            return MenuPanelLayout.outerSpacing
         }
-    }
-
-    private var controlsBar: some View {
-        HStack(spacing: 10) {
-            Spacer(minLength: 0)
-
-            circularControlButton(
-                systemName: "rectangle.inset.filled",
-                title: "擦屏幕",
-                subtitle: "黑屏 60 秒",
-                isOn: $state.wipeOn,
-                accent: Color(nsColor: .systemIndigo)
-            )
-
-            circularControlButton(
-                systemName: "cup.and.saucer.fill",
-                title: "后台干",
-                subtitle: "阻止系统睡眠",
-                isOn: $state.awakeOn,
-                accent: Color(nsColor: .systemOrange)
-            )
-
-            circularControlButton(
-                systemName: "scope",
-                title: "聚焦模式",
-                subtitle: "突出当前使用的显示器",
-                isOn: Binding(
-                    get: { focusMode.isEnabled },
-                    set: { focusMode.setEnabled($0) }
-                ),
-                accent: Color(nsColor: .systemTeal)
-            )
+        let previous = elements[index - 1]
+        if element == .quickControls || previous == .quickControls {
+            return MenuPanelLayout.outerSpacing
         }
-        .frame(maxWidth: .infinity, minHeight: MenuPanelLayout.controlsHeight, maxHeight: MenuPanelLayout.controlsHeight)
-    }
-
-    private func section<SectionContent: View>(
-        title: String,
-        subtitle: String = "",
-        @ViewBuilder content: () -> SectionContent
-    ) -> some View {
-        let shape = RoundedRectangle(cornerRadius: 18, style: .continuous)
-
-        return VStack(alignment: .leading, spacing: MenuPanelLayout.sectionSpacing) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                Text(title)
-                    .font(.system(size: 14, weight: .semibold))
-
-                Spacer(minLength: 8)
-
-                if !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-            }
-
-            content()
-        }
-        .padding(MenuPanelLayout.sectionPadding)
-        .background(shape.fill(sectionBackground))
-        .overlay(shape.strokeBorder(sectionBorder, lineWidth: 1))
-        .clipShape(shape)
-    }
-
-    private func circularControlButton(
-        systemName: String,
-        title: String,
-        subtitle: String,
-        isOn: Binding<Bool>,
-        accent: Color
-    ) -> some View {
-        let size = MenuPanelLayout.controlButtonSize
-        let active = isOn.wrappedValue
-
-        return Button {
-            isOn.wrappedValue.toggle()
-        } label: {
-            Image(systemName: systemName)
-                .font(.system(size: 15, weight: .semibold))
-                .foregroundStyle(active ? Color.white : Color.primary.opacity(0.78))
-                .frame(width: size, height: size)
-                .background(
-                    Circle()
-                        .fill(active ? accent.opacity(0.92) : sectionBackground)
-                )
-                .overlay(
-                    Circle()
-                        .strokeBorder(active ? accent.opacity(0.4) : sectionBorder, lineWidth: 1)
-                )
-                .shadow(color: active ? accent.opacity(0.28) : .clear, radius: 7, y: 1)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .help("\(title)：\(subtitle)")
-        .accessibilityLabel(title)
-        .accessibilityHint(subtitle)
-        .accessibilityValue(active ? "已启用" : "已关闭")
-        .accessibilityAddTraits(.isButton)
-        .animation(.easeInOut(duration: 0.16), value: active)
-    }
-
-    private var sectionBackground: Color {
-        Color.primary.opacity(0.055)
-    }
-
-    private var sectionBorder: Color {
-        Color.white.opacity(0.14)
+        return MenuPanelLayout.contentSpacing
     }
 }
 
-private struct CableListView: View {
+struct CableListView: View {
     var items: [CableDisplayItem]
 
     var body: some View {

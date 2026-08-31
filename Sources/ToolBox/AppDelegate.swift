@@ -52,6 +52,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private lazy var menuBarPanelController = MenuBarPanelController(
         rootView: AnyView(PopoverContent(
             state: state,
+            customization: menuBarCustomization,
             hardware: hardware,
             displayControl: displayControlMenu,
             audioRouting: audioRouting,
@@ -64,6 +65,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindowController: NSWindowController?
     private var imageToolsWindowController: NSWindowController?
     private let state = FeatureState()
+    private let menuBarCustomization = MenuBarCustomizationModel()
     private let hardware = HardwareMenuModel()
     private let displayControl = DisplayControlService.shared
     private let displayControlMenu = DisplayControlMenuModel()
@@ -143,14 +145,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     )
 
     private var currentPanelSize: NSSize {
-        MenuPanelLayout.panelSize(
+        let runtimeContext = MenuBarElementRuntimeContext(
             cableItemCount: hardware.cableItems.count,
-            showsDisplayControl: displayControlMenu.hasExternalDisplay,
-            showsAudioSection: !audioRouting.menuRows.isEmpty,
-            showsColorPreset: displayControlMenu.presetAvailable,
             audioRowCount: audioRouting.menuRows.count,
-            isAudioLiteMode: audioRouting.isLiteMode
+            isAudioLiteMode: audioRouting.isLiteMode,
+            hasExternalDisplay: displayControlMenu.hasExternalDisplay,
+            showsColorPreset: displayControlMenu.presetAvailable
         )
+        let visibleElements = MenuBarElementProjection.visibleElements(
+            from: menuBarCustomization.entries,
+            context: runtimeContext
+        )
+        return MenuPanelLayout.panelSize(elements: visibleElements, context: runtimeContext)
     }
 
     // Feature coordinators.
@@ -236,13 +242,16 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func observePanelSizeChanges() {
         Publishers.CombineLatest(
-            Publishers.CombineLatest4(
-                hardware.$cableItems.map(\.count).removeDuplicates(),
-                displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
-                audioRouting.$menuRows.map(\.count).removeDuplicates(),
-                displayControlMenu.$presetAvailable.removeDuplicates()
+            Publishers.CombineLatest(
+                Publishers.CombineLatest4(
+                    hardware.$cableItems.map(\.count).removeDuplicates(),
+                    displayControlMenu.$displayItems.map { !$0.isEmpty }.removeDuplicates(),
+                    audioRouting.$menuRows.map(\.count).removeDuplicates(),
+                    displayControlMenu.$presetAvailable.removeDuplicates()
+                ),
+                audioRouting.$isLiteMode.removeDuplicates()
             ),
-            audioRouting.$isLiteMode.removeDuplicates()
+            menuBarCustomization.$entries.removeDuplicates()
         )
             .receive(on: RunLoop.main)
             .sink { [weak self] _, _ in
@@ -423,6 +432,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         let windowSize = NSSize(width: 840, height: 560)
         let hostingController = GlassHostingViewController(
             rootView: AnyView(SettingsView(
+                customization: menuBarCustomization,
                 hardware: hardware,
                 displayControl: displayControlMenu,
                 shortcutRegistry: shortcutRegistry,

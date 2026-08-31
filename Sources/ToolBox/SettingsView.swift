@@ -3,6 +3,7 @@ import SwiftUI
 
 private enum SettingsTab: String, CaseIterable, Identifiable {
     case home
+    case customization
     case cables
     case wifi
     case display
@@ -20,6 +21,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .home:
             return L10n.string("首页")
+        case .customization:
+            return L10n.string("自定义")
         case .cables:
             return L10n.string("线缆")
         case .wifi:
@@ -47,6 +50,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .home:
             return "square.grid.2x2"
+        case .customization:
+            return "menubar.rectangle"
         case .cables:
             return "cable.connector"
         case .wifi:
@@ -74,6 +79,8 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
         switch self {
         case .home:
             return Color(nsColor: .systemBlue)
+        case .customization:
+            return Color(nsColor: .systemIndigo)
         case .cables:
             return Color(nsColor: .systemPurple)
         case .wifi:
@@ -99,6 +106,7 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    @ObservedObject var customization: MenuBarCustomizationModel
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
     let shortcutRegistry: ShortcutRegistry
@@ -160,6 +168,15 @@ struct SettingsView: View {
                 switch currentTab {
                 case .home:
                     SettingsHomeView()
+                case .customization:
+                    MenuBarCustomizationSettingsView(
+                        customization: customization,
+                        hardware: hardware,
+                        displayControl: displayControl,
+                        audioRouting: audioRouting,
+                        focusMode: focusMode,
+                        wifiSignal: wifiSignal
+                    )
                 case .cables:
                     SettingsCablesView(hardware: hardware)
                 case .wifi:
