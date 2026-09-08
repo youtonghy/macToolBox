@@ -13,7 +13,10 @@ CLI_ENTITLEMENTS="$SCRIPT_DIR/../Resources/ToolBoxCLI.entitlements"
 codesign_path() {
   local path="$1"
   shift
-  if [ "$IDENTITY" = "-" ]; then
+  if [ "${TOOLBOX_SIGN_TIMESTAMP:-}" = "none" ]; then
+    # Local/offline verification only. Distribution keeps the timestamp default.
+    codesign --force --timestamp=none --sign "$IDENTITY" "$@" "$path"
+  elif [ "$IDENTITY" = "-" ]; then
     codesign --force --sign "$IDENTITY" "$@" "$path"
   else
     codesign --force --timestamp --sign "$IDENTITY" "$@" "$path"
@@ -37,6 +40,14 @@ if [ ! -x "$CLI_HELPER" ]; then
   exit 1
 fi
 codesign_path "$CLI_HELPER" --options runtime --entitlements "$CLI_ENTITLEMENTS"
+
+POWER_HELPER="$APP_PATH/Contents/Library/LaunchServices/ToolBoxPowerHelper"
+if [ ! -x "$POWER_HELPER" ]; then
+  echo "error: bundled power sampling helper is missing or not executable: $POWER_HELPER" >&2
+  exit 1
+fi
+# The root helper does not need the app's library-validation exceptions.
+codesign_path "$POWER_HELPER" --options runtime
 
 RUNTIME="$APP_PATH/Contents/Resources/ocr-worker-runtime"
 if [ ! -d "$RUNTIME" ]; then

@@ -44,6 +44,11 @@ targets:
         buildPhase: resources
         type: folder
       - Resources/Assets.xcassets
+      - path: Resources/com.youtonghy.toolbox.power-sampling.plist
+        buildPhase:
+          copyFiles:
+            destination: wrapper
+            subpath: Contents/Library/LaunchDaemons
       - path: Resources/en.lproj
         buildPhase: resources
       - path: Resources/zh-Hans.lproj
@@ -53,6 +58,12 @@ targets:
       - path: Resources/OCRModels
         buildPhase: resources
     dependencies:
+      - target: ToolBoxPowerHelper
+        link: false
+        embed: true
+        copy:
+          destination: wrapper
+          subpath: Contents/Library/LaunchServices
       - target: ToolBoxCore
       - target: ToolBoxControlProtocol
       - package: libwebp
@@ -116,6 +127,7 @@ targets:
     type: library.static
     platform: macOS
     sources:
+      - Sources/ToolBoxPowerShared
       - path: Sources/ToolBox
         excludes:
           - ToolBoxApp.swift
@@ -163,6 +175,21 @@ targets:
         CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
         MACOSX_DEPLOYMENT_TARGET: "14.0"
         ENABLE_HARDENED_RUNTIME: YES
+  ToolBoxPowerHelper:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/ToolBoxPowerHelper
+      - Sources/ToolBoxPowerShared
+    dependencies:
+      - sdk: Security.framework
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox.power-helper
+        PRODUCT_NAME: ToolBoxPowerHelper
+        CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+        ENABLE_HARDENED_RUNTIME: YES
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
   ToolBoxControlProtocol:
     type: library.static
     platform: macOS

@@ -10,9 +10,12 @@ extension IOReportPowerSampler: IOReportPowerSampling {}
 final class DarwinChipPowerProvider: ChipPowerProviding {
     private let samplerFactory: () throws -> any IOReportPowerSampling
     private let smcReader: SMCSystemPowerReader
+    private let authorizedModeEnabled: () -> Bool
+    private let authorizedSamplerFactory: () -> any AuthorizedPowerSampling
     private let stateLock = NSLock()
     private let smcLock = NSLock()
     private var task: Task<Void, Never>?
+    private var activeAuthorizedSampler: (any AuthorizedPowerSampling)?
     private var runID: UInt64 = 0
     private var latestSnapshotValue: ChipPowerSnapshot?
     private var onUpdateValue: ((ChipPowerSnapshot) -> Void)?
@@ -28,10 +31,16 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
 
     init(
         samplerFactory: @escaping () throws -> any IOReportPowerSampling = { try IOReportPowerSampler() },
-        smcReader: SMCSystemPowerReader = SMCSystemPowerReader()
+        smcReader: SMCSystemPowerReader = SMCSystemPowerReader(),
+        authorizedModeEnabled: @escaping () -> Bool = {
+            UserDefaults.standard.bool(forKey: PowerSamplingService.enabledKey)
+        },
+        authorizedSamplerFactory: @escaping () -> any AuthorizedPowerSampling = { AuthorizedPowerClient() }
     ) {
         self.samplerFactory = samplerFactory
         self.smcReader = smcReader
+        self.authorizedModeEnabled = authorizedModeEnabled
+        self.authorizedSamplerFactory = authorizedSamplerFactory
     }
 
     func start(interval: TimeInterval = 1.0) {
@@ -52,9 +61,12 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
         stateLock.lock()
         runID &+= 1
         let runningTask = task
+        let authorizedSampler = activeAuthorizedSampler
+        activeAuthorizedSampler = nil
         task = nil
         stateLock.unlock()
         runningTask?.cancel()
+        authorizedSampler?.stop()
     }
 
     func snapshot() -> ChipPowerSnapshot {
@@ -77,6 +89,13 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
     }
 
     private func run(id: UInt64, interval: TimeInterval) async {
+        let authorizedSampler = authorizedSamplerFactory()
+        let accepted = withStateLock {
+            guard runID == id, task != nil else { return false }
+            activeAuthorizedSampler = authorizedSampler
+            return true
+        }
+        guard accepted else { authorizedSampler.stop(); return }
         let sampler: (any IOReportPowerSampling)?
         let ioReportMessage: String?
         do {
@@ -89,25 +108,41 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
 
         let chipName = ChipIdentityProvider.chipName()
         let macModel = ChipIdentityProvider.macModel()
+        var wasAuthorized = false
         defer {
             sampler?.reset()
+            authorizedSampler.stop()
             finishRun(id: id)
         }
 
         while !Task.isCancelled, isCurrentRun(id) {
             let systemWatts = readSystemWatts()
             let snapshot: ChipPowerSnapshot
-            if let sampler {
+            let usesAuthorization = authorizedModeEnabled()
+            if usesAuthorization != wasAuthorized {
+                sampler?.reset()
+                wasAuthorized = usesAuthorization
+            }
+            if usesAuthorization {
+                let response = authorizedSampler.response()
+                snapshot = Self.authorizedSnapshot(
+                    response: response, systemWatts: systemWatts, chipName: chipName, macModel: macModel
+                )
+            } else if let sampler {
+                authorizedSampler.suspend()
                 do {
                     let reading = try sampler.sample()
                     snapshot = makeSnapshot(
-                        status: reading == nil ? .warmingUp : .ok,
+                        status: reading == nil ? .warmingUp : (reading?.invalidChannels.isEmpty == false ? .partial : .ok),
                         reading: reading,
                         source: .ioReportEnergyModel,
                         systemWatts: systemWatts,
                         chipName: chipName,
                         macModel: macModel,
-                        message: reading == nil ? "Waiting for a second IOReport sample." : nil
+                        message: reading == nil ? "Waiting for a second IOReport sample." : reading.flatMap {
+                            $0.invalidChannels.isEmpty ? nil
+                                : "IOReport channels are stale or invalid: \($0.invalidChannels.joined(separator: ", "))."
+                        }
                     )
                 } catch {
                     snapshot = makeSnapshot(
@@ -121,6 +156,7 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
                     )
                 }
             } else {
+                authorizedSampler.suspend()
                 let hasSMC = systemWatts != nil
                 let message = ioReportMessage ?? "IOReport is unavailable."
                 snapshot = ChipPowerSnapshot(
@@ -172,8 +208,38 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
         withStateLock {
             if runID == id {
                 task = nil
+                activeAuthorizedSampler = nil
             }
         }
+    }
+
+    static func authorizedSnapshot(
+        response: PowerSamplingResponse,
+        systemWatts: Double?, chipName: String?, macModel: String?, now: Date = Date()
+    ) -> ChipPowerSnapshot {
+        let reading = response.reading.flatMap { $0.isFresh(at: now) ? $0 : nil }
+        let message: String?
+        if reading != nil {
+            message = nil
+        } else if response.failure == .authorizationRequired {
+            message = "Power sampling requires approval in System Settings."
+        } else if response.failure != nil || response.reading != nil {
+            message = "Authorized power sampling is unavailable."
+        } else {
+            message = "Waiting for a system power sample."
+        }
+        return ChipPowerSnapshot(
+            timestamp: reading?.timestamp ?? now,
+            status: reading != nil ? (reading?.gpuWatts == nil || reading?.aneWatts == nil
+                || reading?.combinedWatts == nil ? .partial : .ok)
+                : (response.failure == nil && response.reading == nil ? .warmingUp : .unavailable),
+            source: .systemPowermetrics,
+            chipName: chipName, macModel: macModel,
+            cpuWatts: reading?.cpuWatts, gpuWatts: reading?.gpuWatts,
+            aneWatts: reading?.aneWatts, combinedWatts: reading?.combinedWatts,
+            systemWatts: systemWatts, dramWatts: nil, gpuSRAMWatts: nil,
+            sampleInterval: reading?.interval, message: message
+        )
     }
 
     private func readSystemWatts() -> Double? {
@@ -204,13 +270,25 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
             source: source,
             chipName: chipName,
             macModel: macModel,
-            cpuWatts: reading.map(\.cpuWatts),
-            gpuWatts: reading.map(\.gpuWatts),
-            aneWatts: reading.map(\.aneWatts),
-            combinedWatts: reading.map(\.combinedWatts),
+            cpuWatts: reading.flatMap {
+                !$0.invalidChannels.contains(where: { $0.hasSuffix("CPU Energy") })
+                    && ($0.cpuChannelCount > 0 || $0.cpuWatts != 0) ? $0.cpuWatts : nil
+            },
+            gpuWatts: reading.flatMap {
+                !$0.invalidChannels.contains("GPU Energy")
+                    && ($0.gpuChannelCount > 0 || $0.gpuWatts != 0) ? $0.gpuWatts : nil
+            },
+            aneWatts: reading.flatMap { reading in
+                reading.invalidChannels.contains { $0.hasPrefix("ANE") } ? nil : reading.aneWatts
+            },
+            combinedWatts: reading.flatMap { $0.invalidChannels.isEmpty ? $0.combinedWatts : nil },
             systemWatts: systemWatts,
-            dramWatts: reading.map(\.dramWatts),
-            gpuSRAMWatts: reading.map(\.gpuSRAMWatts),
+            dramWatts: reading.flatMap { reading in
+                reading.invalidChannels.contains { $0.hasPrefix("DRAM") } ? nil : reading.dramWatts
+            },
+            gpuSRAMWatts: reading.flatMap { reading in
+                reading.invalidChannels.contains { $0.hasPrefix("GPU SRAM") } ? nil : reading.gpuSRAMWatts
+            },
             sampleInterval: reading?.sampleInterval,
             message: message
         )

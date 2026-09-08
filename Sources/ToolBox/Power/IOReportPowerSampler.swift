@@ -7,7 +7,6 @@ final class IOReportPowerSampler {
     private let subscription: IOReportSubscriptionRef
     private let channels: CFMutableDictionary
     private let selectedChannels: CFMutableArray
-    private let metadata: [ChannelMetadata]
 
     private var previousSample: CFDictionary?
     private var previousTimestamp: Date?
@@ -21,7 +20,6 @@ final class IOReportPowerSampler {
         guard let selected = CFArrayCreateMutable(kCFAllocatorDefault, channelItems.count, &callbacks) else {
             throw IOReportPowerError.noEnergyChannels
         }
-        var metadata: [ChannelMetadata] = []
 
         for item in channelItems {
             let group = functions.channelGroup(item)
@@ -33,10 +31,9 @@ final class IOReportPowerSampler {
             }
 
             CFArrayAppendValue(selected, Unmanaged.passUnretained(item).toOpaque())
-            metadata.append(ChannelMetadata(group: group, subgroup: subgroup, channel: channel, unit: unit))
         }
 
-        guard !metadata.isEmpty else {
+        guard CFArrayGetCount(selected) > 0 else {
             throw IOReportPowerError.noEnergyChannels
         }
 
@@ -56,7 +53,6 @@ final class IOReportPowerSampler {
 
         self.channels = mutable
         self.selectedChannels = selected
-        self.metadata = metadata
         self.subscription = try functions.createSubscription(channels: self.channels)
     }
 
@@ -75,7 +71,7 @@ final class IOReportPowerSampler {
         self.previousSample = nextSample
         self.previousTimestamp = now
 
-        return parse(delta: delta, elapsedMS: elapsedMS)
+        return parse(delta: delta, previous: previousSample, next: nextSample, elapsedMS: elapsedMS)
     }
 
     func reset() {
@@ -83,24 +79,40 @@ final class IOReportPowerSampler {
         previousTimestamp = nil
     }
 
-    private func parse(delta: CFDictionary, elapsedMS: Double) -> IOReportPowerReading {
+    private func parse(
+        delta: CFDictionary,
+        previous: CFDictionary,
+        next: CFDictionary,
+        elapsedMS: Double
+    ) -> IOReportPowerReading {
         var reading = IOReportPowerReading(sampleInterval: elapsedMS / 1_000.0)
-        let items = Self.channelItems(from: delta)
-        let count = min(items.count, metadata.count)
+        let previousItems = Self.itemsByIdentity(from: previous)
+        let nextItems = Self.itemsByIdentity(from: next)
 
-        for index in 0..<count {
-            let item = items[index]
-            let meta = metadata[index]
-            guard meta.group == "Energy Model",
-                  let watts = watts(from: item, unit: meta.unit, elapsedMS: elapsedMS) else {
+        for item in Self.channelItems(from: delta) {
+            let group = functions.channelGroup(item)
+            let channel = functions.channelName(item)
+            let unit = functions.channelUnit(item).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard group == "Energy Model" else { continue }
+            let identity = Self.channelIdentity(item)
+            guard let previousItem = previousItems[identity], let nextItem = nextItems[identity],
+                  let interval = Self.sampleInterval(
+                    previousTimestamp: Self.channelTimestamp(previousItem),
+                    nextTimestamp: Self.channelTimestamp(nextItem),
+                    fallback: elapsedMS / 1_000.0
+                  ),
+                  let watts = watts(from: item, unit: unit, elapsedMS: interval * 1_000.0) else {
+                reading.invalidChannels.append(channel)
                 continue
             }
 
-            switch meta.channel {
+            switch channel {
             case "GPU Energy":
                 reading.gpuWatts += watts
+                reading.gpuChannelCount += 1
             case let channel where channel.hasSuffix("CPU Energy"):
                 reading.cpuWatts += watts
+                reading.cpuChannelCount += 1
             case let channel where channel.hasPrefix("ANE"):
                 reading.aneWatts += watts
             case let channel where channel.hasPrefix("DRAM"):
@@ -117,7 +129,9 @@ final class IOReportPowerSampler {
     }
 
     private func watts(from item: CFDictionary, unit: String, elapsedMS: Double) -> Double? {
-        let raw = Double(functions.simpleIntegerValue(item))
+        let value = functions.simpleIntegerValue(item)
+        guard value >= 0 else { return nil }
+        let raw = Double(value)
         let valuePerSecond = raw / (elapsedMS / 1_000.0)
 
         switch unit {
@@ -130,6 +144,38 @@ final class IOReportPowerSampler {
         default:
             return nil
         }
+    }
+
+    // IOReportElement.timestamp is mach_absolute_time(), at byte 24 of the
+    // 64-byte element defined in Apple's IOReportTypes.h. An unchanged driver
+    // timestamp is a stale sample, even when subtracting its counters yields 0.
+    static func channelTimestamp(_ item: CFDictionary) -> UInt64? {
+        guard let data = (item as NSDictionary)["RawElements"] as? Data,
+              data.count >= 64 else { return nil }
+        return data.withUnsafeBytes { $0.loadUnaligned(fromByteOffset: 24, as: UInt64.self) }
+    }
+
+    static func sampleInterval(
+        previousTimestamp: UInt64?, nextTimestamp: UInt64?, fallback: TimeInterval
+    ) -> TimeInterval? {
+        guard let previousTimestamp, let nextTimestamp else { return fallback }
+        guard previousTimestamp > 0, nextTimestamp > previousTimestamp else { return nil }
+        var timebase = mach_timebase_info_data_t()
+        guard mach_timebase_info(&timebase) == KERN_SUCCESS, timebase.denom > 0 else { return nil }
+        return Double(nextTimestamp - previousTimestamp)
+            * Double(timebase.numer) / Double(timebase.denom) / 1_000_000_000.0
+    }
+
+    private static func channelIdentity(_ item: CFDictionary) -> String {
+        let dictionary = item as NSDictionary
+        let legend = dictionary["LegendChannel"] as? NSArray
+        return "\(dictionary["DriverID"] ?? ""):\(legend?.firstObject ?? "")"
+    }
+
+    private static func itemsByIdentity(from dictionary: CFDictionary) -> [String: CFDictionary] {
+        var items: [String: CFDictionary] = [:]
+        for item in channelItems(from: dictionary) { items[channelIdentity(item)] = item }
+        return items
     }
 
     private static func channelItems(from dictionary: CFDictionary) -> [CFDictionary] {
@@ -166,6 +212,11 @@ struct IOReportPowerReading: Equatable {
     var dramWatts: Double = 0
     var gpuSRAMWatts: Double = 0
     var sampleInterval: TimeInterval
+
+    // A zero value is valid only when a matching channel was actually sampled.
+    var cpuChannelCount: Int = 0
+    var gpuChannelCount: Int = 0
+    var invalidChannels: [String] = []
 }
 
 enum IOReportPowerError: Error, LocalizedError {
@@ -195,13 +246,6 @@ enum IOReportPowerError: Error, LocalizedError {
 }
 
 private typealias IOReportSubscriptionRef = UnsafeRawPointer
-
-private struct ChannelMetadata {
-    var group: String
-    var subgroup: String
-    var channel: String
-    var unit: String
-}
 
 private final class IOReportFunctions {
     private typealias CopyAllChannels = @convention(c) (UInt64, UInt64) -> Unmanaged<CFDictionary>?

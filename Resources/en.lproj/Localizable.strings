@@ -101,3 +101,13 @@
 "Wi-Fi 信号" = "Wi-Fi Signal";
 "显示器控制" = "Display Control";
 "快捷控制" = "Quick Controls";
+
+/* Authorized power sampling */
+"功耗采集" = "Power Sampling";
+"授权功耗采集" = "Authorize Power Sampling";
+"CPU 功耗不可用时，可授权系统辅助服务采集。关闭后停止采集并移除服务。" = "If CPU power is unavailable, authorize the system helper to collect it. Turning this off stops sampling and removes the service.";
+"已授权，将在显示功耗时采集。" = "Authorized. Sampling runs while power monitoring is active.";
+"等待系统授权。请在登录项设置中允许 ToolBox 后台服务。" = "Awaiting system approval. Allow the ToolBox background service in Login Items settings.";
+"移除功耗采集服务" = "Remove Power Sampling Service";
+"采集服务未注册或不可用，请重新启用。" = "The sampling service is not registered or is unavailable. Enable it again.";
+"重新启用功耗采集" = "Enable Power Sampling Again";

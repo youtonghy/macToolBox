@@ -923,6 +923,7 @@ private struct GeneralSettingsView: View {
                         }
                     }
                 }
+                AuthorizedPowerSettingsSection()
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 4)

@@ -1,8 +1,73 @@
 import Combine
+import Darwin
 import XCTest
 @testable import ToolBoxCore
 
 final class HardwarePowerLifecycleTests: XCTestCase {
+    func testUnchangedDriverTimestampIsNotZeroPower() {
+        XCTAssertNil(IOReportPowerSampler.sampleInterval(
+            previousTimestamp: 100, nextTimestamp: 100, fallback: 1
+        ))
+        XCTAssertNil(IOReportPowerSampler.sampleInterval(
+            previousTimestamp: 100, nextTimestamp: 50, fallback: 1
+        ))
+    }
+
+    func testPowerUsesDriverIntervalAfterDelayedRefresh() throws {
+        var timebase = mach_timebase_info_data_t()
+        mach_timebase_info(&timebase)
+        let tenSeconds = UInt64(10_000_000_000) * UInt64(timebase.denom) / UInt64(timebase.numer)
+        let interval = try XCTUnwrap(IOReportPowerSampler.sampleInterval(
+            previousTimestamp: 1, nextTimestamp: 1 + tenSeconds, fallback: 1
+        ))
+        XCTAssertEqual(interval, 10, accuracy: 0.000001)
+    }
+
+    func testDriverTimestampReadsUnalignedElementData() {
+        var data = Data(repeating: 0, count: 64)
+        var timestamp: UInt64 = 123456789
+        withUnsafeBytes(of: &timestamp) { data.replaceSubrange(24..<32, with: $0) }
+        XCTAssertEqual(IOReportPowerSampler.channelTimestamp(
+            ["RawElements": data] as CFDictionary
+        ), timestamp)
+        XCTAssertNil(IOReportPowerSampler.channelTimestamp(
+            ["RawElements": Data(repeating: 0, count: 31)] as CFDictionary
+        ))
+    }
+
+    func testProviderPreservesZeroFromValidCPUChannel() async {
+        let published = expectation(description: "valid zero CPU snapshot")
+        var reading = powerReading(cpuWatts: 0)
+        reading.cpuChannelCount = 1
+        let provider = DarwinChipPowerProvider(samplerFactory: { ImmediatePowerSampler(reading: reading) })
+        provider.onUpdate = { _ in published.fulfill() }
+        provider.start(interval: 60)
+        defer { provider.stop() }
+        await fulfillment(of: [published], timeout: 2)
+        XCTAssertEqual(provider.latestSnapshot?.status, .ok)
+        XCTAssertEqual(provider.latestSnapshot?.cpuWatts, 0)
+    }
+
+    func testProviderMarksStaleCPUPowerUnavailableAndKeepsGPU() async {
+        let published = expectation(description: "stale CPU snapshot")
+        var reading = powerReading(cpuWatts: 0)
+        reading.gpuWatts = 2
+        reading.gpuChannelCount = 1
+        reading.invalidChannels = ["CPU Energy", "ANE0", "DRAM0"]
+        let provider = DarwinChipPowerProvider(samplerFactory: { ImmediatePowerSampler(reading: reading) })
+        provider.onUpdate = { _ in published.fulfill() }
+        provider.start(interval: 60)
+        defer { provider.stop() }
+        await fulfillment(of: [published], timeout: 2)
+        XCTAssertEqual(provider.latestSnapshot?.status, .partial)
+        XCTAssertNil(provider.latestSnapshot?.cpuWatts)
+        XCTAssertNil(provider.latestSnapshot?.combinedWatts)
+        XCTAssertNil(provider.latestSnapshot?.aneWatts)
+        XCTAssertNil(provider.latestSnapshot?.dramWatts)
+        XCTAssertEqual(provider.latestSnapshot?.gpuWatts, 2)
+        XCTAssertTrue(provider.latestSnapshot?.message?.contains("CPU Energy") == true)
+    }
+
     func testProviderRestartSuppressesLateUpdateFromCancelledRun() async {
         let oldSampleStarted = expectation(description: "old sampler started")
         let newSamplePublished = expectation(description: "new sampler published")

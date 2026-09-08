@@ -41,6 +41,7 @@ enum ChipPowerStatus: String, Codable, Equatable, Sendable {
 }
 
 enum ChipPowerSource: String, Codable, Equatable, Sendable {
+    case systemPowermetrics
     case ioReportEnergyModel
     case smcSystemPower
     case unavailable
