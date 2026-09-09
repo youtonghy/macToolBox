@@ -252,6 +252,7 @@ struct ToolBoxCLIResponseRenderer {
             case .savedAs:
                 let target = ((item.target ?? "") as NSString).lastPathComponent
                 lines.append("✓ \(name) → \(target)：\(formatBytes(item.originalBytes)) → \(formatBytes(item.resultBytes))")
+                if let detail = item.detail { lines.append("! \(detail)") }
             case .converted:
                 let target = ((item.target ?? "") as NSString).lastPathComponent
                 lines.append("✓ \(name) → \(target)（源文件已删除）：\(formatBytes(item.originalBytes)) → \(formatBytes(item.resultBytes))")
@@ -270,7 +271,10 @@ struct ToolBoxCLIResponseRenderer {
             $0.kind == .replaced || $0.kind == .savedAs || $0.kind == .converted
         }.count
         lines.append("")
-        lines.append("共 \(result.items.count + result.truncatedItemCount) 个文件，成功 \(succeeded) 个，节省 \(formatBytes(result.totalBytesSaved))")
+        let change = result.totalBytesSaved >= 0
+            ? "节省 \(formatBytes(result.totalBytesSaved))"
+            : "增加 \(formatBytes(-result.totalBytesSaved))"
+        lines.append("共 \(result.items.count + result.truncatedItemCount) 个文件，成功 \(succeeded) 个，\(change)")
         return lines.joined(separator: "\n") + "\n"
     }
 

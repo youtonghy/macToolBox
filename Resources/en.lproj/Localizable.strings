@@ -102,6 +102,10 @@
 "显示器控制" = "Display Control";
 "快捷控制" = "Quick Controls";
 
+"点击条目展开完整实时预览；布局修改立即同步到菜单栏。" = "Click an item to expand its full live preview; layout edits sync to the menu bar instantly.";
+"收起预览" = "Collapse preview";
+"展开完整预览" = "Expand full preview";
+
 /* Authorized power sampling */
 "功耗采集" = "Power Sampling";
 "授权功耗采集" = "Authorize Power Sampling";
@@ -111,3 +115,74 @@
 "移除功耗采集服务" = "Remove Power Sampling Service";
 "采集服务未注册或不可用，请重新启用。" = "The sampling service is not registered or is unavailable. Enable it again.";
 "重新启用功耗采集" = "Enable Power Sampling Again";
+
+"抹除近似像素" = "Flatten Similar Pixels";
+
+"敏感度" = "Sensitivity";
+
+
+
+
+"应用" = "Apply";
+
+"取消" = "Cancel";
+
+"整图处理" = "Whole Image";
+
+"自动处理整张截图" = "Automatically process the whole screenshot";
+
+"按住对比" = "Hold to Compare";
+
+"按住查看调整前，松开查看处理后" = "Hold to view before adjustment; release to view the result";
+
+"正在处理整张截图…" = "Processing the whole image…";
+
+"与原图像素一致" = "Pixels match the original";
+
+"预览已更新" = "Preview updated";
+
+"未能生成预览" = "Preview unavailable";
+
+"敏感度越高，合并的色差越大" = "Higher sensitivity merges larger color differences";
+
+"图片超过整图处理上限" = "Image exceeds the whole-image processing limit";
+
+"临时存储空间不足或不可用，无法处理图片" = "Temporary storage is full or unavailable. The image could not be processed.";
+
+"整图调整历史已达到缓存上限，请保存后重新截图" = "Image adjustment history has reached its storage limit. Save and take a new screenshot.";
+
+"收起设置" = "Collapse settings";
+
+"拖动框选以添加马赛克" = "Drag to add mosaic";
+
+"点击图片添加文字" = "Click the image to add text";
+
+"大小" = "Size";
+
+"缩放" = "Zoom";
+
+"矩形" = "Rectangle";
+
+"椭圆" = "Ellipse";
+
+"箭头" = "Arrow";
+
+"画笔" = "Pen";
+
+"高亮" = "Highlighter";
+
+"文字" = "Text";
+
+"马赛克" = "Mosaic";
+
+"编号" = "Number";
+
+"识别文字" = "Recognize Text";
+
+"正在取消…" = "Cancelling…";
+
+"未开始（已取消）" = "Not started (cancelled)";
+
+"共 %d 个文件，成功 %d 个，增加 %@" = "%d files, %d succeeded, increased by %@";
+
+"纯压缩无收益时保留原件；转换、缩放或剥离元数据允许体积增加。" = "Keep the original when compression offers no savings; conversion, resizing, or metadata removal may increase file size.";

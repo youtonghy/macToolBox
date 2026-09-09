@@ -239,7 +239,8 @@ final class ImagePipelineSafetyTests: XCTestCase {
         }
         XCTAssertEqual(format, .webp)
         XCTAssertEqual(target.pathExtension, "webp", "产物必须用新格式扩展名")
-        XCTAssertGreaterThan(original, output)
+        XCTAssertGreaterThan(original, 0)
+        XCTAssertGreaterThan(output, 0) // 显式转换允许体积增加。
         track(target)
         XCTAssertFalse(
             FileManager.default.fileExists(atPath: source.path),

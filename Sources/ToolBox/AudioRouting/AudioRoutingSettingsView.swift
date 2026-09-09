@@ -9,7 +9,7 @@ struct AudioRoutingSettingsView: View {
                 SettingsSection(title: "显示") {
                     Toggle("Lite 模式", isOn: $service.isLiteMode)
                         .toggleStyle(.switch)
-                        .help("弹窗仅显示应用图标和百分比，点击后可用滚轮或上下键调节")
+                        .help("弹窗仅显示应用图标和百分比，悬停滚轮调节；点击后可用上下键调节")
                 }
                 if let error = service.globalError {
                     SettingsValueRow(title: "状态", value: error, accent: .red)

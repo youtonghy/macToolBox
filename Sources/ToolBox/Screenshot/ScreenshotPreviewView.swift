@@ -29,12 +29,30 @@ struct ScreenshotAnnotationDraft: Equatable {
     var points: [CGPoint]
 }
 
+struct SimilarPixelPreviewResult: @unchecked Sendable {
+    let patch: ScreenshotPixelPatch
+    let image: CGImage
+}
+
 @MainActor
 final class ScreenshotEditorModel: ObservableObject {
     @Published private(set) var renderedImage: CGImage
     @Published private(set) var draft: ScreenshotAnnotationDraft?
     @Published var selectedTool: ScreenshotAnnotationTool = .rectangle
     @Published var annotationColor: Color = .red
+    @Published var eraseSensitivity: Double = 15 {
+        didSet { if hasPendingErase { scheduleErasePreview() } }
+    }
+    @Published private(set) var hasPendingErase = false
+    @Published private(set) var isErasing = false
+    @Published private(set) var eraseProgress: Double = 0
+    @Published private(set) var erasePatch: ScreenshotPixelPatch?
+    @Published var isComparingErase = false
+    private var comparisonImage: CGImage?
+    private var eraseWorker: Task<SimilarPixelPreviewResult, Error>?
+    private var eraseTask: Task<Void, Never>?
+    private var eraseGeneration = 0
+    var displayedImage: CGImage { isComparingErase ? (comparisonImage ?? renderedImage) : renderedImage }
     @Published var lineWidth: Double = 4
     @Published var zoom: Double = 1
     @Published var errorMessage: String?
@@ -65,8 +83,8 @@ final class ScreenshotEditorModel: ObservableObject {
     private var pendingOCRSettings: OCRSettings?
 
     var imageSize: CGSize { state.document.baseImage.pixelSize }
-    var canUndo: Bool { !state.undoStack.isEmpty }
-    var canRedo: Bool { !state.redoStack.isEmpty }
+    var canUndo: Bool { !hasPendingErase && !state.undoStack.isEmpty }
+    var canRedo: Bool { !hasPendingErase && !state.redoStack.isEmpty }
     var displayedOCRDocument: TextOCRDocument? {
         ocrDocument.map { ocrSelection.displayedDocument(from: $0) }
     }
@@ -88,7 +106,7 @@ final class ScreenshotEditorModel: ObservableObject {
         refreshAvailableOCRSelections()
     }
 
-    deinit { ocrTask?.cancel() }
+    deinit { ocrTask?.cancel(); eraseTask?.cancel(); eraseWorker?.cancel() }
 
     private func refreshAvailableOCRSelections() {
         Task { [weak self] in
@@ -107,6 +125,7 @@ final class ScreenshotEditorModel: ObservableObject {
     }
 
     func beginDraft(at point: CGPoint) {
+        guard !hasPendingErase, !isExporting, !isRecognizing else { return }
         draft = ScreenshotAnnotationDraft(
             tool: selectedTool,
             start: point,
@@ -179,15 +198,17 @@ final class ScreenshotEditorModel: ObservableObject {
     }
 
     func undo() {
+        guard !hasPendingErase else { return }
         applyHistory(.undo)
     }
 
     func redo() {
+        guard !hasPendingErase else { return }
         applyHistory(.redo)
     }
 
     func requestOCR() {
-        guard !isRecognizing else { return }
+        guard !isRecognizing, !hasPendingErase else { return }
         var settings = ocrSettingsStore.load().settings
         settings.selection = ocrModelSelection
         persistOCRSelection()
@@ -310,9 +331,14 @@ final class ScreenshotEditorModel: ObservableObject {
         errorMessage = nil
     }
 
-    func cancelBackgroundWork() {
+    @discardableResult
+    func cancelBackgroundWork() -> Task<SimilarPixelPreviewResult, Error>? {
+        eraseGeneration += 1
+        eraseTask?.cancel()
+        eraseWorker?.cancel()
         ocrTask?.cancel()
         ocrTask = nil
+        return eraseWorker
     }
 
     func cancelOCR() {
@@ -320,7 +346,7 @@ final class ScreenshotEditorModel: ObservableObject {
     }
 
     func copy(autoClose: Bool = false) {
-        guard !isExporting else { return }
+        guard !isExporting, !isRecognizing, !hasPendingErase else { return }
         setExporting(true)
         let document = state.document
         let exporter = exporter
@@ -360,7 +386,7 @@ final class ScreenshotEditorModel: ObservableObject {
         // Check the busy flag before presenting the modal panel — otherwise an
         // in-flight export (e.g. the hidden Cmd+S shortcut, which stays active
         // while controls are disabled) pops a save dialog on top of it.
-        guard !isExporting else { return }
+        guard !isExporting, !isRecognizing, !hasPendingErase else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png]
         panel.nameFieldStringValue = "ToolBox Screenshot.png"
@@ -412,6 +438,123 @@ final class ScreenshotEditorModel: ObservableObject {
     private func setRecognizing(_ value: Bool) {
         isRecognizing = value
         onExportingChange(value || isExporting)
+    }
+
+    func beginErase() {
+        guard !hasPendingErase, !isExporting, !isRecognizing else { return }
+        draft = nil
+        comparisonImage = renderedImage
+        if let effect = state.document.annotations.first(where: {
+            if case .similarPixels = $0.payload { return true }
+            return false
+        }), case let .similarPixels(_, patch) = effect.payload {
+            eraseSensitivity = patch.sensitivity
+        }
+        hasPendingErase = true
+        scheduleErasePreview()
+    }
+
+    func cancelErase() {
+        eraseGeneration += 1
+        eraseTask?.cancel()
+        eraseWorker?.cancel()
+        let generation = eraseGeneration
+        let worker = eraseWorker
+        eraseTask = Task { [weak self] in
+            _ = await worker?.result
+            guard let self, self.eraseGeneration == generation else { return }
+            self.eraseWorker = nil
+            self.eraseTask = nil
+        }
+        erasePatch = nil
+        hasPendingErase = false
+        isErasing = false
+        isComparingErase = false
+        comparisonImage = nil
+        refreshPreview()
+    }
+
+    func applyErase() {
+        guard !isErasing, let patch = erasePatch else { return }
+        do {
+            var next = state
+            try AnnotationCommandReducer.reduce(state: &next, command: .setPixelEffect(
+                ScreenshotAnnotation(payload: .similarPixels(rect: CGRect(origin: .zero, size: imageSize), patch: patch), style: .default)
+            ))
+            state = next
+            hasPendingErase = false
+            erasePatch = nil
+            isComparingErase = false
+            comparisonImage = nil
+            errorMessage = nil
+        } catch {
+            errorMessage = eraseErrorMessage(error)
+        }
+    }
+
+    private func eraseErrorMessage(_ error: Error) -> String {
+        switch error {
+        case SimilarPixelEraseError.imageTooLarge: return L10n.string("图片超过整图处理上限")
+        case SimilarPixelEraseError.storageUnavailable: return L10n.string("临时存储空间不足或不可用，无法处理图片")
+        case SimilarPixelEraseError.historyTooLarge: return L10n.string("整图调整历史已达到缓存上限，请保存后重新截图")
+        default: return localized(error)
+        }
+    }
+
+    private func scheduleErasePreview() {
+        guard hasPendingErase else { return }
+        eraseGeneration += 1
+        let generation = eraseGeneration
+        eraseTask?.cancel()
+        eraseWorker?.cancel()
+        erasePatch = nil
+        isErasing = true
+        eraseProgress = 0
+        errorMessage = nil
+        let document = state.document
+        let sensitivity = eraseSensitivity
+        let preview = preview
+        let previousWorker = eraseWorker
+        let worker = Task.detached(priority: .userInitiated) { [weak self] in
+            if let previousWorker { _ = await previousWorker.result }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: 150_000_000)
+            let patch = try SimilarPixelEraser().process(source: document.baseImage, sensitivity: sensitivity) { [weak self] progress in
+                Task { @MainActor [weak self] in
+                    guard let self, self.eraseGeneration == generation, self.isErasing else { return }
+                    self.eraseProgress = max(self.eraseProgress, min(0.99, progress))
+                }
+            }
+            var adjusted = document
+            adjusted.annotations.removeAll {
+                if case .similarPixels = $0.payload { return true }
+                return false
+            }
+            adjusted.annotations.insert(ScreenshotAnnotation(
+                payload: .similarPixels(rect: CGRect(origin: .zero, size: document.baseImage.pixelSize), patch: patch), style: .default), at: 0)
+            try Task.checkCancellation()
+            let rendered = try ScreenshotEditorPreviewBuilder().render(document: adjusted, preview: preview)
+            return SimilarPixelPreviewResult(patch: patch, image: rendered)
+        }
+        eraseWorker = worker
+        eraseTask = Task { [weak self] in
+            do {
+                let result = try await worker.value
+                guard let self, self.eraseGeneration == generation, !Task.isCancelled else { return }
+                self.renderedImage = result.image
+                self.erasePatch = result.patch
+                self.eraseProgress = 1
+                self.isErasing = false
+                self.eraseWorker = nil
+                self.eraseTask = nil
+            } catch {
+                guard let self, self.eraseGeneration == generation, !Task.isCancelled else { return }
+                self.isErasing = false
+                self.errorMessage = self.eraseErrorMessage(error)
+                self.eraseWorker = nil
+                self.eraseTask = nil
+            }
+        }
     }
 
     private func add(_ payload: ScreenshotAnnotationPayload) throws {
@@ -537,14 +680,23 @@ final class ScreenshotEditorModel: ObservableObject {
 
 struct ScreenshotEditorView: View {
     @ObservedObject var model: ScreenshotEditorModel
+    @State private var expandedPanel: SettingsPanel?
+    @State private var showsCommandHints = false
+
+    private enum SettingsPanel { case annotation, zoom, ocr }
 
     var body: some View {
         VStack(spacing: 0) {
             toolBar
+            if model.hasPendingErase {
+                eraseOptions
+            } else if let panel = expandedPanel {
+                settingsPanel(panel)
+            }
             Divider()
             HStack(spacing: 0) {
                 ScreenshotCanvasView(model: model)
-                    .frame(minWidth: 640, minHeight: 400)
+                    .frame(minWidth: 640, minHeight: 300)
                 if model.ocrResult != nil {
                     Divider()
                     OCRResultPanel(model: model)
@@ -571,35 +723,152 @@ struct ScreenshotEditorView: View {
     }
 
     private var toolBar: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 5) {
             ForEach(ScreenshotAnnotationTool.allCases) { tool in
-                Button {
+                ScreenshotToolbarIconButton(icon: icon(for: tool), title: label(for: tool),
+                                            isSelected: model.selectedTool == tool && !model.hasPendingErase) {
+                    let isAlreadyOpen = model.selectedTool == tool && expandedPanel == .annotation
                     model.selectedTool = tool
-                } label: {
-                    Image(systemName: icon(for: tool))
-                        .frame(width: 24, height: 24)
+                    expandedPanel = isAlreadyOpen ? nil : .annotation
                 }
-                .buttonStyle(.plain)
-                .background(
-                    model.selectedTool == tool ? Color.accentColor.opacity(0.2) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: 5)
-                )
-                .help(label(for: tool))
+                .disabled(model.hasPendingErase || model.isExporting || model.isRecognizing)
             }
-            Divider().frame(height: 22)
-            ColorPicker("", selection: $model.annotationColor, supportsOpacity: true)
-                .labelsHidden()
-                .frame(width: 30)
-                .help("颜色")
-            Image(systemName: "line.diagonal")
-                .foregroundStyle(.secondary)
-            Slider(value: $model.lineWidth, in: 1...24, step: 1)
-                .frame(width: 110)
-                .help("线宽")
-            Text("\(Int(model.lineWidth))")
-                .font(.caption.monospacedDigit())
-                .frame(width: 24)
-            Divider().frame(height: 22)
+            Divider().frame(height: 20).padding(.horizontal, 4)
+            ScreenshotToolbarIconButton(icon: "eraser", title: "抹除近似像素", isSelected: model.hasPendingErase) {
+                expandedPanel = nil
+                model.beginErase()
+            }
+            .disabled(model.isExporting || model.isRecognizing)
+            ScreenshotToolbarIconButton(icon: "magnifyingglass", title: "缩放", isSelected: expandedPanel == .zoom) {
+                expandedPanel = expandedPanel == .zoom ? nil : .zoom
+            }
+            .disabled(model.hasPendingErase)
+            ScreenshotToolbarIconButton(icon: "text.viewfinder", title: "识别文字", isSelected: expandedPanel == .ocr) {
+                expandedPanel = expandedPanel == .ocr ? nil : .ocr
+            }
+            .disabled(model.hasPendingErase || model.isExporting)
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 8)
+    }
+
+    private func settingsPanel(_ panel: SettingsPanel) -> some View {
+        HStack(spacing: 14) {
+            switch panel {
+            case .annotation:
+                Text(LocalizedStringKey(label(for: model.selectedTool))).font(.callout.weight(.semibold))
+                Divider().frame(height: 18)
+                annotationOptions
+            case .zoom:
+                Text("缩放").font(.callout.weight(.semibold))
+                Divider().frame(height: 18)
+                zoomControls
+                Spacer()
+            case .ocr:
+                Text("识别文字").font(.callout.weight(.semibold))
+                Divider().frame(height: 18)
+                ocrControls
+                Spacer()
+            }
+            Button { expandedPanel = nil } label: {
+                Image(systemName: "xmark").frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain)
+            .help("收起设置")
+            .accessibilityLabel(Text("收起设置"))
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.secondary.opacity(0.04))
+    }
+
+    private var annotationOptions: some View {
+        HStack(spacing: 10) {
+            if model.selectedTool == .mosaic {
+                Text("拖动框选以添加马赛克").font(.caption).foregroundStyle(.secondary)
+            } else {
+                Text("颜色").font(.caption).foregroundStyle(.secondary)
+                ColorPicker("颜色", selection: $model.annotationColor, supportsOpacity: true)
+                    .labelsHidden().frame(width: 30)
+                if model.selectedTool == .text {
+                    Text("点击图片添加文字").font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(model.selectedTool == .numberedMarker ? LocalizedStringKey("大小") : LocalizedStringKey("线宽"))
+                        .font(.caption).foregroundStyle(.secondary)
+                    Slider(value: $model.lineWidth, in: 1...24, step: 1).frame(width: 110)
+                        .accessibilityLabel(Text(model.selectedTool == .numberedMarker ? LocalizedStringKey("大小") : LocalizedStringKey("线宽")))
+                    Text("\(Int(model.lineWidth))").font(.caption.monospacedDigit()).frame(width: 24)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private var eraseOptions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 16) { eraseSensitivityControl; Spacer(minLength: 12); eraseActions }
+                VStack(alignment: .leading, spacing: 10) {
+                    eraseSensitivityControl
+                    HStack { Spacer(); eraseActions }
+                }
+            }
+            HStack(spacing: 8) {
+                if model.isErasing {
+                    ProgressView(value: model.eraseProgress).frame(width: 90)
+                    Text("正在处理整张截图…")
+                    Text("\(Int(model.eraseProgress * 100))%").monospacedDigit()
+                } else if let patch = model.erasePatch {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                    Text(patch.changedPixelCount == 0 ? LocalizedStringKey("与原图像素一致") : LocalizedStringKey("预览已更新"))
+                } else {
+                    Image(systemName: "exclamationmark.circle").foregroundStyle(.orange)
+                    Text("未能生成预览")
+                }
+                Spacer()
+                Text("敏感度越高，合并的色差越大")
+            }
+            .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(Color.accentColor.opacity(0.05))
+    }
+
+    private var eraseSensitivityControl: some View {
+        HStack(spacing: 10) {
+            Text("整图处理").font(.callout.weight(.semibold))
+            Divider().frame(height: 18)
+            Text("敏感度").font(.callout)
+            Slider(value: $model.eraseSensitivity, in: 0...100, step: 1)
+                .frame(width: 180).accessibilityLabel(Text("敏感度"))
+            Text("\(Int(model.eraseSensitivity))")
+                .font(.callout.monospacedDigit()).frame(width: 30, alignment: .trailing)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var eraseActions: some View {
+        HStack(spacing: 8) {
+            Button {} label: {
+                Label("按住对比", systemImage: "square.on.square")
+            }
+            .buttonStyle(ScreenshotCompareButtonStyle(isComparing: $model.isComparingErase))
+            .accessibilityAction { model.isComparingErase.toggle() }
+            .help("按住查看调整前，松开查看处理后")
+            Button("取消") { model.cancelErase() }
+                .keyboardShortcut(.cancelAction)
+            Button("应用") { model.applyErase() }
+                .keyboardShortcut(.defaultAction)
+                .buttonStyle(.borderedProminent)
+                .disabled(model.isErasing || model.erasePatch == nil)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var zoomControls: some View {
+        HStack(spacing: 6) {
             Button { model.zoom = ScreenshotZoomAdjuster.adjust(zoom: model.zoom, wheelDeltaY: -1) } label: {
                 Image(systemName: "minus.magnifyingglass")
             }
@@ -618,7 +887,11 @@ struct ScreenshotEditorView: View {
             .buttonStyle(.plain)
             .disabled(model.zoom >= 4)
             .help("放大")
-            Divider().frame(height: 22)
+        }.fixedSize(horizontal: true, vertical: false)
+    }
+
+    private var ocrControls: some View {
+        HStack(spacing: 8) {
             Menu {
                 Picker("OCR 模型", selection: Binding(
                     get: { model.ocrModelSelection },
@@ -636,24 +909,21 @@ struct ScreenshotEditorView: View {
             Button { model.requestOCR() } label: {
                 Label("识别文字", systemImage: "text.viewfinder")
             }
-            .disabled(model.isRecognizing)
+            .disabled(model.isRecognizing || model.hasPendingErase)
             .help("使用本地 PaddleOCR 识别文字")
             if model.isRecognizing {
                 ProgressView().controlSize(.small)
             }
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 46)
+        }.fixedSize(horizontal: true, vertical: false)
     }
 
     private var actionBar: some View {
         HStack(spacing: 8) {
-            Button { model.undo() } label: { Image(systemName: "arrow.uturn.backward") }
+            Button { model.undo() } label: { actionLabel(nil, icon: "arrow.uturn.backward", shortcut: "⌘Z") }
                 .disabled(!model.canUndo)
                 .keyboardShortcut("z", modifiers: .command)
                 .help("撤销")
-            Button { model.redo() } label: { Image(systemName: "arrow.uturn.forward") }
+            Button { model.redo() } label: { actionLabel(nil, icon: "arrow.uturn.forward", shortcut: "⇧⌘Z") }
                 .disabled(!model.canRedo)
                 .keyboardShortcut("z", modifiers: [.command, .shift])
                 .help("重做")
@@ -670,24 +940,45 @@ struct ScreenshotEditorView: View {
             if model.isRecognizing {
                 Button("取消识别") { model.cancelOCR() }
             }
-            Button("复制", systemImage: "doc.on.doc") { model.copy() }
+            Button { model.copy() } label: { actionLabel("复制", icon: "doc.on.doc", shortcut: "⌘C") }
+                .disabled(model.isExporting || model.isRecognizing || model.hasPendingErase)
+            Button { model.save() } label: { actionLabel("保存", icon: "square.and.arrow.down", shortcut: "⌘S") }
+                .disabled(model.isExporting || model.isRecognizing || model.hasPendingErase)
+            Button { model.onClose() } label: { actionLabel("关闭", icon: nil, shortcut: "⌘W") }
                 .disabled(model.isExporting || model.isRecognizing)
-            Button("保存", systemImage: "square.and.arrow.down") { model.save() }
-                .disabled(model.isExporting || model.isRecognizing)
-            Button("关闭") { model.onClose() }
-                .disabled(model.isExporting || model.isRecognizing)
-                .keyboardShortcut(.cancelAction)
+                .keyboardShortcut("w", modifiers: .command)
             
-            // Hidden buttons for Cmd+C/S auto-close behavior
-            Button("") { model.copy(autoClose: true) }
-                .hidden()
-                .keyboardShortcut("c", modifiers: .command)
-            Button("") { model.save(autoClose: true) }
-                .hidden()
-                .keyboardShortcut("s", modifiers: .command)
         }
-        .padding(.horizontal, 12)
-        .frame(minHeight: 50)
+        .padding(.horizontal, 14)
+        .frame(maxWidth: .infinity, minHeight: 50)
+        .background(ScreenshotCommandHintMonitor(isPressed: $showsCommandHints))
+        .background {
+            // Keyboard-only actions must not reserve space after the trailing buttons.
+            VStack(spacing: 0) {
+                Button("") { model.copy(autoClose: true) }.keyboardShortcut("c", modifiers: .command)
+                Button("") { model.save(autoClose: true) }.keyboardShortcut("s", modifiers: .command)
+                if !model.hasPendingErase {
+                    Button("") { model.onClose() }.keyboardShortcut(.cancelAction)
+                        .disabled(model.isExporting || model.isRecognizing)
+                }
+            }
+            .hidden()
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+        }
+    }
+
+    private func actionLabel(_ title: String?, icon: String?, shortcut: String) -> some View {
+        HStack(spacing: 6) {
+            if let icon { Image(systemName: icon) }
+            if let title { Text(LocalizedStringKey(title)) }
+            if showsCommandHints {
+                Text(shortcut)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .fixedSize()
     }
 
     private func icon(for tool: ScreenshotAnnotationTool) -> String {
@@ -697,7 +988,7 @@ struct ScreenshotEditorView: View {
         case .arrow: "arrow.up.right"
         case .pen: "pencil.tip"
         case .highlighter: "highlighter"
-        case .text: "textformat"
+        case .text: "character.cursor.ibeam"
         case .mosaic: "square.grid.3x3.fill"
         case .numberedMarker: "1.circle"
         }
@@ -723,6 +1014,60 @@ struct ScreenshotEditorView: View {
         case .mosaic: "马赛克"
         case .numberedMarker: "编号"
         }
+    }
+}
+
+/// A stable leading icon stays under the pointer while its name expands to the right.
+struct ScreenshotToolbarIconButton: View {
+    let icon: String
+    let title: String
+    let isSelected: Bool
+    let action: () -> Void
+    @State private var isHovered = false
+    @FocusState private var isFocused: Bool
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 17))
+                    .frame(width: 20, height: 20)
+                if isHovered || isFocused {
+                    Text(LocalizedStringKey(title))
+                        .font(.callout)
+                        .lineLimit(1)
+                        .transition(.opacity)
+                }
+            }
+            .padding(.horizontal, 7)
+            .frame(height: 34)
+            .fixedSize(horizontal: true, vertical: false)
+            .contentShape(RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(isSelected ? Color.accentColor : Color.primary)
+        .background(isSelected ? Color.accentColor.opacity(0.13) : (isHovered ? Color.secondary.opacity(0.09) : .clear),
+                    in: RoundedRectangle(cornerRadius: 7))
+        .focused($isFocused)
+        .onHover { isHovered = $0 }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: isHovered || isFocused)
+        .accessibilityLabel(Text(LocalizedStringKey(title)))
+        .accessibilityAddTraits(isSelected ? [.isSelected] : [])
+        .onDisappear { isHovered = false }
+    }
+}
+
+private struct ScreenshotCompareButtonStyle: ButtonStyle {
+    @Binding var isComparing: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .padding(.horizontal, 10).padding(.vertical, 5)
+            .background(isComparing ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08),
+                        in: RoundedRectangle(cornerRadius: 6))
+            .onChange(of: configuration.isPressed) { _, pressed in isComparing = pressed }
+            .onDisappear { isComparing = false }
     }
 }
 
@@ -846,7 +1191,7 @@ private struct ScreenshotCanvasView: View {
         ) {
             ZStack {
                 Color(nsColor: .controlBackgroundColor)
-                Image(nsImage: NSImage(cgImage: model.renderedImage, size: model.imageSize))
+                Image(nsImage: NSImage(cgImage: model.displayedImage, size: model.imageSize))
                     .resizable()
                     .frame(width: transform.contentRect.width, height: transform.contentRect.height)
                     .position(x: transform.contentRect.midX, y: transform.contentRect.midY)
@@ -905,7 +1250,7 @@ private struct ScreenshotCanvasView: View {
     private func dragGesture(transform: ScreenshotCanvasTransform) -> some Gesture {
         DragGesture(minimumDistance: 0)
             .onChanged { value in
-                if model.ocrDocument != nil {
+                if model.ocrDocument != nil && !model.hasPendingErase {
                     updateOCRSelectionDrag(value, transform: transform)
                     return
                 }
@@ -916,7 +1261,7 @@ private struct ScreenshotCanvasView: View {
                 model.updateDraft(to: transform.clampedImagePoint(forViewPoint: value.location))
             }
             .onEnded { value in
-                if model.ocrDocument != nil {
+                if model.ocrDocument != nil && !model.hasPendingErase {
                     finishOCRSelectionDrag(value, transform: transform)
                     return
                 }
@@ -1224,12 +1569,12 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         worker?.cancel()
         previewTask?.cancel()
         previewTask = nil
-        editorModel?.cancelBackgroundWork()
+        let pixelWorker = editorModel?.cancelBackgroundWork()
         editorModel = nil
         window.delegate = nil
         windowController = nil
         window.close()
-        releaseDocument(after: worker)
+        releaseDocument(after: worker, pixelWorker: pixelWorker)
         onClose()
     }
 
@@ -1248,10 +1593,10 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         worker?.cancel()
         previewTask?.cancel()
         previewTask = nil
-        editorModel?.cancelBackgroundWork()
+        let pixelWorker = editorModel?.cancelBackgroundWork()
         editorModel = nil
         windowController = nil
-        releaseDocument(after: worker)
+        releaseDocument(after: worker, pixelWorker: pixelWorker)
         onClose()
     }
 
@@ -1259,17 +1604,70 @@ final class ScreenshotPreviewController: NSObject, NSWindowDelegate {
         windowController?.window?.standardWindowButton(.closeButton)?.isEnabled = enabled
     }
 
-    private func releaseDocument(after worker: Task<ScreenshotEditorPreview, Error>?) {
+    private func releaseDocument(after worker: Task<ScreenshotEditorPreview, Error>?, pixelWorker: Task<SimilarPixelPreviewResult, Error>?) {
         let cleanup = documentCleanup
         documentCleanup = nil
         guard let cleanup else { return }
-        guard let worker else {
+        guard worker != nil || pixelWorker != nil else {
             cleanup()
             return
         }
         Task {
-            _ = try? await worker.value
+            _ = try? await worker?.value
+            _ = try? await pixelWorker?.value
             cleanup()
         }
     }
+}
+
+private struct ScreenshotCommandHintMonitor: NSViewRepresentable {
+    @Binding var isPressed: Bool
+
+    func makeNSView(context: Context) -> ScreenshotCommandHintView {
+        let view = ScreenshotCommandHintView()
+        view.onChange = { isPressed = $0 }
+        return view
+    }
+
+    func updateNSView(_ view: ScreenshotCommandHintView, context: Context) {
+        view.onChange = { isPressed = $0 }
+    }
+}
+
+private final class ScreenshotCommandHintView: NSView {
+    var onChange: (Bool) -> Void = { _ in }
+    private var monitor: Any?
+    private var resignObserver: NSObjectProtocol?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        removeMonitor()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        guard let window else { return }
+        monitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            guard let self, self.window?.isKeyWindow == true else { return event }
+            self.onChange(event.modifierFlags.contains(.command))
+            return event
+        }
+        resignObserver = NotificationCenter.default.addObserver(forName: NSWindow.didResignKeyNotification,
+                                                                 object: window, queue: .main) { [weak self] _ in
+            self?.onChange(false)
+        }
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.onChange(self.window?.isKeyWindow == true && NSEvent.modifierFlags.contains(.command))
+        }
+    }
+
+    private func removeMonitor() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        monitor = nil
+        resignObserver = nil
+    }
+
+    deinit { removeMonitor() }
 }

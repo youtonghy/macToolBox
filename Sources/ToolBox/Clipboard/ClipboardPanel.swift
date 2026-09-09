@@ -10,6 +10,7 @@ final class ClipboardPanelModel: ObservableObject {
     /// Selection tracked by item identity so list mutations (head inserts,
     /// dedup reordering) never silently rebind what Enter will paste.
     @Published private(set) var selectedItemID: ClipboardItem.ID?
+    @Published private(set) var presentationID = UUID()
     let store: ClipboardStore
     private var storeCancellable: AnyCancellable?
 
@@ -58,6 +59,15 @@ final class ClipboardPanelModel: ObservableObject {
     }
 
     func selectFirst() { selectedItemID = filteredItems.first?.id }
+
+    func prepareForPresentation() {
+        query = ""
+        selectFirst()
+        // Recreate the scroll view even if the selected item hasn't changed:
+        // the user may have scrolled away from it before hiding the panel.
+        presentationID = UUID()
+    }
+
     func select(index: Int) {
         guard filteredItems.indices.contains(index) else { return }
         selectedItemID = filteredItems[index].id
@@ -121,6 +131,7 @@ struct ClipboardPanelView: View {
                     }
                 }
             }
+            .id(model.presentationID)
             .frame(height: model.listHeight)
         }
         .padding(12)
@@ -138,7 +149,8 @@ struct ClipboardPanelView: View {
             default: break
             }
         }
-        .onAppear { searchFocused = true; model.selectFirst() }
+        .onAppear { searchFocused = true }
+        .onChange(of: model.presentationID) { _, _ in searchFocused = true }
     }
 }
 
@@ -203,6 +215,7 @@ final class ClipboardPanelController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     func present() {
+        model.prepareForPresentation()
         targetApplication = NSWorkspace.shared.frontmostApplication
         let mouse = NSEvent.mouseLocation
         let screen = NSScreen.screens.first { $0.frame.contains(mouse) } ?? NSScreen.main

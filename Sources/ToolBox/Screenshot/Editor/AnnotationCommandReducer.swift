@@ -3,6 +3,13 @@ import Foundation
 
 enum AnnotationCommandReducer {
     static func reduce(state: inout AnnotationEditorState, command: AnnotationCommand) throws {
+        if case let .setPixelEffect(item) = command {
+            try validatePatchBudget(item, state: state)
+        } else if case let .add(item) = command {
+            try validatePatchBudget(item, state: state)
+        } else if case let .update(item) = command {
+            try validatePatchBudget(item, state: state)
+        }
         switch command {
         case .undo:
             guard let prior = state.undoStack.popLast() else { throw AnnotationError.historyUnavailable }
@@ -16,6 +23,15 @@ enum AnnotationCommandReducer {
         default:
             let before = state.document.annotations
             switch command {
+            case let .setPixelEffect(item):
+                try validate(item, in: state.document)
+                guard case .similarPixels = item.payload else { throw AnnotationError.invalidGeometry }
+                state.document.annotations.removeAll {
+                    if case .similarPixels = $0.payload { return true }
+                    return false
+                }
+                // A whole-image adjustment always sits beneath vector annotations.
+                state.document.annotations.insert(item, at: 0)
             case let .add(item):
                 try validate(item, in: state.document)
                 guard !state.document.annotations.contains(where: { $0.id == item.id }) else {
@@ -48,6 +64,23 @@ enum AnnotationCommandReducer {
             state.undoStack.append(before)
             trimHistory(&state.undoStack, limit: state.historyLimit)
             state.redoStack.removeAll()
+        }
+    }
+
+    private static func validatePatchBudget(_ item: ScreenshotAnnotation, state: AnnotationEditorState) throws {
+        var seen = Set<ObjectIdentifier>()
+        var bytes = 0
+        // Snapshots share immutable patches; count each retained allocation only once.
+        for snapshot in [state.document.annotations, [item]] + state.undoStack.suffix(state.historyLimit - 1) {
+            for annotation in snapshot {
+                if case let .similarPixels(_, patch) = annotation.payload,
+                   seen.insert(ObjectIdentifier(patch)).inserted {
+                    bytes += patch.byteCount
+                    guard bytes <= state.pixelHistoryByteLimit else {
+                        throw SimilarPixelEraseError.historyTooLarge
+                    }
+                }
+            }
         }
     }
 
@@ -99,6 +132,9 @@ enum AnnotationCommandReducer {
             }
             try validate(points: [text.origin], in: bounds, minimumCount: 1)
             try validate(points: [text.origin.applying(item.transform)], in: bounds, minimumCount: 1)
+        case let .similarPixels(rect, _):
+            try validate(rect: rect, in: bounds)
+            try validate(rect: rect.applying(item.transform), in: bounds)
         case let .mosaic(rect, blockSize):
             guard blockSize > 0 else { throw AnnotationError.invalidGeometry }
             try validate(rect: rect, in: bounds)

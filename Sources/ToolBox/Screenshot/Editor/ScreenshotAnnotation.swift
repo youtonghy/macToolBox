@@ -34,6 +34,7 @@ enum ScreenshotAnnotationPayload: Equatable, Sendable {
     case arrow(start: CGPoint, end: CGPoint, headLength: CGFloat)
     case stroke(points: [CGPoint], isHighlighter: Bool)
     case text(TextAnnotation)
+    case similarPixels(rect: CGRect, patch: ScreenshotPixelPatch)
     case mosaic(rect: CGRect, blockSize: Int)
     case numberedMarker(center: CGPoint, number: Int)
 }

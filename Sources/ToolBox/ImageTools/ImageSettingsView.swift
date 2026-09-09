@@ -18,7 +18,7 @@ struct ImageSettingsView: View {
                     Text(L10n.string("加后缀另存")).tag("suffix")
                 }
                 LabeledContent(L10n.string("说明")) {
-                    Text(L10n.string("压缩结果不小于原文件时自动保留原件；覆盖写入采用临时文件原子替换。"))
+                    Text(L10n.string("纯压缩无收益时保留原件；转换、缩放或剥离元数据允许体积增加。"))
                         .foregroundStyle(.secondary)
                 }
                 LabeledContent(L10n.string("转换")) {
@@ -73,5 +73,7 @@ struct ImageSettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
     }
 }

@@ -39,7 +39,9 @@ final class HardwarePowerLifecycleTests: XCTestCase {
         let published = expectation(description: "valid zero CPU snapshot")
         var reading = powerReading(cpuWatts: 0)
         reading.cpuChannelCount = 1
-        let provider = DarwinChipPowerProvider(samplerFactory: { ImmediatePowerSampler(reading: reading) })
+        let provider = DarwinChipPowerProvider(
+            samplerFactory: { ImmediatePowerSampler(reading: reading) }, authorizedModeEnabled: { false }
+        )
         provider.onUpdate = { _ in published.fulfill() }
         provider.start(interval: 60)
         defer { provider.stop() }
@@ -54,7 +56,9 @@ final class HardwarePowerLifecycleTests: XCTestCase {
         reading.gpuWatts = 2
         reading.gpuChannelCount = 1
         reading.invalidChannels = ["CPU Energy", "ANE0", "DRAM0"]
-        let provider = DarwinChipPowerProvider(samplerFactory: { ImmediatePowerSampler(reading: reading) })
+        let provider = DarwinChipPowerProvider(
+            samplerFactory: { ImmediatePowerSampler(reading: reading) }, authorizedModeEnabled: { false }
+        )
         provider.onUpdate = { _ in published.fulfill() }
         provider.start(interval: 60)
         defer { provider.stop() }
@@ -78,7 +82,9 @@ final class HardwarePowerLifecycleTests: XCTestCase {
         let newSampler = ImmediatePowerSampler(reading: powerReading(cpuWatts: 2))
         let factory = SequencedPowerSamplerFactory(samplers: [oldSampler, newSampler])
         let updates = RecordedPowerUpdates()
-        let provider = DarwinChipPowerProvider(samplerFactory: factory.makeSampler)
+        let provider = DarwinChipPowerProvider(
+            samplerFactory: factory.makeSampler, authorizedModeEnabled: { false }
+        )
         provider.onUpdate = { snapshot in
             updates.append(snapshot)
             if snapshot.cpuWatts == 2 {

@@ -6,6 +6,9 @@ import SwiftUI
 /// the real panel; only the interaction layer differs — visibility toggles and
 /// drag ordering are live, business controls are read-only.
 struct MenuBarCustomizationSettingsView: View {
+    private static let editorWidth: CGFloat = 520
+    fileprivate static let previewWidth: CGFloat = 460
+
     @ObservedObject var customization: MenuBarCustomizationModel
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
@@ -29,9 +32,13 @@ struct MenuBarCustomizationSettingsView: View {
             hintCard
 
             editorList
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-
-            restoreDefaultCard
+                .frame(
+                    minWidth: 0,
+                    idealWidth: Self.editorWidth,
+                    maxWidth: Self.editorWidth,
+                    maxHeight: .infinity,
+                    alignment: .topLeading
+                )
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -41,10 +48,27 @@ struct MenuBarCustomizationSettingsView: View {
             title: L10n.string("菜单栏布局"),
             subtitle: L10n.string("拖拽调整顺序，开关控制显示")
         ) {
-            Text(L10n.string("卡片即菜单栏真实内容，实时更新；布局修改立即同步到菜单栏。"))
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .center, spacing: 12) {
+                Text(L10n.string("点击条目展开完整实时预览；布局修改立即同步到菜单栏。"))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Spacer(minLength: 8)
+
+                Button {
+                    customization.resetToDefault()
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(width: 26, height: 26)
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .disabled(customization.isDefaultLayout)
+                .help(L10n.string("恢复默认布局"))
+                .accessibilityLabel(L10n.string("恢复默认布局"))
+            }
         }
     }
 
@@ -63,6 +87,7 @@ struct MenuBarCustomizationSettingsView: View {
                     featureState: featureState,
                     setVisible: { customization.setVisible($0, for: pair.element.id) }
                 )
+                .frame(width: Self.editorWidth, alignment: .leading)
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
                 .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
@@ -77,37 +102,6 @@ struct MenuBarCustomizationSettingsView: View {
         .accessibilityLabel(L10n.string("菜单栏布局"))
     }
 
-    private var restoreDefaultCard: some View {
-        SettingsSection(title: L10n.string("默认布局")) {
-            SettingsInnerCard {
-                HStack(spacing: 12) {
-                    SettingsIconBadge(
-                        systemName: "arrow.counterclockwise",
-                        accent: Color(nsColor: .systemIndigo),
-                        emphasized: !customization.isDefaultLayout
-                    )
-
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text(L10n.string("恢复默认布局"))
-                            .font(.system(size: 13, weight: .semibold))
-                        Text(L10n.string("芯片功耗 → 应用音频 → 线缆状态 → Wi-Fi → 显示器控制 → 快捷控制"))
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-
-                    Spacer(minLength: 8)
-
-                    Button(L10n.string("恢复")) {
-                        customization.resetToDefault()
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .controlSize(.small)
-                    .disabled(customization.isDefaultLayout)
-                }
-            }
-        }
-    }
 }
 
 /// One editable menu-bar element: drag handle, name, visibility toggle and a
@@ -123,6 +117,7 @@ private struct EditableMenuBarElementCard: View {
     @ObservedObject var wifiSignal: WiFiSignalModel
     @ObservedObject var featureState: FeatureState
     let setVisible: (Bool) -> Void
+    @State private var isExpanded = false
 
     private var shape: RoundedRectangle {
         RoundedRectangle(cornerRadius: SettingsChrome.innerCornerRadius, style: .continuous)
@@ -132,10 +127,12 @@ private struct EditableMenuBarElementCard: View {
         VStack(alignment: .leading, spacing: 10) {
             headerRow
 
-            if isRuntimeAvailable {
-                livePreview
-            } else {
-                unavailablePlaceholder
+            if isExpanded {
+                if isRuntimeAvailable {
+                    livePreview
+                } else {
+                    unavailablePlaceholder
+                }
             }
         }
         .padding(12)
@@ -156,25 +153,41 @@ private struct EditableMenuBarElementCard: View {
                 .accessibilityLabel(L10n.string("拖拽调整顺序"))
                 .accessibilityValue(String(format: L10n.string("第 %d 位"), position))
 
-            SettingsIconBadge(
-                systemName: entry.id.symbolName,
-                accent: accent,
-                emphasized: entry.isVisible && isRuntimeAvailable
-            )
+            Button {
+                isExpanded.toggle()
+            } label: {
+                HStack(spacing: 10) {
+                    SettingsIconBadge(
+                        systemName: entry.id.symbolName,
+                        accent: accent,
+                        emphasized: entry.isVisible && isRuntimeAvailable
+                    )
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(entry.id.displayName)
-                    .font(.system(size: 13, weight: .semibold))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(entry.id.displayName)
+                            .font(.system(size: 13, weight: .semibold))
 
-                if !isRuntimeAvailable {
-                    Text(L10n.string("当前不可用，菜单栏暂不显示；恢复后自动回到原位置"))
-                        .font(.system(size: 11, weight: .medium))
+                        if !isRuntimeAvailable {
+                            Text(L10n.string("当前不可用，菜单栏暂不显示；恢复后自动回到原位置"))
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+
+                    Spacer(minLength: 8)
+
+                    Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(width: 12)
                 }
+                .contentShape(Rectangle())
             }
-
-            Spacer(minLength: 8)
+            .buttonStyle(.plain)
+            .help(L10n.string(isExpanded ? "收起预览" : "展开完整预览"))
+            .accessibilityLabel(entry.id.displayName)
+            .accessibilityValue(L10n.string(isExpanded ? "收起预览" : "展开完整预览"))
 
             Toggle(
                 "",
@@ -222,7 +235,7 @@ private struct EditableMenuBarElementCard: View {
                 isInteractive: false
             )
             .frame(
-                minWidth: MenuPanelLayout.panelContentWidth,
+                width: MenuBarCustomizationSettingsView.previewWidth,
                 alignment: .leading
             )
         }

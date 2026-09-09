@@ -42,3 +42,26 @@ private extension CGRect {
             && height.isFinite
     }
 }
+
+/// Scroll storage's crop Y is bottom-origin even though the returned provider is
+/// upright. Normalize once at the editor boundary so every band agrees with a
+/// single full-image read, without changing the capture/strip storage format.
+func topLeftScreenshotSource(_ source: ScreenshotImageSource) -> ScreenshotImageSource {
+    guard let scroll = source as? ScrollCaptureImageSource else { return source }
+    return TopLeftScrollScreenshotSource(source: scroll)
+}
+
+private final class TopLeftScrollScreenshotSource: ScreenshotImageSource, @unchecked Sendable {
+    let source: ScrollCaptureImageSource
+    var id: UUID { source.id }
+    var pixelSize: CGSize { source.pixelSize }
+
+    init(source: ScrollCaptureImageSource) { self.source = source }
+
+    func copyPixels(in rect: CGRect) throws -> CGImage {
+        guard rect.isFinite, rect.width > 0, rect.height > 0,
+              CGRect(origin: .zero, size: pixelSize).contains(rect) else { throw AnnotationError.invalidGeometry }
+        return try source.copyPixels(in: CGRect(x: rect.minX, y: pixelSize.height - rect.maxY,
+                                               width: rect.width, height: rect.height))
+    }
+}

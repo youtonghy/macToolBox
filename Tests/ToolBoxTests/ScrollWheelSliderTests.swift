@@ -300,6 +300,27 @@ final class ScrollWheelSliderTests: XCTestCase {
         )
     }
 
+    func testFocusOnlySliderCapturesVerticalWheelAcrossEntireTile() {
+        let slider = ScrollWheelNSSlider(value: 40, minValue: 0, maxValue: 300, target: nil, action: nil)
+        slider.focusOnlyOnClick = true
+        slider.frame = NSRect(x: 0, y: 0, width: 58, height: 78)
+
+        XCTAssertTrue(slider.shouldCaptureLocalScrollWheel(at: NSPoint(x: 29, y: 39), deltaY: 1))
+        XCTAssertTrue(slider.shouldCaptureLocalScrollWheel(at: NSPoint(x: 1, y: 1), deltaY: -1))
+        XCTAssertTrue(slider.shouldCaptureLocalScrollWheel(at: NSPoint(x: 57, y: 77), deltaY: 1))
+        XCTAssertFalse(slider.shouldCaptureLocalScrollWheel(at: NSPoint(x: 58, y: 39), deltaY: 1))
+    }
+
+    func testFocusOnlySliderPassesHorizontalAndDisabledWheelEvents() {
+        let slider = ScrollWheelNSSlider(value: 40, minValue: 0, maxValue: 300, target: nil, action: nil)
+        slider.focusOnlyOnClick = true
+        slider.frame = NSRect(x: 0, y: 0, width: 58, height: 78)
+
+        XCTAssertFalse(slider.shouldCaptureLocalScrollWheel(at: NSPoint(x: 29, y: 39), deltaY: 0))
+        slider.isEnabled = false
+        XCTAssertFalse(slider.shouldCaptureLocalScrollWheel(at: NSPoint(x: 29, y: 39), deltaY: 1))
+    }
+
     func testNativeSliderConsumesVerticalWheelAndSendsAction() throws {
         let probe = SliderActionProbe()
         let slider = ScrollWheelNSSlider(

@@ -97,10 +97,83 @@ final class ScrollWheelNSSlider: NSSlider {
     /// jump the value (the slider is invisible overlay decoration), but arrow-key
     /// control requires first-responder status, so the click cannot be dropped
     /// entirely.
-    var focusOnlyOnClick = false
+    var focusOnlyOnClick = false {
+        didSet {
+            guard oldValue != focusOnlyOnClick else { return }
+            if focusOnlyOnClick {
+                installLocalEventMonitorIfNeeded()
+            } else {
+                removeLocalEventMonitor()
+            }
+        }
+    }
     var onRequestRangeExpansion: (() -> Void)?
     private(set) var isRangeExpansionPending = false
     private var wheelAdjuster = ScrollWheelValueAdjuster()
+    private var localEventMonitor: Any?
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        removeLocalEventMonitor()
+        super.viewWillMove(toWindow: newWindow)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        installLocalEventMonitorIfNeeded()
+    }
+
+    deinit {
+        removeLocalEventMonitor()
+    }
+
+    /// A Lite-mode slider sits below the reset button, so AppKit's normal hit
+    /// testing sends wheel events to the button instead. A local monitor lets
+    /// the invisible slider consume vertical wheels across its whole tile while
+    /// leaving ordinary mouse events available to the button.
+    private func installLocalEventMonitorIfNeeded() {
+        guard focusOnlyOnClick, localEventMonitor == nil, window != nil else { return }
+        localEventMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.scrollWheel, .leftMouseDown]
+        ) { [weak self] event in
+            guard let self,
+                  self.focusOnlyOnClick,
+                  self.isEnabled,
+                  let window = self.window,
+                  event.window === window
+            else {
+                return event
+            }
+
+            let location = self.convert(event.locationInWindow, from: nil)
+            guard self.bounds.contains(location) else {
+                return event
+            }
+
+            if event.type == .leftMouseDown {
+                // Keep the reset button's click intact while making the tile
+                // keyboard-focusable, including when the click lands on the icon.
+                window.makeFirstResponder(self)
+                return event
+            }
+
+            guard event.type == .scrollWheel,
+                  self.shouldCaptureLocalScrollWheel(at: location, deltaY: event.scrollingDeltaY) else {
+                return event
+            }
+            self.scrollWheel(with: event)
+            return nil
+        }
+    }
+
+    func shouldCaptureLocalScrollWheel(at location: NSPoint, deltaY: CGFloat) -> Bool {
+        focusOnlyOnClick && isEnabled && deltaY != 0 && bounds.contains(location)
+    }
+
+    private func removeLocalEventMonitor() {
+        guard let localEventMonitor else { return }
+        NSEvent.removeMonitor(localEventMonitor)
+        self.localEventMonitor = nil
+    }
 
     func requestRangeExpansion() {
         guard !isRangeExpansionPending, let onRequestRangeExpansion else { return }

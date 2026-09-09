@@ -88,6 +88,32 @@ final class AuthorizedPowerSamplingTests: XCTestCase {
         XCTAssertEqual(reading?.cpuWatts, 23.527)
     }
 
+    func testEngineContinuesAcrossManyCompletedBatches() async throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try report.write(to: file, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: file) }
+        let launched = expectation(description: "twenty batches restart after EOF and exit")
+        launched.expectedFulfillmentCount = 20
+        let engine = PowerSamplingEngine(makeProcess: {
+            launched.fulfill()
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/cat")
+            process.arguments = [file.path]
+            return process
+        })
+        let polling = Task {
+            for _ in 0..<200 {
+                if Task.isCancelled { break }
+                _ = await self.poll(engine)
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+        }
+        await fulfillment(of: [launched], timeout: 6)
+        polling.cancel()
+        await polling.value
+        engine.stop()
+    }
+
     func testStopTerminatesChildAndCannotRestartIt() async throws {
         let child = sleeper()
         let engine = PowerSamplingEngine(makeProcess: { child })

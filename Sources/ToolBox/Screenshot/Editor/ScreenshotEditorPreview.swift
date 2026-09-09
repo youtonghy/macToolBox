@@ -110,6 +110,10 @@ struct ScreenshotEditorPreviewBuilder: Sendable {
                 fontName: value.fontName,
                 fontSize: value.fontSize * scale
             ))
+        case let .similarPixels(value, patch):
+            let displayPatch = ScreenshotPixelPatch(image: patch.preview?.baseImage ?? patch.image,
+                                                   sensitivity: patch.sensitivity, changedPixelCount: patch.changedPixelCount)
+            return .similarPixels(rect: rect(value), patch: displayPatch)
         case let .mosaic(value, blockSize):
             return .mosaic(rect: rect(value), blockSize: max(1, Int((CGFloat(blockSize) * scale).rounded())))
         case let .numberedMarker(center, number):

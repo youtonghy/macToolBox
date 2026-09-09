@@ -148,6 +148,25 @@ struct AnnotationRenderer {
             drawStroke(points, in: context)
         case let .text(text):
             drawText(text, style: annotation.style, in: context)
+        case let .similarPixels(rect, patch):
+            let visible = rect.intersection(visiblePixelRect.applying(annotation.transform.inverted()))
+            guard !visible.isNull, !visible.isEmpty else { return }
+            let sx = patch.source.pixelSize.width / rect.width
+            let sy = patch.source.pixelSize.height / rect.height
+            let interpolationMargin: CGFloat = sx == 1 && sy == 1 ? 0 : 1
+            let sourceRect = CGRect(x: (visible.minX - rect.minX) * sx, y: (visible.minY - rect.minY) * sy,
+                                    width: visible.width * sx, height: visible.height * sy)
+                .insetBy(dx: -interpolationMargin, dy: -interpolationMargin).integral
+                .intersection(CGRect(origin: .zero, size: patch.source.pixelSize))
+            let pixels = try patch.source.copyPixels(in: sourceRect)
+            let destination = CGRect(x: rect.minX + sourceRect.minX / sx, y: rect.minY + sourceRect.minY / sy,
+                                     width: sourceRect.width / sx, height: sourceRect.height / sy)
+            context.setAlpha(1)
+            context.setBlendMode(.copy)
+            context.clip(to: rect)
+            context.translateBy(x: destination.minX, y: destination.maxY)
+            context.scaleBy(x: 1, y: -1)
+            context.draw(pixels, in: CGRect(origin: .zero, size: destination.size))
         case let .mosaic(rect, blockSize):
             try drawMosaic(
                 rect: rect,

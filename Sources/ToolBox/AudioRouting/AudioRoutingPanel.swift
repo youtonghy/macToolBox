@@ -95,10 +95,10 @@ struct AudioRoutingPanel: View {
 
     private func liteAudioRow(_ row: AudioRoutingRow) -> some View {
         ZStack {
-            // Invisible slider under the icon tile: it receives scroll-wheel
-            // events by hover and — with `focusOnlyOnClick` — turns a click on the
-            // tile into keyboard focus without jumping the value, making the
-            // arrow keys usable as the help text promises.
+            // Invisible slider under the icon tile: its local event monitor
+            // receives vertical wheels across the tile and keeps the tile
+            // keyboard-focusable without making the hidden slider jump the
+            // value; the reset button keeps its own click action.
             ScrollWheelSlider(
                 value: Binding(
                     get: { Double(row.volumePercent) },

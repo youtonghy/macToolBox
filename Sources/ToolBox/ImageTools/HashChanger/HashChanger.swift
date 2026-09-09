@@ -62,10 +62,12 @@ enum ImageHashChanger {
 
     // MARK: - 单文件
 
-    static func rehash(url: URL) -> ImageHashResult {
+    static func rehash(url: URL, beforeCommit: () throws -> Void = {}) -> ImageHashResult {
         do {
-            let outcome = try rehashOrThrow(url: url)
+            let outcome = try rehashOrThrow(url: url, beforeCommit: beforeCommit)
             return ImageHashResult(source: url, outcome: outcome)
+        } catch is CancellationError {
+            return ImageHashResult(source: url, outcome: .failed(detail: "已取消。"))
         } catch let error as HashChangeError {
             return ImageHashResult(source: url, outcome: .failed(detail: error.description))
         } catch {
@@ -73,7 +75,8 @@ enum ImageHashChanger {
         }
     }
 
-    static func rehashOrThrow(url: URL) throws -> ImageHashOutcome {
+    static func rehashOrThrow(url: URL, beforeCommit: () throws -> Void = {}) throws -> ImageHashOutcome {
+        try Task.checkCancellation()
         guard let format = ImageFormat.detect(url: url) else {
             return .unsupported(detail: "无法识别的图像格式。")
         }
@@ -89,12 +92,16 @@ enum ImageHashChanger {
             }
         }
 
+        try Task.checkCancellation()
         let mutated = try mutate(data: original, format: format)
+        try Task.checkCancellation()
         try validateVisualEquality(original: original, mutated: mutated, format: format)
 
         let after = ImageFileHashes(data: mutated)
         precondition(before != after, "换 Hash 后摘要未变化")
 
+        try beforeCommit()
+        try Task.checkCancellation()
         try AtomicFileReplacer.replace(original: url, data: mutated, tempExtension: "toolbox-rehash")
         return .replaced(before: before, after: after, bytes: mutated.count)
     }
@@ -115,13 +122,14 @@ enum ImageHashChanger {
         urls: [URL],
         progress: (@Sendable (_ completed: Int, _ total: Int) -> Void)? = nil
     ) async -> [ImageHashResult] {
-        guard !urls.isEmpty else { return [] }
+        guard !urls.isEmpty, !Task.isCancelled else { return [] }
         let width = max(1, min(4, ProcessInfo.processInfo.activeProcessorCount))
         var results: [ImageHashResult] = []
         results.reserveCapacity(urls.count)
         var completed = 0
         var index = 0
         while index < urls.count {
+            if Task.isCancelled { break }
             let chunkEnd = min(index + width, urls.count)
             let chunk = Array(urls[index ..< chunkEnd])
             let collected: [Int: ImageHashResult] = await withTaskGroup(
@@ -186,21 +194,32 @@ enum ImageHashChanger {
             throw HashChangeError.validationFailed("产物无法被系统解码。")
         }
         guard let originalSource = CGImageSourceCreateWithData(original as CFData, nil),
-              CGImageSourceGetCount(originalSource) > 0
+              CGImageSourceGetCount(originalSource) > 0,
+              CGImageSourceGetCount(originalSource) == CGImageSourceGetCount(mutatedSource)
         else {
-            return // 原件本就无法解码（如某些 TIFF 尾部容错场景）——跳过像素对比
+            throw HashChangeError.validationFailed("原件无法解码或产物帧数发生变化。")
         }
-        guard let mutatedPixels = Self.renderPixelSignature(mutatedSource),
-              let originalPixels = Self.renderPixelSignature(originalSource),
-              originalPixels == mutatedPixels
-        else {
-            throw HashChangeError.validationFailed("产物像素与原件不一致，已放弃替换。")
+        for index in 0..<CGImageSourceGetCount(originalSource) {
+            try Task.checkCancellation()
+            let equal = autoreleasepool {
+                guard let mutatedPixels = Self.renderPixelSignature(mutatedSource, index: index),
+                      let originalPixels = Self.renderPixelSignature(originalSource, index: index) else { return false }
+                return originalPixels == mutatedPixels
+            }
+            guard equal else {
+                throw HashChangeError.validationFailed("产物像素与原件不一致，已放弃替换。")
+            }
         }
     }
 
-    /// 把首帧渲染为 RGBA 字节串作为像素签名。
-    private static func renderPixelSignature(_ source: CGImageSource) -> Data? {
-        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+    /// 逐帧渲染，释放上一帧后再处理下一帧，保持内存预算。
+    private static func renderPixelSignature(_ source: CGImageSource, index: Int) -> Data? {
+        guard let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any],
+              let pixelWidth = properties[kCGImagePropertyPixelWidth] as? Int,
+              let pixelHeight = properties[kCGImagePropertyPixelHeight] as? Int,
+              pixelWidth > 0, pixelHeight > 0,
+              pixelWidth <= ImagePipeline.maxPixelsPerImage / pixelHeight,
+              let image = CGImageSourceCreateImageAtIndex(source, index, nil) else { return nil }
         let width = image.width
         let height = image.height
         guard width > 0, height > 0 else { return nil }

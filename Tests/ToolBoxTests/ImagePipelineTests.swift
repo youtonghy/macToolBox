@@ -106,7 +106,7 @@ final class ImagePipelineTests: XCTestCase {
         switch result.outcome {
         case .savedAs, .converted, .noBenefit, .unsupported:
             break // 四种都可接受（取决于系统能力与压缩收益）
-        case .replaced:
+        case .replaced, .sourceRetained:
             XCTFail("suffix 模式不应产生 replaced")
         case .failed:
             XCTFail("能力缺失应报 unsupported 而不是 failed：\(result.outcome)")

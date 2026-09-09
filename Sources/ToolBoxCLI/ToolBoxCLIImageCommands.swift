@@ -19,7 +19,7 @@ struct ToolBoxImageCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "image",
         abstract: "批量压缩、转换图像格式或更换文件哈希。",
-        discussion: "压缩结果不小于原文件时保留原件（无收益保护）；换 Hash 不重编码，像素逐位不变。控制命令由正在运行的 ToolBox 应用执行。",
+        discussion: "纯压缩结果不小于原文件时保留原件；显式转换、缩放或剥离元数据允许体积增加；换 Hash 不重编码，像素逐位不变。控制命令由正在运行的 ToolBox 应用执行。",
         subcommands: [Compress.self, Convert.self, Rehash.self]
     )
 
@@ -106,7 +106,7 @@ struct ToolBoxImageCommand: ParsableCommand {
     struct Convert: ParsableCommand {
         static let configuration = CommandConfiguration(
             commandName: "convert",
-            abstract: "转换图像格式（compress 的特化，必须指定 --format）。"
+            abstract: "转换图像格式（必须指定 --format，允许输出体积增加）。"
         )
 
         @Option(
@@ -245,7 +245,7 @@ struct ToolBoxImageCommand: ParsableCommand {
         }
         if let format {
             let allowed = ["original", "jpeg", "png", "webp", "avif", "heic", "tiff"]
-            if !allowed.contains(format.lowercased()) {
+            if !allowed.contains(format.lowercased()) || (!formatOptional && format.lowercased() == "original") {
                 throw ValidationError("--format 必须是 \(formatOptional ? "original|" : "")jpeg/png/webp/avif/heic/tiff 之一。")
             }
         } else if !formatOptional {

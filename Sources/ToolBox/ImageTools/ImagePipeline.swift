@@ -47,6 +47,8 @@ enum ImageOutcome: Sendable, Equatable {
     case savedAs(URL, originalBytes: Int, resultBytes: Int, format: ImageFormat)
     /// 格式转换 + 覆盖：写入 `target`（新扩展名）成功后已删除源文件。
     case converted(source: URL, target: URL, originalBytes: Int, resultBytes: Int, format: ImageFormat)
+    /// 产物已保存，但源文件删除失败。
+    case sourceRetained(target: URL, originalBytes: Int, resultBytes: Int, format: ImageFormat, detail: String)
     /// 无收益保护：结果不小于原文件，保留原件未动。
     case noBenefit(originalBytes: Int, candidateBytes: Int, detail: String)
     /// 格式/能力/内容不支持，未处理。
@@ -70,6 +72,7 @@ struct ImageJobResult: Sendable, Equatable {
         case let .replaced(original, result, _): return original - result
         case let .savedAs(_, original, result, _): return original - result
         case let .converted(_, _, original, result, _): return original - result
+        case let .sourceRetained(_, original, result, _, _): return original - result
         default: return 0
         }
     }
@@ -157,10 +160,16 @@ enum ImagePipeline {
 
     // MARK: - 单文件
 
-    static func process(url: URL, options: ImageJobOptions) -> ImageJobResult {
+    static func process(
+        url: URL, options: ImageJobOptions,
+        beforeCommit: () throws -> Void = {},
+        removeSource: (URL) throws -> Void = { try FileManager.default.removeItem(at: $0) }
+    ) -> ImageJobResult {
         do {
-            let outcome = try processOrThrow(url: url, options: options)
+            let outcome = try processOrThrow(url: url, options: options, beforeCommit: beforeCommit, removeSource: removeSource)
             return ImageJobResult(source: url, outcome: outcome)
+        } catch is CancellationError {
+            return ImageJobResult(source: url, outcome: .failed(detail: "已取消。"))
         } catch let error as PipelineError {
             return ImageJobResult(source: url, outcome: .failed(detail: error.description))
         } catch {
@@ -168,7 +177,11 @@ enum ImagePipeline {
         }
     }
 
-    private static func processOrThrow(url: URL, options: ImageJobOptions) throws -> ImageOutcome {
+    private static func processOrThrow(
+        url: URL, options: ImageJobOptions,
+        beforeCommit: () throws -> Void, removeSource: (URL) throws -> Void
+    ) throws -> ImageOutcome {
+        try Task.checkCancellation()
         guard let inputFormat = ImageFormat.detect(url: url) else {
             return .unsupported(detail: "无法识别的图像格式。")
         }
@@ -219,6 +232,7 @@ enum ImagePipeline {
             return .unsupported(detail: reason)
         }
 
+        try Task.checkCancellation()
         let originalMetadata = options.stripMetadata
             ? nil
             : CGImageSourceCopyMetadataAtIndex(source, 0, nil)
@@ -235,35 +249,28 @@ enum ImagePipeline {
 
         let originalSize = fileSize(url) ?? encoded.count
         let didConvert = outputFormat != inputFormat
-        let didResize = needsResize
-
-        // ── 无收益保护 ───────────────────────────────────────
-        if encoded.count >= originalSize {
-            let detail: String
-            switch (didConvert, didResize) {
-            case (true, true): detail = "已转换并缩放，但结果不小于原文件。"
-            case (true, false): detail = "已转换为 \(outputFormat.rawValue.uppercased())，但结果不小于原文件。"
-            case (false, true): detail = "已缩放，但结果不小于原文件。"
-            case (false, false): detail = "压缩结果不小于原文件。"
-            }
-            return .noBenefit(originalBytes: originalSize, candidateBytes: encoded.count, detail: detail)
+        let isPureCompression = options.outputFormat == nil && !needsResize && !options.stripMetadata
+        if isPureCompression && encoded.count >= originalSize {
+            return .noBenefit(originalBytes: originalSize, candidateBytes: encoded.count, detail: "压缩结果不小于原文件。")
         }
+        try beforeCommit()
+        try Task.checkCancellation()
 
         // ── 落地 ─────────────────────────────────────────────
         switch options.naming {
         case .overwrite where didConvert:
             // 转换 + 覆盖：写新扩展名文件，成功后删除源文件（先写后删）。
-            let target = uniqueSibling(
-                of: url,
-                suffix: "",
-                extension: outputFormat.preferredFilenameExtension
+            let target = try AtomicFileReplacer.publishSibling(
+                original: url, data: encoded, suffix: "", fileExtension: outputFormat.preferredFilenameExtension
             )
+            // Publication begins the commit: finish source cleanup even if cancellation arrives now.
             do {
-                try encoded.write(to: target, options: .atomic)
-                try? FileManager.default.removeItem(at: url)
+                try removeSource(url)
             } catch {
-                try? FileManager.default.removeItem(at: target)
-                throw PipelineError.writeFailed(error.localizedDescription)
+                return .sourceRetained(
+                    target: target, originalBytes: originalSize, resultBytes: encoded.count,
+                    format: outputFormat, detail: "产物已保存，源文件未删除：\(error.localizedDescription)"
+                )
             }
             return .converted(
                 source: url,
@@ -280,16 +287,9 @@ enum ImagePipeline {
                 format: outputFormat
             )
         case let .suffix(suffix):
-            let target = uniqueSibling(
-                of: url,
-                suffix: suffix,
-                extension: outputFormat.preferredFilenameExtension
+            let target = try AtomicFileReplacer.publishSibling(
+                original: url, data: encoded, suffix: suffix, fileExtension: outputFormat.preferredFilenameExtension
             )
-            do {
-                try encoded.write(to: target, options: .atomic)
-            } catch {
-                throw PipelineError.writeFailed(error.localizedDescription)
-            }
             return .savedAs(
                 target,
                 originalBytes: originalSize,
@@ -324,7 +324,7 @@ enum ImagePipeline {
             if let decoded = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbnailOptions as CFDictionary) {
                 return decoded
             }
-            // thumbnail 通道失败时继续走直解（方向标签仍会保留/丢失由元数据分支决定）。
+            throw PipelineError.decodeFailed("方向变换或缩放失败，已保留原件。")
         }
         guard let decoded = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
             throw PipelineError.decodeFailed("帧 0 解码失败。")
@@ -381,13 +381,14 @@ enum ImagePipeline {
         properties: [CFString: Any],
         metadata: CGImageMetadata?
     ) throws -> Data {
+        let normalizedMetadata = options.stripMetadata ? nil : try ImageMetadata.normalized(metadata, image: image)
         if outputFormat == .webp {
-            // 无损来源（PNG/TIFF）→ 无损 WebP；其余按级别有损编码。
-            // 方向已在解码阶段烘焙进像素。
-            if inputFormat.isLosslessContainer {
-                return try WebPEncoder.encodeLossless(image)
-            }
-            return try WebPEncoder.encodeLossy(image, quality: ImageQualityTable.webpQuality(level: options.level))
+            let pixels = inputFormat.isLosslessContainer
+                ? try WebPEncoder.encodeLossless(image)
+                : try WebPEncoder.encodeLossy(image, quality: ImageQualityTable.webpQuality(level: options.level))
+            guard let normalizedMetadata else { return pixels }
+            let chunks = try ImageMetadata.webPChunks(metadata: normalizedMetadata, properties: properties, image: image)
+            return try WebPEncoder.attachMetadata(chunks, to: pixels)
         }
 
         guard let typeIdentifier = outputFormat.imageIOTypeIdentifier else {
@@ -410,35 +411,21 @@ enum ImagePipeline {
         }
         if outputFormat == .tiff {
             // TIFF 用 ZIP/deflate 无损重压缩。
-            destinationProperties[kCGImagePropertyTIFFCompression] = ImageQualityTable.tiffCompressionScheme
+            destinationProperties[kCGImagePropertyTIFFDictionary] = [kCGImagePropertyTIFFCompression: ImageQualityTable.tiffCompressionScheme]
         }
 
-        var usedMetadataWriter = false
-        if !options.stripMetadata {
-            // 保留 DPI。方向已烘焙进像素，任何情况下不再写 orientation 标签
-            // （避免像素与标签双重旋转）。
-            if let dpiWidth = properties[kCGImagePropertyDPIWidth] {
-                destinationProperties[kCGImagePropertyDPIWidth] = dpiWidth
+        destinationProperties[kCGImageDestinationEmbedThumbnail] = false
+        if let normalizedMetadata {
+            destinationProperties[kCGImagePropertyDPIWidth] = properties[kCGImagePropertyDPIWidth]
+            destinationProperties[kCGImagePropertyDPIHeight] = properties[kCGImagePropertyDPIHeight]
+            CGImageDestinationAddImageAndMetadata(destination, image, normalizedMetadata, destinationProperties as CFDictionary)
+        } else {
+            // A device RGB image has no embedded profile. Pixel values already use
+            // the accepted RGB color space; metadata stripping must not emit ICC.
+            guard let untagged = image.copy(colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+                throw PipelineError.encodeFailed("无法剥离颜色配置。")
             }
-            if let dpiHeight = properties[kCGImagePropertyDPIHeight] {
-                destinationProperties[kCGImagePropertyDPIHeight] = dpiHeight
-            }
-            // 完整 EXIF/XMP 元数据走 AddImageAndMetadata；ICC 随 CGImage
-            // 色彩空间自动嵌入。
-            if let metadata,
-               (try? CGImageDestinationAddImageAndMetadata(
-                   destination,
-                   image,
-                   metadata,
-                   destinationProperties as CFDictionary
-               )) != nil
-            {
-                usedMetadataWriter = true
-            }
-        }
-
-        if !usedMetadataWriter {
-            CGImageDestinationAddImage(destination, image, destinationProperties as CFDictionary)
+            CGImageDestinationAddImage(destination, untagged, destinationProperties as CFDictionary)
         }
         guard CGImageDestinationFinalize(destination) else {
             throw PipelineError.encodeFailed("编码未能完成（\(outputFormat.rawValue)）。")
@@ -451,19 +438,6 @@ enum ImagePipeline {
     private static func needsResize(width: Int, height: Int, maxDimension: Int?) -> Bool {
         guard let maxDimension, maxDimension > 0 else { return false }
         return max(width, height) > maxDimension
-    }
-
-    private static func uniqueSibling(of url: URL, suffix: String, `extension` fileExtension: String) -> URL {
-        let directory = url.deletingLastPathComponent()
-        let baseName = url.deletingPathExtension().lastPathComponent
-        let preferredExtension = url.pathExtension.isEmpty ? fileExtension : fileExtension
-        var candidate = directory.appendingPathComponent("\(baseName)\(suffix).\(preferredExtension)")
-        var counter = 2
-        while FileManager.default.fileExists(atPath: candidate.path) {
-            candidate = directory.appendingPathComponent("\(baseName)\(suffix)-\(counter).\(preferredExtension)")
-            counter += 1
-        }
-        return candidate
     }
 
     private static func fileSize(_ url: URL) -> Int? {

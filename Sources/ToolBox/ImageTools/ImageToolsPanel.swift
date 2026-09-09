@@ -38,13 +38,25 @@ final class ImageToolsPanelModel: ObservableObject {
     @Published var summaryLine: String?
     @Published var errorLine: String?
 
-    /// 当前运行中的任务句柄：新任务/清空/窗口关闭时取消，
-    /// 管线在分块边界协作响应取消。
+    /// 当前批次排空前保留句柄，避免取消后新旧写入重叠。
     private var runTask: Task<Void, Never>?
+    private var runID: UUID?
+    @Published private(set) var cancellationRequested = false
+    weak var window: NSWindow?
+    typealias Progress = @Sendable (Int, Int) -> Void
+    typealias Processor = @Sendable ([URL], ImageJobOptions, Progress?) async -> [ImageJobResult]
+    typealias Rehasher = @Sendable ([URL], Progress?) async -> [ImageHashResult]
+    private let processor: Processor
+    private let rehasher: Rehasher
 
     private(set) var supportedFormats: [(label: String, format: ImageFormat?)] = []
 
-    init() {
+    init(
+        processor: @escaping Processor = { await ImagePipeline.process(urls: $0, options: $1, progress: $2) },
+        rehasher: @escaping Rehasher = { await ImageHashChanger.rehash(urls: $0, progress: $1) }
+    ) {
+        self.processor = processor
+        self.rehasher = rehasher
         // 运行时能力探测决定格式下拉项（AVIF 视系统而定）；
         // 转换模式不提供“保持原格式”（否则语义退化为压缩）。
         var formats: [(String, ImageFormat?)] = [("保持原格式", nil)]
@@ -73,6 +85,7 @@ final class ImageToolsPanelModel: ObservableObject {
 
     /// 切换模式时确保选项合法：转换模式不允许 nil 格式。
     func switchMode(_ newMode: Mode) {
+        guard !isRunning else { return }
         mode = newMode
         if newMode == .convert, outputFormat == nil {
             outputFormat = availableFormats.first?.format ?? .webp
@@ -80,6 +93,7 @@ final class ImageToolsPanelModel: ObservableObject {
     }
 
     func addURLs(_ newURLs: [URL]) {
+        guard !isRunning else { return }
         let collector = ImageFileCollector.self
         var expanded: [URL] = []
         for url in newURLs {
@@ -104,26 +118,40 @@ final class ImageToolsPanelModel: ObservableObject {
     }
 
     func removeURLs(at offsets: IndexSet) {
+        guard !isRunning else { return }
         urls.remove(atOffsets: offsets)
         refreshRows()
     }
 
     func clearAll() {
-        cancelRunningTask()
+        guard !isRunning else { return }
         urls.removeAll()
         rows.removeAll()
         summaryLine = nil
         errorLine = nil
     }
 
-    /// 取消进行中的任务（新任务开始/清空/窗口关闭时调用）。
+    /// 请求取消；单文件提交完成后再解除运行状态。
     func cancelRunningTask() {
+        guard isRunning else { return }
+        cancellationRequested = true
         runTask?.cancel()
-        runTask = nil
-        if isRunning {
-            isRunning = false
-            summaryLine = L10n.string("已取消")
-        }
+        summaryLine = L10n.string("正在取消…")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closing = notification.object as? NSWindow, closing === window else { return }
+        cancelRunningTask()
+    }
+
+    var jobOptions: ImageJobOptions {
+        ImageJobOptions(
+            level: level,
+            outputFormat: mode == .convert ? (outputFormat ?? .webp) : nil,
+            maxDimension: maxDimension,
+            stripMetadata: stripMetadata,
+            naming: renameInsteadOfOverwrite ? .suffix(ImageOutputNaming.defaultSuffix) : .overwrite
+        )
     }
 
     private func refreshRows() {
@@ -135,8 +163,10 @@ final class ImageToolsPanelModel: ObservableObject {
 
     func run() {
         guard canRun else { return }
-        cancelRunningTask()
         isRunning = true
+        cancellationRequested = false
+        let id = UUID()
+        runID = id
         progressCompleted = 0
         progressTotal = urls.count
         summaryLine = nil
@@ -148,37 +178,44 @@ final class ImageToolsPanelModel: ObservableObject {
 
         let urls = self.urls
         let mode = self.mode
-        let options = ImageJobOptions(
-            level: level,
-            outputFormat: mode == .convert ? (outputFormat ?? .webp) : outputFormat,
-            maxDimension: maxDimension,
-            stripMetadata: stripMetadata,
-            naming: renameInsteadOfOverwrite ? .suffix(ImageOutputNaming.defaultSuffix) : .overwrite
-        )
-
-        runTask = Task { @MainActor in
-            defer { isRunning = false }
-            switch mode {
-            case .compress, .convert:
-                let results = await ImagePipeline.process(urls: urls, options: options) {
-                    [weak self] completed, total in
-                    Task { @MainActor [weak self] in
-                        self?.progressCompleted = completed
-                        self?.progressTotal = total
-                    }
-                }
-                if !Task.isCancelled { apply(results) }
-            case .rehash:
-                let results = await ImageHashChanger.rehash(urls: urls) {
-                    [weak self] completed, total in
-                    Task { @MainActor [weak self] in
-                        self?.progressCompleted = completed
-                        self?.progressTotal = total
-                    }
-                }
-                if !Task.isCancelled { apply(results) }
+        let options = jobOptions
+        let processor = self.processor
+        let rehasher = self.rehasher
+        let progress: Progress = { [weak self] completed, total in
+            Task { @MainActor [weak self] in
+                guard let self, self.runID == id, !self.cancellationRequested else { return }
+                self.progressCompleted = completed
+                self.progressTotal = total
             }
         }
+        runTask = Task { @MainActor [weak self] in
+            switch mode {
+            case .compress, .convert:
+                let results = await processor(urls, options, progress)
+                guard let self, self.runID == id else { return }
+                self.apply(results)
+                self.finish(id: id, completed: Set(results.map(\.source)))
+            case .rehash:
+                let results = await rehasher(urls, progress)
+                guard let self, self.runID == id else { return }
+                self.apply(results)
+                self.finish(id: id, completed: Set(results.map(\.source)))
+            }
+        }
+    }
+
+    private func finish(id: UUID, completed: Set<URL>) {
+        guard runID == id else { return }
+        if cancellationRequested {
+            for index in rows.indices where !completed.contains(rows[index].url) {
+                rows[index].status = L10n.string("未开始（已取消）")
+            }
+            summaryLine = L10n.string("已取消") + " · " + (summaryLine ?? "")
+        }
+        progressCompleted = completed.count
+        runID = nil
+        runTask = nil
+        isRunning = false
     }
 
     private func apply(_ results: [ImageJobResult]) {
@@ -186,7 +223,7 @@ final class ImageToolsPanelModel: ObservableObject {
         var succeeded = 0
         for (index, result) in results.enumerated() where rows.indices.contains(index) {
             switch result.outcome {
-            case .replaced, .savedAs, .converted:
+            case .replaced, .savedAs, .converted, .sourceRetained:
                 succeeded += 1
                 saved += result.savedBytes
                 rows[index].status = Self.describe(result.outcome)
@@ -199,8 +236,8 @@ final class ImageToolsPanelModel: ObservableObject {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
         summaryLine = String(
-            format: L10n.string("共 %d 个文件，成功 %d 个，节省 %@"),
-            results.count, succeeded, formatter.string(fromByteCount: Int64(saved))
+            format: L10n.string(saved >= 0 ? "共 %d 个文件，成功 %d 个，节省 %@" : "共 %d 个文件，成功 %d 个，增加 %@"),
+            results.count, succeeded, formatter.string(fromByteCount: Int64(abs(saved)))
         )
     }
 
@@ -241,6 +278,8 @@ final class ImageToolsPanelModel: ObservableObject {
                 ByteCountFormatter.string(fromByteCount: Int64(original), countStyle: .file),
                 ByteCountFormatter.string(fromByteCount: Int64(result), countStyle: .file)
             )
+        case let .sourceRetained(target, _, _, _, detail):
+            return "\(target.lastPathComponent)：\(detail)"
         case let .noBenefit(_, _, detail):
             return detail
         case let .unsupported(detail):
@@ -266,10 +305,12 @@ struct ImageToolsPanelView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(model.isRunning)
 
             DropZoneView { urls in
                 model.addURLs(urls)
             }
+            .disabled(model.isRunning)
 
             if !model.urls.isEmpty {
                 List {
@@ -300,7 +341,7 @@ struct ImageToolsPanelView: View {
             }
 
             if model.mode != .rehash {
-                controlsView
+                controlsView.disabled(model.isRunning)
             }
 
             if let summary = model.summaryLine {
@@ -318,15 +359,18 @@ struct ImageToolsPanelView: View {
                 Button(L10n.string("清空")) { model.clearAll() }
                     .disabled(model.urls.isEmpty || model.isRunning)
                 Spacer()
+                if model.isRunning {
+                    Button(L10n.string("取消")) { model.cancelRunningTask() }
+                        .disabled(model.cancellationRequested)
+                }
                 Button(model.isRunning ? L10n.string("处理中…") : L10n.string("开始")) { model.run() }
                     .keyboardShortcut(.return)
                     .disabled(!model.canRun)
             }
         }
         .padding(4)
-        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { _ in
-            // 窗口关闭时取消进行中的批量任务，避免后台残留处理。
-            model.cancelRunningTask()
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
+            model.windowWillClose(notification)
         }
     }
 

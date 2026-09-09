@@ -110,6 +110,11 @@ extension ToolBoxCommandRouter {
                 resultBytes: output,
                 outputFormat: format.rawValue
             )
+        case let .sourceRetained(target, original, output, format, detail):
+            return ToolBoxImageOutcomeDTO(
+                source: result.source.path, kind: .savedAs, target: target.path,
+                originalBytes: original, resultBytes: output, outputFormat: format.rawValue, detail: detail
+            )
         case let .noBenefit(original, candidate, detail):
             return ToolBoxImageOutcomeDTO(
                 source: result.source.path,

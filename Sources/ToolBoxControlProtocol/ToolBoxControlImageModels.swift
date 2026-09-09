@@ -80,6 +80,7 @@ public struct ToolBoxImageOutcomeDTO: Codable, Equatable, Sendable {
 
 public struct ToolBoxImageProcessResultDTO: Codable, Equatable, Sendable {
     public let items: [ToolBoxImageOutcomeDTO]
+    /// 原件与产物的字节差之和；负值表示转换等操作使产物增大。
     public let totalBytesSaved: Int
     /// 结果列表超出传输上限被截断的数量（0 = 未截断）。
     public let truncatedItemCount: Int

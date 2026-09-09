@@ -39,13 +39,16 @@ enum BMFFHashMutator {
             if boxSize == 1 {
                 // 64 位大盒：size==1 时真实长度在 largesize 字段。
                 guard index + 16 <= base.endIndex else { throw Error.malformed("largesize 越界。") }
-                boxSize = Int(readUInt64BE(base, at: index + 8))
+                guard let size = Int(exactly: readUInt64BE(base, at: index + 8)) else {
+                    throw Error.malformed("largesize 超出范围。")
+                }
+                boxSize = size
                 headerSize = 16
             } else if boxSize == 0 {
                 // size==0：盒子延伸到文件末尾。
                 boxSize = base.endIndex - index
             }
-            guard boxSize >= headerSize, index + boxSize <= base.endIndex else {
+            guard boxSize >= headerSize, boxSize <= base.endIndex - index else {
                 throw Error.malformed("box 长度越界。")
             }
             index += boxSize
@@ -74,7 +77,7 @@ enum BMFFHashMutator {
         guard data[typeStart ..< markerRange.lowerBound] == free else { return nil }
         let boxStart = typeStart - 4
         let declaredSize = Int(readUInt32BE(data, at: boxStart))
-        guard declaredSize == markerRange.upperBound - boxStart else { return nil }
+        guard declaredSize == data.endIndex - boxStart, markerRange.upperBound < data.endIndex else { return nil }
         return boxStart
     }
 

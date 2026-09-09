@@ -44,8 +44,18 @@ final class ImageHashChangerTests: XCTestCase {
             throw XCTSkip("fixture 异常过小")
         }
 
-        let payload = Data(repeating: 0xAB, count: payloadSize) // 超过 255 字节覆盖 GIF 子块分块路径
-        let mutated = try ImageHashChanger.mutate(data: original, format: format)
+        func mutate(_ data: Data, byte: UInt8) throws -> Data {
+            let payload = ImageHashChanger.injectionMarker + Data(repeating: byte, count: payloadSize)
+            switch format {
+            case .jpeg: return try JPEGHashMutator.mutate(data, payload: payload)
+            case .png: return try PNGHashMutator.mutate(data, payload: payload)
+            case .webp: return try WebPHashMutator.mutate(data, payload: payload)
+            case .gif: return try GIFHashMutator.mutate(data, payload: payload)
+            case .tiff: return try TIFFHashMutator.mutate(data, payload: payload)
+            case .heic, .avif: return try BMFFHashMutator.mutate(data, payload: payload)
+            }
+        }
+        let mutated = try mutate(original, byte: 0xAB)
 
         // ① 哈希变化。
         XCTAssertNotEqual(
@@ -65,12 +75,13 @@ final class ImageHashChangerTests: XCTestCase {
         XCTAssertEqual(originalSignature, mutatedSignature, "\(format.rawValue)：像素被修改")
 
         // ④ 重复换 Hash：剥离旧注入 + 新随机载荷 → 与第一次产物不同。
-        let mutatedAgain = try ImageHashChanger.mutate(data: mutated, format: format)
+        let mutatedAgain = try mutate(mutated, byte: 0xCD)
         XCTAssertNotEqual(mutated, mutatedAgain, "\(format.rawValue)：重复换 Hash 未产生新内容")
-        // 剥离旧注入后体积不应持续增长（允许 ±注入块本身大小）。
+        XCTAssertEqual(mutatedAgain.count, mutated.count, "同长度载荷重复执行不能继续增长")
+        // 首次注入仅增加载荷和容器头的空间。
         XCTAssertLessThan(
             mutatedAgain.count - original.count,
-            payloadSize + ImageHashChanger.injectionMarker.count + 16,
+            payloadSize + ImageHashChanger.injectionMarker.count + 40,
             "\(format.rawValue)：重复换 Hash 后文件异常增长"
         )
     }

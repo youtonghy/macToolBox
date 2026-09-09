@@ -488,6 +488,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             contentInsets: NSEdgeInsets(top: 44, left: 12, bottom: 12, right: 12)
         )
         let window = NSWindow(contentViewController: hostingController)
+        model.window = window
         window.title = L10n.imageTools
         window.setContentSize(windowSize)
         window.minSize = NSSize(width: 420, height: 520)

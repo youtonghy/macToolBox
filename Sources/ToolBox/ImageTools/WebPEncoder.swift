@@ -41,6 +41,29 @@ enum WebPEncoder {
         try encode(image, lossless: true, quality: 100, effort: effort)
     }
 
+    static func attachMetadata(_ chunks: [(String, Data)], to pixels: Data) throws -> Data {
+        let mux = pixels.withUnsafeBytes { raw -> OpaquePointer? in
+            var input = WebPData(bytes: raw.bindMemory(to: UInt8.self).baseAddress, size: raw.count)
+            return WebPMuxCreate(&input, 1)
+        }
+        guard let mux else { throw WebPEncodeError.encodeFailed(status: -1) }
+        defer { WebPMuxDelete(mux) }
+        for (name, data) in chunks {
+            let status = data.withUnsafeBytes { raw in
+                var chunk = WebPData(bytes: raw.bindMemory(to: UInt8.self).baseAddress, size: raw.count)
+                return WebPMuxSetChunk(mux, name, &chunk, 1)
+            }
+            guard status == WEBP_MUX_OK else { throw WebPEncodeError.encodeFailed(status: status.rawValue) }
+        }
+        var output = WebPData()
+        defer { WebPDataClear(&output) }
+        let status = WebPMuxAssemble(mux, &output)
+        guard status == WEBP_MUX_OK, let bytes = output.bytes else {
+            throw WebPEncodeError.encodeFailed(status: status.rawValue)
+        }
+        return Data(bytes: bytes, count: output.size)
+    }
+
     // MARK: - 实现
 
     private static func encode(_ image: CGImage, lossless: Bool, quality: Float, effort: Int32) throws -> Data {

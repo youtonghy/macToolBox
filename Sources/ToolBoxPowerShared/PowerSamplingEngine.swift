@@ -17,6 +17,7 @@ final class PowerSamplingEngine {
     private var stopped = false
     private var terminating = false
     private var producedReport = false
+    private var outputEnded = false
 
     init(
         leaseDuration: TimeInterval = 6,
@@ -71,6 +72,10 @@ final class PowerSamplingEngine {
         child.standardOutput = output
         parser = PowermetricsParser()
         producedReport = false
+        outputEnded = false
+        child.terminationHandler = { [weak self] child in
+            self?.queue.async { [weak self] in self?.finishIfReady(child) }
+        }
         do {
             try child.run()
         } catch {
@@ -104,21 +109,31 @@ final class PowerSamplingEngine {
                 }
             }
             output.fileHandleForReading.closeFile()
-            child.waitUntilExit()
             self?.queue.async { [weak self] in
                 guard let self, self.process === child else { return }
-                self.process = nil
-                self.terminating = false
-                if child.terminationStatus != 0 || !self.producedReport {
-                    self.latest = nil
-                    self.failure = .samplingFailed
-                    self.retryAfter = Date().addingTimeInterval(5)
-                }
+                self.outputEnded = true
+                self.finishIfReady(child)
             }
         }
     }
 
+    // EOF and process termination can arrive in either order. Never block a
+    // worker in waitUntilExit: its run-loop wait can outlive the child.
+    private func finishIfReady(_ child: Process) {
+        guard process === child, outputEnded, !child.isRunning else { return }
+        process = nil
+        terminating = false
+        child.terminationHandler = nil
+        if child.terminationStatus != 0 || !producedReport {
+            latest = nil
+            failure = .samplingFailed
+            retryAfter = Date().addingTimeInterval(5)
+        }
+    }
+
     private func checkDeadline() {
+        // Also reconcile completed children if the termination callback is late.
+        if let child = process { finishIfReady(child) }
         let now = Date()
         if now.timeIntervalSince(lastPoll) > leaseDuration {
             latest = nil
