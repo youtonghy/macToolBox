@@ -56,6 +56,7 @@ final class ShortcutSettingsModelTests: XCTestCase {
             ),
             ShortcutRule.defaults[1],
             ShortcutRule.defaults[2],
+            ShortcutRule.defaults[3],
         ]])
         XCTAssertEqual(harness.savedRuleSets.count, 1)
         XCTAssertEqual(harness.model.rule(for: .captureRegion)?.binding, replacement)

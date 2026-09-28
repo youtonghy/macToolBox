@@ -12,6 +12,10 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
     private let smcReader: SMCSystemPowerReader
     private let authorizedModeEnabled: () -> Bool
     private let authorizedSamplerFactory: () -> any AuthorizedPowerSampling
+    private let restartAuthorizedMode: @MainActor () async -> Bool
+    private let authorizedSamplingRecovered: @MainActor () -> Void
+    private let authorizedRecoveryDelay: TimeInterval
+    private let authorizedMaximumRecoveryDelay: TimeInterval
     private let stateLock = NSLock()
     private let smcLock = NSLock()
     private var task: Task<Void, Never>?
@@ -35,12 +39,28 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
         authorizedModeEnabled: @escaping () -> Bool = {
             UserDefaults.standard.bool(forKey: PowerSamplingService.enabledKey)
         },
-        authorizedSamplerFactory: @escaping () -> any AuthorizedPowerSampling = { AuthorizedPowerClient() }
+        authorizedSamplerFactory: @escaping () -> any AuthorizedPowerSampling = { AuthorizedPowerClient() },
+        // Must outlive the client's restart hold-off plus launchd's ~10s respawn
+        // throttle after a failed helper spawn (e.g. a stale launch constraint
+        // right after an app update); otherwise the watchdog restarts again
+        // just before the self-correcting retry would succeed.
+        authorizedRecoveryDelay: TimeInterval = 30,
+        authorizedMaximumRecoveryDelay: TimeInterval = 300,
+        restartAuthorizedMode: @escaping @MainActor () async -> Bool = {
+            await AuthorizedPowerSettings.shared.restartAfterSamplingFailure()
+        },
+        authorizedSamplingRecovered: @escaping @MainActor () -> Void = {
+            AuthorizedPowerSettings.shared.recordSamplingRecovered()
+        }
     ) {
         self.samplerFactory = samplerFactory
         self.smcReader = smcReader
         self.authorizedModeEnabled = authorizedModeEnabled
         self.authorizedSamplerFactory = authorizedSamplerFactory
+        self.authorizedRecoveryDelay = authorizedRecoveryDelay
+        self.authorizedMaximumRecoveryDelay = authorizedMaximumRecoveryDelay
+        self.restartAuthorizedMode = restartAuthorizedMode
+        self.authorizedSamplingRecovered = authorizedSamplingRecovered
     }
 
     func start(interval: TimeInterval = 1.0) {
@@ -109,6 +129,14 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
         let chipName = ChipIdentityProvider.chipName()
         let macModel = ChipIdentityProvider.macModel()
         var wasAuthorized = false
+        // The failed-restart streak outlives this run, so report the first
+        // fresh sample of each run and after each restart.
+        var reportsRecovery = true
+        var recovery = AuthorizedPowerRecovery(
+            gracePeriod: authorizedRecoveryDelay,
+            maximumDelay: authorizedMaximumRecoveryDelay,
+            maximumObservationGap: max(interval * 3, authorizedRecoveryDelay)
+        )
         defer {
             sampler?.reset()
             authorizedSampler.stop()
@@ -121,6 +149,7 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
             let usesAuthorization = authorizedModeEnabled()
             if usesAuthorization != wasAuthorized {
                 sampler?.reset()
+                recovery.reset()
                 wasAuthorized = usesAuthorization
             }
             if usesAuthorization {
@@ -128,6 +157,15 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
                 snapshot = Self.authorizedSnapshot(
                     response: response, systemWatts: systemWatts, chipName: chipName, macModel: macModel
                 )
+                if reportsRecovery, response.reading?.isFresh(at: Date()) == true {
+                    reportsRecovery = false
+                    await authorizedSamplingRecovered()
+                }
+                if recovery.observe(response), await restartAuthorizedSampling(runID: id) {
+                    authorizedSampler.restart()
+                    recovery.markRestarted()
+                    reportsRecovery = true
+                }
             } else if let sampler {
                 authorizedSampler.suspend()
                 do {
@@ -198,6 +236,12 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
         }
         guard publication.accepted, isCurrentRun(runID) else { return }
         publication.callback?(snapshot)
+    }
+
+    @MainActor
+    private func restartAuthorizedSampling(runID: UInt64) async -> Bool {
+        guard !Task.isCancelled, isCurrentRun(runID), authorizedModeEnabled() else { return false }
+        return await restartAuthorizedMode()
     }
 
     private func isCurrentRun(_ id: UInt64) -> Bool {
@@ -292,5 +336,62 @@ final class DarwinChipPowerProvider: ChipPowerProviding {
             sampleInterval: reading?.sampleInterval,
             message: message
         )
+    }
+}
+
+/// Restarts the helper whenever an outage outlasts the current delay, doubling
+/// the delay (up to `maximumDelay`) while it stays down. Settings turn sampling
+/// off after too many failed restarts in a row. A fresh sample (including zero
+/// watts) starts a new healthy period.
+struct AuthorizedPowerRecovery {
+    let gracePeriod: TimeInterval
+    let maximumDelay: TimeInterval
+    let maximumObservationGap: TimeInterval
+    private var unavailableSince: Date?
+    private var lastObservation: Date?
+    private var restarts = 0
+
+    init(gracePeriod: TimeInterval = 10, maximumDelay: TimeInterval = 300, maximumObservationGap: TimeInterval = 10) {
+        self.gracePeriod = gracePeriod
+        self.maximumDelay = max(maximumDelay, gracePeriod)
+        self.maximumObservationGap = maximumObservationGap
+    }
+
+    /// How long the current outage must last before the next restart.
+    var currentDelay: TimeInterval {
+        min(gracePeriod * pow(2, Double(min(restarts, 32))), maximumDelay)
+    }
+
+    mutating func reset() {
+        unavailableSince = nil
+        lastObservation = nil
+        restarts = 0
+    }
+
+    mutating func markRestarted(now: Date = Date()) {
+        restarts += 1
+        unavailableSince = now
+        lastObservation = now
+    }
+
+    /// Returns true when the helper should be restarted. It keeps returning true
+    /// until `markRestarted` is called, so a deferred restart is retried.
+    mutating func observe(_ response: PowerSamplingResponse, now: Date = Date()) -> Bool {
+        // An approval prompt can stay open indefinitely without being a failure.
+        if response.failure == .authorizationRequired || response.reading?.isFresh(at: now) == true {
+            reset()
+            return false
+        }
+        if let lastObservation,
+           now.timeIntervalSince(lastObservation) < 0 || now.timeIntervalSince(lastObservation) > maximumObservationGap {
+            // Do not count sleep or a paused sampling loop as continuous N/A.
+            unavailableSince = nil
+        }
+        lastObservation = now
+        guard let unavailableSince else {
+            self.unavailableSince = now
+            return false
+        }
+        return now.timeIntervalSince(unavailableSince) >= currentDelay
     }
 }

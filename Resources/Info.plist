@@ -10,16 +10,16 @@
 	<string>$(EXECUTABLE_NAME)</string>
 	<key>CFBundleIconName</key>
 	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
 	<key>CFBundleLocalizations</key>
 	<array>
 		<string>en</string>
 		<string>zh-Hans</string>
 		<string>zh-Hant</string>
 	</array>
-	<key>CFBundleIdentifier</key>
-	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-	<key>CFBundleInfoDictionaryVersion</key>
-	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
 	<key>CFBundlePackageType</key>
@@ -38,5 +38,11 @@
 	<string></string>
 	<key>NSInputMonitoringUsageDescription</key>
 	<string>ToolBox 需要输入监控权限，以便拦截亮度 / 音量媒体键并转发给外接显示器。</string>
+	<key>NSLocationUsageDescription</key>
+	<string>ToolBox 需要定位服务权限来读取当前 Wi-Fi 名称（SSID），以便按 SSID 自动切换网络位置；不会读取或保存你的地理位置。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>ToolBox 需要定位服务权限来读取当前 Wi-Fi 名称（SSID），以便按 SSID 自动切换网络位置；不会读取或保存你的地理位置。</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>ToolBox 需要屏幕录制权限，以便截取屏幕内容并呈现 Duo 屏幕展开效果。</string>
 </dict>
 </plist>

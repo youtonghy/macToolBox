@@ -33,7 +33,6 @@ final class DisplayControlMenuModel: ObservableObject {
     @Published private(set) var displayItems: [DisplayControlPickerItem] = []
     @Published private(set) var sliderItems: [DisplayControlSliderItem] = []
     @Published private(set) var selectedDisplayName = "No external display"
-    @Published private(set) var statusText = "No controllable external display"
     @Published private(set) var selectedMuted = false
     @Published private(set) var muteAvailable = false
     @Published private(set) var presetItems: [DisplayControlPresetItem] = []
@@ -130,20 +129,6 @@ final class DisplayControlMenuModel: ObservableObject {
         return opened
     }
 
-    var selectedDisplayStatusText: String {
-        guard let selectedDisplayID,
-              let display = service.snapshot.displays.first(where: { $0.id == selectedDisplayID }) else {
-            return "等待显示器"
-        }
-        if display.supportsHardwareDDC {
-            if display.controls.contains(where: { $0.status == .writeOnly }) {
-                return "DDC 只写 · 当前值为估算"
-            }
-            return display.backendName ?? "DDC 可用"
-        }
-        return display.unavailableReason ?? "DDC 不可用"
-    }
-
     func stepSelected(kind: DisplayControlKind, delta: Double) {
         guard let displayID = selectedDisplayID else { return }
         service.stepValue(displayID: displayID, kind: kind, delta: delta)
@@ -179,7 +164,6 @@ final class DisplayControlMenuModel: ObservableObject {
 
         guard let selected = externalDisplays.first(where: { $0.id == self.selectedDisplayID }) else {
             selectedDisplayName = "No external display"
-            statusText = "No controllable external display"
             selectedMuted = false
             muteAvailable = false
             sliderItems = Self.makeEmptySliderItems()
@@ -188,13 +172,6 @@ final class DisplayControlMenuModel: ObservableObject {
         }
 
         selectedDisplayName = selected.name
-        if selected.controls.contains(where: { $0.status == .writeOnly }) {
-            statusText = L10n.string("DDC 只写模式，当前值为估算值")
-        } else {
-            statusText = selected.supportsHardwareDDC
-                ? (selected.backendName ?? "Hardware DDC")
-                : (selected.unavailableReason ?? "Hardware DDC unavailable")
-        }
         let muteCapability = selected.controls.first(where: { $0.kind == .mute })
         selectedMuted = (muteCapability?.value?.normalized ?? 0) >= 0.5
         muteAvailable = muteCapability?.status.isWritable == true

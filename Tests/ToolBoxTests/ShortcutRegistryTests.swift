@@ -55,10 +55,11 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
 
         XCTAssertEqual(recorder.installHandlerCalls, 1)
-        XCTAssertEqual(recorder.registerCalls.count, 3)
+        XCTAssertEqual(recorder.registerCalls.count, 4)
         XCTAssertTrue(registry.isRegistered(.captureRegion))
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
         XCTAssertTrue(registry.isRegistered(.clipboardHistory))
+        XCTAssertTrue(registry.isRegistered(.duoEffectToggle))
     }
 
     func testUnknownEventIDIsNotHandled() throws {
@@ -111,7 +112,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertFalse(registry.isRegistered(.captureRegion))
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
         XCTAssertTrue(registry.isRegistered(.clipboardHistory))
-        XCTAssertEqual(recorder.activeRegistrationCount, 2)
+        XCTAssertEqual(recorder.activeRegistrationCount, 3)
     }
 
     func testProtectedRuleCannotBeDisabled() throws {
@@ -151,7 +152,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertThrowsError(try registry.apply(rule: capture)) {
             XCTAssertEqual($0 as? ShortcutRegistryError, .duplicateBinding)
         }
-        XCTAssertEqual(recorder.registerCalls.count, 3)
+        XCTAssertEqual(recorder.registerCalls.count, 4)
     }
 
     func testApplyRuleSetCanSwapBindingsAndKeepsStableIDs() throws {
@@ -174,6 +175,7 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutRule.defaults[2].binding,
                 isEnabled: true
             ),
+            ShortcutRule.defaults[3],
         ]
 
         try registry.apply(rules: swapped)
@@ -190,7 +192,7 @@ final class ShortcutRegistryTests: XCTestCase {
             recorder.activeBinding(id: ShortcutActionID.clipboardHistory.carbonID),
             swapped[2].binding
         )
-        XCTAssertEqual(recorder.activeRegistrationCount, 3)
+        XCTAssertEqual(recorder.activeRegistrationCount, 4)
     }
 
     func testApplyRuleSetRegistrationFailureRestoresPreviousRules() throws {
@@ -213,6 +215,7 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutBinding(keyCode: 3, modifiers: [.command]),
                 isEnabled: true
             ),
+            ShortcutRule.defaults[3],
         ]
         recorder.registerStatusQueue = [noErr, noErr, OSStatus(eventHotKeyExistsErr)]
 
@@ -235,7 +238,7 @@ final class ShortcutRegistryTests: XCTestCase {
             recorder.activeBinding(id: ShortcutActionID.clipboardHistory.carbonID),
             ShortcutRule.defaults[2].binding
         )
-        XCTAssertEqual(recorder.activeRegistrationCount, 3)
+        XCTAssertEqual(recorder.activeRegistrationCount, 4)
     }
 
     func testApplyRuleSetCleanupFailureDoesNotDispatchProposedAction() throws {
@@ -260,9 +263,11 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutBinding(keyCode: 3, modifiers: [.command]),
                 isEnabled: true
             ),
+            ShortcutRule.defaults[3],
         ]
         recorder.registerStatusQueue = [noErr, noErr, OSStatus(eventHotKeyExistsErr)]
         recorder.unregisterStatusQueue = [
+            noErr,
             noErr,
             noErr,
             noErr,
@@ -308,6 +313,7 @@ final class ShortcutRegistryTests: XCTestCase {
                 binding: ShortcutBinding(keyCode: 3, modifiers: [.command]),
                 isEnabled: true
             ),
+            ShortcutRule.defaults[3],
         ]
         recorder.registerStatusQueue = [
             OSStatus(eventHotKeyExistsErr),
@@ -357,7 +363,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertNil(registry.stop())
         XCTAssertNil(registry.stop())
 
-        XCTAssertEqual(recorder.unregisterCalls.count, 3)
+        XCTAssertEqual(recorder.unregisterCalls.count, 4)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
         XCTAssertEqual(recorder.activeRegistrationCount, 0)
     }
@@ -425,7 +431,7 @@ final class ShortcutRegistryTests: XCTestCase {
         try registry.start(rules: ShortcutRule.defaults)
 
         XCTAssertEqual(recorder.installHandlerCalls, 2)
-        XCTAssertEqual(recorder.activeRegistrationCount, 3)
+        XCTAssertEqual(recorder.activeRegistrationCount, 4)
     }
 
     func testPartialStartFailureRollsBackAndCanBeRetried() throws {
@@ -438,7 +444,7 @@ final class ShortcutRegistryTests: XCTestCase {
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
 
         try registry.start(rules: ShortcutRule.defaults)
-        XCTAssertEqual(recorder.activeRegistrationCount, 3)
+        XCTAssertEqual(recorder.activeRegistrationCount, 4)
         XCTAssertEqual(recorder.installHandlerCalls, 2)
     }
 
@@ -461,10 +467,11 @@ final class ShortcutRegistryTests: XCTestCase {
 
         registry.stop()
         try registry.start(rules: ShortcutRule.defaults)
-        XCTAssertEqual(recorder.activeRegistrationCount, 3)
+        XCTAssertEqual(recorder.activeRegistrationCount, 4)
         XCTAssertTrue(registry.isRegistered(.captureRegion))
         XCTAssertTrue(registry.isRegistered(.screenWipeExit))
         XCTAssertTrue(registry.isRegistered(.clipboardHistory))
+        XCTAssertTrue(registry.isRegistered(.duoEffectToggle))
     }
 
     func testOldUnregistrationFailureKeepsOldBinding() throws {
@@ -488,7 +495,7 @@ final class ShortcutRegistryTests: XCTestCase {
             recorder.activeBinding(id: ShortcutActionID.captureRegion.carbonID),
             ShortcutRule.defaults[0].binding
         )
-        XCTAssertEqual(recorder.activeRegistrationCount, 3)
+        XCTAssertEqual(recorder.activeRegistrationCount, 4)
     }
 
     func testRollbackFailureDoesNotDispatchReplacementAction() throws {
@@ -533,7 +540,7 @@ final class ShortcutRegistryTests: XCTestCase {
         }
 
         XCTAssertNil(weakRegistry)
-        XCTAssertEqual(recorder.unregisterCalls.count, 3)
+        XCTAssertEqual(recorder.unregisterCalls.count, 4)
         XCTAssertEqual(recorder.removeHandlerCalls, 1)
     }
 }

@@ -4,29 +4,61 @@ import ServiceManagement
 protocol AuthorizedPowerSampling: AnyObject {
     func response() -> PowerSamplingResponse
     func suspend()
+    /// Drops the session and stays disconnected long enough for the helper to
+    /// exit, so the next connection reaches a new helper process.
+    func restart()
     func stop()
 }
 
 final class AuthorizedPowerClient: AuthorizedPowerSampling {
     private let queue = DispatchQueue(label: "com.youtonghy.toolbox.power-client")
+    private let serviceStatus: () -> SMAppService.Status
+    private let restartHoldOff: TimeInterval
+    private let makeConnection: () -> NSXPCConnection?
     private var connection: NSXPCConnection?
     private var cached = PowerSamplingResponse()
     private var pending = false
     private var requestedAt = Date.distantPast
+    private var reconnectAfter = Date.distantPast
     private var closed = false
+
+    init(
+        serviceStatus: @escaping () -> SMAppService.Status = {
+            SMAppService.daemon(plistName: PowerSamplingService.plistName).status
+        },
+        restartHoldOff: TimeInterval = PowerSamplingService.helperIdleExitDelay + 2,
+        makeConnection: @escaping () -> NSXPCConnection? = AuthorizedPowerClient.helperConnection
+    ) {
+        self.serviceStatus = serviceStatus
+        self.restartHoldOff = restartHoldOff
+        self.makeConnection = makeConnection
+    }
+
+    static func helperConnection() -> NSXPCConnection? {
+        let helper = Bundle.main.bundleURL.appendingPathComponent(PowerSamplingService.helperRelativePath)
+        guard let requirement = try? PowerSamplingIdentity.requirement(for: helper) else { return nil }
+        let connection = NSXPCConnection(machServiceName: PowerSamplingService.name, options: .privileged)
+        connection.setCodeSigningRequirement(requirement)
+        return connection
+    }
 
     func response() -> PowerSamplingResponse {
         queue.sync {
             guard !closed else { return PowerSamplingResponse(failure: .stopped) }
-            guard SMAppService.daemon(plistName: PowerSamplingService.plistName).status == .enabled else {
+            let status = serviceStatus()
+            guard status == .enabled else {
                 disconnect()
-                return PowerSamplingResponse(failure: .authorizationRequired)
+                return PowerSamplingResponse(failure: status == .requiresApproval ? .authorizationRequired : .connectionFailed)
             }
             if pending, Date().timeIntervalSince(requestedAt) > 3 {
                 disconnect()
                 cached = PowerSamplingResponse(failure: .connectionFailed)
             }
-            if connection == nil { connect() }
+            if connection == nil {
+                // Reconnecting before the helper's idle exit would reuse the old process.
+                guard Date() >= reconnectAfter else { return PowerSamplingResponse() }
+                connect()
+            }
             if let connection, !pending {
                 pending = true
                 requestedAt = Date()
@@ -59,7 +91,17 @@ final class AuthorizedPowerClient: AuthorizedPowerSampling {
     }
 
     func suspend() {
-        queue.sync { disconnect() }
+        queue.sync {
+            reconnectAfter = .distantPast
+            disconnect()
+        }
+    }
+
+    func restart() {
+        queue.sync {
+            disconnect()
+            reconnectAfter = Date().addingTimeInterval(restartHoldOff)
+        }
     }
 
     func stop() {
@@ -70,13 +112,10 @@ final class AuthorizedPowerClient: AuthorizedPowerSampling {
     }
 
     private func connect() {
-        let helper = Bundle.main.bundleURL.appendingPathComponent(PowerSamplingService.helperRelativePath)
-        guard let requirement = try? PowerSamplingIdentity.requirement(for: helper) else {
+        guard let connection = makeConnection() else {
             cached = PowerSamplingResponse(failure: .connectionFailed)
             return
         }
-        let connection = NSXPCConnection(machServiceName: PowerSamplingService.name, options: .privileged)
-        connection.setCodeSigningRequirement(requirement)
         connection.remoteObjectInterface = NSXPCInterface(with: PowerSamplingXPCProtocol.self)
         connection.invalidationHandler = { [weak self, weak connection] in
             self?.queue.async { [weak self, weak connection] in

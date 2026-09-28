@@ -4,6 +4,7 @@ enum ShortcutActionID: String, Codable, CaseIterable, Sendable {
     case captureRegion
     case screenWipeExit
     case clipboardHistory
+    case duoEffectToggle
 }
 
 struct ShortcutModifiers: OptionSet, Codable, Hashable, Sendable {
@@ -46,6 +47,14 @@ struct ShortcutRule: Codable, Equatable, Sendable {
             id: .clipboardHistory,
             binding: ShortcutBinding(
                 keyCode: UInt32(kVK_ANSI_V),
+                modifiers: [.control, .option]
+            ),
+            isEnabled: true
+        ),
+        ShortcutRule(
+            id: .duoEffectToggle,
+            binding: ShortcutBinding(
+                keyCode: UInt32(kVK_ANSI_D),
                 modifiers: [.control, .option]
             ),
             isEnabled: true

@@ -6,7 +6,6 @@ import SwiftUI
 /// the real panel; only the interaction layer differs — visibility toggles and
 /// drag ordering are live, business controls are read-only.
 struct MenuBarCustomizationSettingsView: View {
-    private static let editorWidth: CGFloat = 520
     fileprivate static let previewWidth: CGFloat = 460
 
     @ObservedObject var customization: MenuBarCustomizationModel
@@ -15,6 +14,7 @@ struct MenuBarCustomizationSettingsView: View {
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
+    @ObservedObject var networkLocation: NetworkLocationModel
     @EnvironmentObject private var featureState: FeatureState
 
     private var runtimeContext: MenuBarElementRuntimeContext {
@@ -34,8 +34,7 @@ struct MenuBarCustomizationSettingsView: View {
             editorList
                 .frame(
                     minWidth: 0,
-                    idealWidth: Self.editorWidth,
-                    maxWidth: Self.editorWidth,
+                    maxWidth: .infinity,
                     maxHeight: .infinity,
                     alignment: .topLeading
                 )
@@ -84,13 +83,14 @@ struct MenuBarCustomizationSettingsView: View {
                     audioRouting: audioRouting,
                     focusMode: focusMode,
                     wifiSignal: wifiSignal,
+                    networkLocation: networkLocation,
                     featureState: featureState,
                     setVisible: { customization.setVisible($0, for: pair.element.id) }
                 )
-                .frame(width: Self.editorWidth, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .listRowSeparator(.hidden)
                 .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 0))
+                .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 4, trailing: 8))
                 .accessibilityElement(children: .contain)
             }
             .onMove { offsets, destination in
@@ -115,6 +115,7 @@ private struct EditableMenuBarElementCard: View {
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
+    @ObservedObject var networkLocation: NetworkLocationModel
     @ObservedObject var featureState: FeatureState
     let setVisible: (Bool) -> Void
     @State private var isExpanded = false
@@ -198,6 +199,7 @@ private struct EditableMenuBarElementCard: View {
             )
             .toggleStyle(.switch)
             .labelsHidden()
+            .fixedSize()
             .accessibilityLabel(String(format: L10n.string("在菜单栏显示“%@”"), entry.id.displayName))
         }
     }
@@ -231,6 +233,7 @@ private struct EditableMenuBarElementCard: View {
                 audioRouting: audioRouting,
                 focusMode: focusMode,
                 wifiSignal: wifiSignal,
+                networkLocation: networkLocation,
                 state: featureState,
                 isInteractive: false
             )

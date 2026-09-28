@@ -61,6 +61,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
                 ),
                 isEnabled: true
             ),
+            .init(
+                id: .duoEffectToggle,
+                binding: .init(
+                    keyCode: UInt32(kVK_ANSI_D),
+                    modifiers: [.control, .option]
+                ),
+                isEnabled: true
+            ),
         ])
     }
 
@@ -98,12 +106,13 @@ final class ShortcutRuleStoreTests: XCTestCase {
         let data = try encoder.encode(ShortcutRuleDocumentV1(schemaVersion: 1, rules: oldRules))
         defaults.set(data, forKey: suiteName)
 
-        // Load should backfill missing clipboardHistory
+        // Load should backfill missing clipboardHistory and duoEffectToggle
         let result = store.load()
 
         XCTAssertNil(result.issue)
-        XCTAssertEqual(result.rules.count, 3)
+        XCTAssertEqual(result.rules.count, 4)
         XCTAssertTrue(result.rules.contains(where: { $0.id == .clipboardHistory }))
+        XCTAssertTrue(result.rules.contains(where: { $0.id == .duoEffectToggle }))
     }
 
     func testMigrationDisablesConflictingBinding() throws {
@@ -162,6 +171,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
                 id: .clipboardHistory,
                 binding: ShortcutBinding(
                     keyCode: UInt32(kVK_ANSI_V),
+                    modifiers: [.control, .option]
+                ),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .duoEffectToggle,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_ANSI_D),
                     modifiers: [.control, .option]
                 ),
                 isEnabled: true
@@ -329,6 +346,14 @@ final class ShortcutRuleStoreTests: XCTestCase {
                 id: .clipboardHistory,
                 binding: ShortcutBinding(
                     keyCode: UInt32(kVK_ANSI_V),
+                    modifiers: [.control, .option]
+                ),
+                isEnabled: true
+            ),
+            ShortcutRule(
+                id: .duoEffectToggle,
+                binding: ShortcutBinding(
+                    keyCode: UInt32(kVK_ANSI_D),
                     modifiers: [.control, .option]
                 ),
                 isEnabled: true

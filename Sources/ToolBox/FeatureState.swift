@@ -9,10 +9,15 @@ final class FeatureState: ObservableObject {
     @Published var clipboardOn: Bool {
         didSet { UserDefaults.standard.set(clipboardOn, forKey: Self.clipboardKey) }
     }
+    @Published var duoOn: Bool {
+        didSet { UserDefaults.standard.set(duoOn, forKey: Self.duoKey) }
+    }
 
     private static let clipboardKey = "feature.clipboard.enabled"
+    private static let duoKey = DuoEffectModel.enabledKey
 
     init() {
         clipboardOn = UserDefaults.standard.bool(forKey: Self.clipboardKey)
+        duoOn = UserDefaults.standard.bool(forKey: Self.duoKey)
     }
 }

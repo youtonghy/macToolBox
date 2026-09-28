@@ -9,6 +9,7 @@ struct PopoverContent: View {
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
+    @ObservedObject var networkLocation: NetworkLocationModel
 
     private var runtimeContext: MenuBarElementRuntimeContext {
         MenuBarElementRuntimeContext(
@@ -43,6 +44,7 @@ struct PopoverContent: View {
                     audioRouting: audioRouting,
                     focusMode: focusMode,
                     wifiSignal: wifiSignal,
+                    networkLocation: networkLocation,
                     state: state,
                     isInteractive: true
                 )

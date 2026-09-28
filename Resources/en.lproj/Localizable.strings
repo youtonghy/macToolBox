@@ -76,8 +76,6 @@
 "转换为 %@（源已删除）：%@ → %@" = "Converted to %@ (source deleted): %@ → %@";
 "转换并覆盖时写入新扩展名文件，成功后删除源文件（先写后删）。" = "Convert-and-overwrite writes a file with the new extension, then deletes the source only after success.";
 
-"DDC 只写模式，当前值为估算值" = "DDC write-only – current values are estimated";
-
 "自定义" = "Customize";
 "菜单栏布局" = "Menu Bar Layout";
 "拖拽调整顺序，开关控制显示" = "Drag to reorder; toggles control visibility";
@@ -109,6 +107,7 @@
 /* Authorized power sampling */
 "功耗采集" = "Power Sampling";
 "授权功耗采集" = "Authorize Power Sampling";
+"当前功能不可用" = "This feature is currently unavailable.";
 "CPU 功耗不可用时，可授权系统辅助服务采集。关闭后停止采集并移除服务。" = "If CPU power is unavailable, authorize the system helper to collect it. Turning this off stops sampling and removes the service.";
 "已授权，将在显示功耗时采集。" = "Authorized. Sampling runs while power monitoring is active.";
 "等待系统授权。请在登录项设置中允许 ToolBox 后台服务。" = "Awaiting system approval. Allow the ToolBox background service in Login Items settings.";
@@ -186,3 +185,45 @@
 "共 %d 个文件，成功 %d 个，增加 %@" = "%d files, %d succeeded, increased by %@";
 
 "纯压缩无收益时保留原件；转换、缩放或剥离元数据允许体积增加。" = "Keep the original when compression offers no savings; conversion, resizing, or metadata removal may increase file size.";
+"Duo" = "Duo";
+
+/* Network location */
+"位置名称不能为空，不能以“-”开头，且不能包含换行" = "Location name must not be empty, start with “-”, or contain line breaks";
+"SSID 和位置都不能为空" = "SSID and location are both required";
+"位置“%@”已存在" = "Location “%@” already exists";
+"位置“%@”不存在" = "Location “%@” does not exist";
+"已取消管理员授权" = "Administrator authorization was canceled";
+"networksetup 执行超时" = "networksetup timed out";
+"无法启动 networksetup：%@" = "Could not launch networksetup: %@";
+"networksetup 执行失败" = "networksetup failed";
+"系统未切换到位置“%@”" = "The system did not switch to location “%@”";
+"已根据 Wi-Fi“%@”切换到“%@”" = "Switched to “%2$@” for Wi-Fi “%1$@”";
+"网络位置" = "Network Location";
+"切换网络位置" = "Switch network location";
+"按 SSID 自动切换" = "Auto-switch by SSID";
+"新位置名称" = "New location name";
+"当前位置" = "Current location";
+"未知" = "Unknown";
+"等同于 networksetup -switchtolocation" = "Same as networksetup -switchtolocation";
+"刷新位置列表" = "Refresh locations";
+"新建位置" = "Create Location";
+"新位置会包含默认网络服务。修改系统网络设置可能需要管理员授权。" = "New locations include the default network services. Changing system network settings may require administrator authorization.";
+"连接到新的 Wi-Fi 时应用一次" = "Applied once when joining a Wi-Fi network";
+"根据当前 Wi-Fi 自动切换位置" = "Switch location automatically based on the current Wi-Fi";
+"当前 SSID" = "Current SSID";
+"macOS 需要定位服务权限才能读取 Wi-Fi 名称（SSID）。ToolBox 不会读取你的位置。" = "macOS requires Location Services permission to read the Wi-Fi name (SSID). ToolBox does not read your location.";
+"授权定位服务" = "Allow Location Services";
+"定位服务权限被拒绝，无法读取 SSID，自动切换不会生效。" = "Location Services permission was denied. The SSID cannot be read, so auto-switching will not work.";
+"打开系统设置" = "Open System Settings";
+"SSID 规则" = "SSID Rules";
+"按顺序匹配第一条" = "First match wins";
+"还没有规则" = "No rules yet";
+"添加 SSID 与位置的对应关系，例如公司 Wi-Fi → 公司。" = "Map an SSID to a location, for example Office Wi-Fi → Office.";
+"填入当前 SSID" = "Use current SSID";
+"位置" = "Location";
+"选择位置" = "Choose location";
+"添加" = "Add";
+"其他 Wi-Fi" = "Other Wi-Fi";
+"保持不变" = "Keep unchanged";
+"位置不存在" = "Location missing";
+"删除规则" = "Delete rule";

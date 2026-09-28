@@ -57,7 +57,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             displayControl: displayControlMenu,
             audioRouting: audioRouting,
             focusMode: focusMode,
-            wifiSignal: wifiSignal
+            wifiSignal: wifiSignal,
+            networkLocation: networkLocation
         )
         .environment(\.locale, AppLanguage.current.locale)),
         panelSize: currentPanelSize
@@ -71,6 +72,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private let displayControlMenu = DisplayControlMenuModel()
     private let audioRouting = AudioRoutingService()
     private let wifiSignal = WiFiSignalModel()
+    private let networkLocation = NetworkLocationModel()
     private let shortcutRegistry = ShortcutRegistry()
     private let appUpdater = AppUpdateCoordinator()
     private let launchAtLogin = LaunchAtLoginController()
@@ -163,6 +165,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     let screenWipe = ScreenWipeCoordinator()
     let awake = AwakeCoordinator()
     let clipboardCoordinator = ClipboardCoordinator()
+    private let duoEffect = DuoEffectModel()
+    private lazy var duoEffectCoordinator: DuoEffectCoordinator = {
+        let coordinator = DuoEffectCoordinator(model: duoEffect)
+        coordinator.onFailure = { [weak self] in
+            // Start failed (no sensor / no permission): turn the toggle back off.
+            self?.state.duoOn = false
+        }
+        return coordinator
+    }()
 
     public override init() {
         super.init()
@@ -203,6 +214,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             .sink { [weak self] on in self?.applyClipboard(on) }
             .store(in: &cancellables)
         applyClipboard(state.clipboardOn)
+        state.$duoOn
+            .dropFirst().removeDuplicates()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] on in self?.applyDuo(on) }
+            .store(in: &cancellables)
+        duoEffect.onPreview = { [weak self] in self?.duoEffectCoordinator.preview() }
+        applyDuo(state.duoOn)
 
         shortcutRegistry.onRoutedAction = { [weak self] action in
             self?.handleShortcutAction(action) ?? false
@@ -215,6 +233,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             )
         }
 
+        // A rebuilt or updated app must re-register the power helper before
+        // launchd will start it again.
+        Task { await AuthorizedPowerSettings.shared.refreshStaleRegistration() }
         hardware.start()
         displayControl.start()
         brightnessSchedule.start()
@@ -222,6 +243,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         displayControlKeys.start()
         audioRouting.start()
         wifiSignal.start()
+        networkLocation.start()
         focusMode.start()
         observePanelSizeChanges()
         refreshPanelSize()
@@ -294,6 +316,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         controlTransport?.stop()
         controlTransport = nil
         screenWipe.stop()
+        duoEffectCoordinator.stop(reason: "已停止")
         screenshotCoordinator.cancel()
         screenshotPreview.close()
         displayControlKeys.stop()
@@ -304,6 +327,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         focusMode.stop()
         hardware.stop()
         wifiSignal.stop()
+        networkLocation.stop()
         displayControlMenu.stop()
         brightnessSchedule.stop()
         displayControl.stop()
@@ -435,11 +459,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
                 customization: menuBarCustomization,
                 hardware: hardware,
                 displayControl: displayControlMenu,
+                duoEffect: duoEffect,
                 shortcutRegistry: shortcutRegistry,
                 brightnessSchedule: brightnessSchedule,
                 audioRouting: audioRouting,
                 focusMode: focusMode,
                 wifiSignal: wifiSignal,
+                networkLocation: networkLocation,
                 shortcutSettings: shortcutSettings,
                 clipboardCoordinator: clipboardCoordinator,
                 updater: appUpdater,
@@ -551,6 +577,14 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    private func applyDuo(_ on: Bool) {
+        if on {
+            duoEffectCoordinator.start()
+        } else {
+            duoEffectCoordinator.stop(reason: "已停止")
+        }
+    }
+
     private func handleShortcutAction(_ action: ShortcutAction) -> Bool {
         switch action {
         case .hotKey(.captureRegion):
@@ -562,6 +596,10 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
             return true
         case .hotKey(.clipboardHistory):
             clipboardCoordinator.showPanel()
+            return true
+        case .hotKey(.duoEffectToggle):
+            // Escape hatch while the fullscreen overlay is covering the desktop.
+            state.duoOn.toggle()
             return true
         case .mediaKey(let event):
             return displayControlKeys.handle(event: event)

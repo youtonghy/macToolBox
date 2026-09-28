@@ -6,7 +6,9 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
     case customization
     case cables
     case wifi
+    case networkLocation
     case display
+    case duo
     case audio
     case screenshot
     case clipboard
@@ -27,8 +29,12 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return L10n.string("线缆")
         case .wifi:
             return L10n.string("Wi-Fi")
+        case .networkLocation:
+            return L10n.string("网络位置")
         case .display:
             return L10n.string("显示器")
+        case .duo:
+            return L10n.string("Duo")
         case .audio:
             return L10n.string("音频")
         case .screenshot:
@@ -56,8 +62,12 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return "cable.connector"
         case .wifi:
             return "wifi"
+        case .networkLocation:
+            return "location"
         case .display:
             return "display"
+        case .duo:
+            return "macbook"
         case .audio:
             return "speaker.wave.2"
         case .screenshot:
@@ -85,8 +95,12 @@ private enum SettingsTab: String, CaseIterable, Identifiable {
             return Color(nsColor: .systemPurple)
         case .wifi:
             return Color(nsColor: .systemGreen)
+        case .networkLocation:
+            return Color(nsColor: .systemBlue)
         case .display:
             return Color(nsColor: .systemTeal)
+        case .duo:
+            return Color(nsColor: .systemIndigo)
         case .audio:
             return Color(nsColor: .systemGreen)
         case .screenshot:
@@ -109,15 +123,18 @@ struct SettingsView: View {
     @ObservedObject var customization: MenuBarCustomizationModel
     @ObservedObject var hardware: HardwareMenuModel
     @ObservedObject var displayControl: DisplayControlMenuModel
+    @ObservedObject var duoEffect: DuoEffectModel
     let shortcutRegistry: ShortcutRegistry
     @ObservedObject var brightnessSchedule: BrightnessScheduleCoordinator
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
+    @ObservedObject var networkLocation: NetworkLocationModel
     @ObservedObject var shortcutSettings: ShortcutSettingsModel
     @ObservedObject var clipboardCoordinator: ClipboardCoordinator
     @ObservedObject var updater: AppUpdateCoordinator
     @ObservedObject var launchAtLogin: LaunchAtLoginController
+    @EnvironmentObject private var featureState: FeatureState
     @AppStorage("settings.selectedTab") private var selectedTab = SettingsTab.home.rawValue
 
     private var currentTab: SettingsTab {
@@ -175,12 +192,15 @@ struct SettingsView: View {
                         displayControl: displayControl,
                         audioRouting: audioRouting,
                         focusMode: focusMode,
-                        wifiSignal: wifiSignal
+                        wifiSignal: wifiSignal,
+                        networkLocation: networkLocation
                     )
                 case .cables:
                     SettingsCablesView(hardware: hardware)
                 case .wifi:
                     WiFiSettingsView(model: wifiSignal)
+                case .networkLocation:
+                    NetworkLocationSettingsView(model: networkLocation)
                 case .display:
                     SettingsDisplayView(
                         model: displayControl,
@@ -188,6 +208,16 @@ struct SettingsView: View {
                         launchAtLogin: launchAtLogin,
                         focusMode: focusMode,
                         permissions: shortcutRegistry.permissions
+                    )
+                case .duo:
+                    DuoSettingsView(
+                        model: duoEffect,
+                        sensor: duoEffect.sensor,
+                        permissions: shortcutRegistry.permissions,
+                        isEnabled: Binding(
+                            get: { featureState.duoOn },
+                            set: { featureState.duoOn = $0 }
+                        )
                     )
                 case .audio:
                     AudioRoutingSettingsView(service: audioRouting)
@@ -270,6 +300,11 @@ private struct SettingsHomeView: View {
                         symbolName: "wifi",
                         accent: Color(nsColor: .systemGreen),
                         title: "Wi-Fi 信号"
+                    )
+                    SettingsFeatureRow(
+                        symbolName: "location",
+                        accent: Color(nsColor: .systemBlue),
+                        title: "网络位置"
                     )
                     SettingsFeatureRow(
                         symbolName: "display.2",

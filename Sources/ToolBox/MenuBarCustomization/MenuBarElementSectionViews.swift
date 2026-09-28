@@ -50,6 +50,7 @@ struct MenuBarElementSectionView: View {
     @ObservedObject var audioRouting: AudioRoutingService
     @ObservedObject var focusMode: FocusModeCoordinator
     @ObservedObject var wifiSignal: WiFiSignalModel
+    @ObservedObject var networkLocation: NetworkLocationModel
     @ObservedObject var state: FeatureState
     var isInteractive: Bool
 
@@ -166,20 +167,25 @@ struct MenuBarElementSectionView: View {
         MenuQuickControlsBar(
             state: state,
             focusMode: focusMode,
+            networkLocation: networkLocation,
             isInteractive: isInteractive
         )
     }
 }
 
-/// The three compact circular quick controls. Rendered live in the menu-bar
-/// panel and read-only inside the settings editor card.
+/// The compact quick-controls row: the network-location switcher sits at the
+/// leading edge, the circular toggles at the trailing edge. Rendered live in
+/// the menu-bar panel and read-only inside the settings editor card.
 struct MenuQuickControlsBar: View {
     @ObservedObject var state: FeatureState
     @ObservedObject var focusMode: FocusModeCoordinator
+    @ObservedObject var networkLocation: NetworkLocationModel
     var isInteractive: Bool
 
     var body: some View {
         HStack(spacing: 10) {
+            locationSwitcher
+
             Spacer(minLength: 0)
 
             circularControlButton(
@@ -220,6 +226,65 @@ struct MenuQuickControlsBar: View {
             minHeight: MenuPanelLayout.controlsHeight,
             maxHeight: MenuPanelLayout.controlsHeight
         )
+    }
+
+    /// Capsule switcher for the active network location. Creating locations
+    /// and SSID rules lives in Settings → 网络位置.
+    private var locationSwitcher: some View {
+        let pill = Capsule(style: .continuous)
+
+        return Menu {
+            ForEach(networkLocation.snapshot.locations, id: \.self) { name in
+                Toggle(
+                    name,
+                    isOn: Binding(
+                        get: { networkLocation.snapshot.current == name },
+                        set: { isOn in
+                            if isOn { networkLocation.switchTo(name) }
+                        }
+                    )
+                )
+            }
+        } label: {
+            HStack(spacing: 7) {
+                if networkLocation.isBusy {
+                    ProgressView()
+                        .controlSize(.mini)
+                        .frame(width: 14, height: 14)
+                } else {
+                    Image(systemName: "location.fill")
+                        .font(.system(size: 12, weight: .semibold))
+                }
+
+                Text(networkLocation.snapshot.current ?? L10n.string("未知"))
+                    .font(.system(size: 12, weight: .medium))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 160, alignment: .leading)
+            }
+            .foregroundStyle(
+                networkLocation.errorMessage != nil
+                    ? Color.red
+                    : Color.primary.opacity(0.78)
+            )
+            .padding(.horizontal, 13)
+            .frame(height: MenuPanelLayout.controlButtonSize)
+            .background(pill.fill(MenuPanelSectionTheme.background))
+            .overlay(pill.strokeBorder(MenuPanelSectionTheme.border, lineWidth: 1))
+            .contentShape(pill)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(!isInteractive || networkLocation.snapshot.locations.isEmpty)
+        .help(locationSwitcherHelp)
+        .accessibilityLabel(L10n.string("网络位置"))
+        .accessibilityValue(networkLocation.snapshot.current ?? L10n.string("未知"))
+    }
+
+    private var locationSwitcherHelp: String {
+        networkLocation.errorMessage
+            ?? networkLocation.lastAutoSwitchMessage
+            ?? L10n.string("切换网络位置")
     }
 
     private func circularControlButton(

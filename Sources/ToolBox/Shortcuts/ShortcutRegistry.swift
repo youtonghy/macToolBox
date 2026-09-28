@@ -105,6 +105,8 @@ extension ShortcutActionID {
             2
         case .clipboardHistory:
             3
+        case .duoEffectToggle:
+            4
         }
     }
 }

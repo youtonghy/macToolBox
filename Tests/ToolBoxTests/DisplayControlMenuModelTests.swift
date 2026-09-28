@@ -26,15 +26,6 @@ final class DisplayControlMenuModelTests: XCTestCase {
         XCTAssertEqual(model.systemSettingsErrorText, "无法打开系统显示设置")
     }
 
-    func testSelectedDisplayStatusDescribesWriteOnlyDDC() {
-        let service = DisplayControlService(provider: RecordingDisplayControlProvider(snapshot: Self.snapshot), timing: .immediateForTests)
-        service.setSnapshotForTesting(Self.snapshot)
-        let model = DisplayControlMenuModel(service: service)
-        model.start()
-
-        XCTAssertEqual(model.selectedDisplayStatusText, "DDC 只写 · 当前值为估算")
-    }
-
     func testCanceledPendingClearDoesNotRemoveReplacementValue() async throws {
         let provider = RecordingDisplayControlProvider(snapshot: Self.snapshot)
         let service = DisplayControlService(provider: provider, timing: .immediateForTests)
@@ -47,7 +38,6 @@ final class DisplayControlMenuModelTests: XCTestCase {
 
         let model = DisplayControlMenuModel(service: service)
         model.start()
-        XCTAssertEqual(model.statusText, L10n.string("DDC 只写模式，当前值为估算值"))
         model.setValue(kind: .brightness, value: 0.3)
         model.setValue(kind: .brightness, value: 0.7)
 

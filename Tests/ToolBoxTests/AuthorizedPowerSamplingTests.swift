@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import ServiceManagement
 import XCTest
 @testable import ToolBoxCore
 
@@ -65,6 +66,375 @@ final class AuthorizedPowerSamplingTests: XCTestCase {
             XCTAssertEqual(snapshot.status, .unavailable)
             XCTAssertEqual(snapshot.systemWatts, 50)
         }
+    }
+
+    func testContinuousMissingSamplesKeepRestartingWithBackoff() {
+        var recovery = AuthorizedPowerRecovery(gracePeriod: 10, maximumDelay: 40, maximumObservationGap: 10)
+        var outageStart = Date()
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: outageStart))
+        // Restart delays double from the grace period up to the cap, and the
+        // outage never turns sampling off.
+        for delay in [10, 20, 40, 40] {
+            for second in 1..<delay {
+                XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: outageStart.addingTimeInterval(Double(second))))
+            }
+            let due = outageStart.addingTimeInterval(Double(delay))
+            XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: due))
+            // A busy settings operation defers the restart without losing it.
+            outageStart = due.addingTimeInterval(0.5)
+            XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: outageStart))
+            recovery.markRestarted(now: outageStart)
+        }
+    }
+
+    func testOnlyPendingSystemApprovalPausesRecovery() {
+        let pending = AuthorizedPowerClient(serviceStatus: { .requiresApproval })
+        XCTAssertEqual(pending.response().failure, .authorizationRequired)
+        for status in [SMAppService.Status.notRegistered, .notFound] {
+            let unavailable = AuthorizedPowerClient(serviceStatus: { status })
+            XCTAssertEqual(unavailable.response().failure, .connectionFailed)
+        }
+    }
+
+    func testFreshZeroAndPartialSamplesRecoverWithoutRequiringEveryChannel() {
+        var recovery = AuthorizedPowerRecovery(gracePeriod: 1)
+        let start = Date()
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(1)))
+        recovery.markRestarted(now: start.addingTimeInterval(1))
+        XCTAssertEqual(recovery.currentDelay, 2)
+        let reading = AuthorizedPowerReading(
+            timestamp: start.addingTimeInterval(2), interval: 1, cpuWatts: 0,
+            gpuWatts: nil, aneWatts: nil, combinedWatts: nil
+        )
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(reading: reading), now: start.addingTimeInterval(2)))
+        // Recovery also resets the backoff.
+        XCTAssertEqual(recovery.currentDelay, 1)
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(3)))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(4)))
+    }
+
+    func testStaleSampleDoesNotResetRecoveryAndWaitingForApprovalDoes() {
+        var recovery = AuthorizedPowerRecovery(gracePeriod: 1)
+        let start = Date()
+        let stale = PowerSamplingResponse(reading: AuthorizedPowerReading(
+            timestamp: start.addingTimeInterval(-10), interval: 1, cpuWatts: 2,
+            gpuWatts: 1, aneWatts: 0, combinedWatts: 3
+        ))
+        XCTAssertFalse(recovery.observe(stale, now: start))
+        XCTAssertTrue(recovery.observe(stale, now: start.addingTimeInterval(1)))
+        recovery.markRestarted(now: start.addingTimeInterval(1))
+        for second in 2..<30 {
+            XCTAssertFalse(recovery.observe(
+                PowerSamplingResponse(failure: .authorizationRequired), now: start.addingTimeInterval(Double(second))
+            ))
+        }
+        XCTAssertFalse(recovery.observe(stale, now: start.addingTimeInterval(30)))
+        XCTAssertTrue(recovery.observe(stale, now: start.addingTimeInterval(31)))
+    }
+
+    func testSamplingPauseAndManualResetGiveRecoveryANewGracePeriod() {
+        var recovery = AuthorizedPowerRecovery(gracePeriod: 2, maximumObservationGap: 3)
+        let start = Date()
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start))
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(1)))
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(60)))
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(61)))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(62)))
+        recovery.markRestarted(now: start.addingTimeInterval(62))
+        recovery.reset()
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(63)))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(65)))
+    }
+
+    func testProviderRestartsMissingSamplesAndKeepsRecoveredSamplingEnabled() async {
+        let recovered = expectation(description: "fresh samples after rebuilding the session")
+        recovered.expectedFulfillmentCount = 2
+        let reported = expectation(description: "recovery ends the failure streak")
+        let client = RecoveryPowerTestClient(recoversAfterRestart: true)
+        let provider = DarwinChipPowerProvider(
+            authorizedModeEnabled: { true }, authorizedSamplerFactory: { client },
+            authorizedRecoveryDelay: 0.25,
+            restartAuthorizedMode: { true },
+            // Reported once per restart, not on every fresh sample.
+            authorizedSamplingRecovered: { reported.fulfill() }
+        )
+        provider.onUpdate = { snapshot in
+            if snapshot.cpuWatts == 0 { recovered.fulfill() }
+        }
+        provider.start(interval: 0.25)
+        await fulfillment(of: [recovered, reported], timeout: 3)
+        provider.stop()
+        XCTAssertEqual(client.restarts, 1)
+        XCTAssertTrue(client.didStop)
+    }
+
+    func testProviderKeepsRestartingPersistentOutageWithoutDisabling() async {
+        let restartedAgain = expectation(description: "persistent N/A restarts the helper again")
+        let client = RecoveryPowerTestClient(recoversAfterRestart: false)
+        client.onRestart = { count in if count == 2 { restartedAgain.fulfill() } }
+        let provider = DarwinChipPowerProvider(
+            authorizedModeEnabled: { true }, authorizedSamplerFactory: { client },
+            authorizedRecoveryDelay: 0.25,
+            restartAuthorizedMode: { true }
+        )
+        provider.start(interval: 0.1)
+        await fulfillment(of: [restartedAgain], timeout: 3)
+        provider.stop()
+        // Still in authorized mode: the session was never suspended for fallback.
+        XCTAssertEqual(client.suspensions, 0)
+        XCTAssertTrue(client.didStop)
+    }
+
+    func testClientRestartHoldsOffReconnectUntilHelperCanExit() {
+        var attempts = 0
+        let client = AuthorizedPowerClient(
+            serviceStatus: { .enabled }, restartHoldOff: 60, makeConnection: { attempts += 1; return nil }
+        )
+        XCTAssertEqual(client.response().failure, .connectionFailed)
+        XCTAssertEqual(attempts, 1)
+        client.restart()
+        let waiting = client.response()
+        XCTAssertNil(waiting.failure)
+        XCTAssertNil(waiting.reading)
+        XCTAssertEqual(attempts, 1)
+        // Leaving authorized mode ends the hold-off for the next manual enable.
+        client.suspend()
+        XCTAssertEqual(client.response().failure, .connectionFailed)
+        XCTAssertEqual(attempts, 2)
+
+        var immediateAttempts = 0
+        let immediate = AuthorizedPowerClient(
+            serviceStatus: { .enabled }, restartHoldOff: 0, makeConnection: { immediateAttempts += 1; return nil }
+        )
+        immediate.restart()
+        XCTAssertEqual(immediate.response().failure, .connectionFailed)
+        XCTAssertEqual(immediateAttempts, 1)
+    }
+
+    @MainActor
+    func testAutomaticRestartKeepsAnEnabledServiceAndRegistersAMissingOne() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { nil })
+
+        // An enabled daemon is left alone: the client's restart hold-off is
+        // what lets launchd replace a stuck helper, not re-registration.
+        var attempted = await settings.restartAfterSamplingFailure()
+        XCTAssertTrue(attempted)
+        XCTAssertTrue(settings.requested)
+        XCTAssertEqual(service.unregistrations, 0)
+        XCTAssertEqual(service.registrations, 0)
+        XCTAssertEqual(settings.status, .enabled)
+
+        service.status = .notRegistered
+        attempted = await settings.restartAfterSamplingFailure()
+        XCTAssertTrue(attempted)
+        XCTAssertEqual(service.unregistrations, 0)
+        XCTAssertEqual(service.registrations, 1)
+        XCTAssertEqual(settings.status, .enabled)
+    }
+
+    @MainActor
+    func testLaunchReregistersAHelperPinnedToAnotherBuild() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        var helper: String? = "build-1"
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { helper })
+
+        // A registration from before the identity was recorded is refreshed once.
+        await settings.refreshStaleRegistration()
+        XCTAssertEqual(service.unregistrations, 1)
+        XCTAssertEqual(service.registrations, 1)
+        XCTAssertEqual(defaults.string(forKey: AuthorizedPowerSettings.registeredHelperKey), "build-1")
+        await settings.refreshStaleRegistration()
+        XCTAssertEqual(service.registrations, 1)
+
+        // A rebuilt or updated helper gets a new cdhash.
+        helper = "build-2"
+        await settings.refreshStaleRegistration()
+        XCTAssertEqual(service.unregistrations, 2)
+        XCTAssertEqual(service.registrations, 2)
+        XCTAssertEqual(defaults.string(forKey: AuthorizedPowerSettings.registeredHelperKey), "build-2")
+        XCTAssertTrue(settings.requested)
+        XCTAssertNil(settings.errorMessage)
+    }
+
+    @MainActor
+    func testTeamSignedOrDisabledHelperIsNotReregistered() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        let teamSigned = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { nil })
+        await teamSigned.refreshStaleRegistration()
+        XCTAssertEqual(service.unregistrations, 0)
+
+        defaults.set(false, forKey: PowerSamplingService.enabledKey)
+        let disabled = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { "build-1" })
+        await disabled.refreshStaleRegistration()
+        XCTAssertEqual(service.unregistrations, 0)
+        XCTAssertEqual(service.registrations, 0)
+    }
+
+    @MainActor
+    func testRecoveryReregistersAStaleHelperAndEnablingRecordsIt() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let service = RecoveryPowerTestService()
+        service.status = .notRegistered
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { "build-1" })
+
+        settings.setEnabled(true)
+        await waitForSettingsChange(settings)
+        XCTAssertEqual(defaults.string(forKey: AuthorizedPowerSettings.registeredHelperKey), "build-1")
+        let current = await settings.restartAfterSamplingFailure()
+        XCTAssertTrue(current)
+        XCTAssertEqual(service.unregistrations, 0)
+
+        defaults.set("build-0", forKey: AuthorizedPowerSettings.registeredHelperKey)
+        let stale = await settings.restartAfterSamplingFailure()
+        XCTAssertTrue(stale)
+        XCTAssertEqual(service.unregistrations, 1)
+        XCTAssertEqual(service.registrations, 2)
+        XCTAssertEqual(defaults.string(forKey: AuthorizedPowerSettings.registeredHelperKey), "build-1")
+    }
+
+    @MainActor
+    func testFiveFailedRestartsTurnSamplingOffAndMarkItUnavailable() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { nil })
+
+        for _ in 0..<AuthorizedPowerSettings.maximumFailedRestarts {
+            let restarted = await settings.restartAfterSamplingFailure()
+            XCTAssertTrue(restarted)
+        }
+        XCTAssertTrue(settings.requested)
+        XCTAssertFalse(settings.unavailable)
+
+        let restarted = await settings.restartAfterSamplingFailure()
+        XCTAssertFalse(restarted)
+        XCTAssertFalse(settings.requested)
+        XCTAssertFalse(defaults.bool(forKey: PowerSamplingService.enabledKey))
+        XCTAssertTrue(settings.unavailable)
+        await waitForSettingsChange(settings)
+        XCTAssertEqual(service.unregistrations, 1)
+        XCTAssertTrue(settings.unavailable)
+
+        // Enabling again by hand clears the notice and starts a new streak.
+        settings.setEnabled(true)
+        await waitForSettingsChange(settings)
+        XCTAssertTrue(settings.requested)
+        XCTAssertFalse(settings.unavailable)
+        XCTAssertEqual(defaults.integer(forKey: AuthorizedPowerSettings.failedRestartsKey), 0)
+    }
+
+    @MainActor
+    func testFreshSampleResetsTheFailedRestartStreak() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: RecoveryPowerTestService(), pinnedHelperIdentity: { nil })
+
+        for _ in 0..<(AuthorizedPowerSettings.maximumFailedRestarts - 1) {
+            _ = await settings.restartAfterSamplingFailure()
+        }
+        settings.recordSamplingRecovered()
+        for _ in 0..<AuthorizedPowerSettings.maximumFailedRestarts {
+            let restarted = await settings.restartAfterSamplingFailure()
+            XCTAssertTrue(restarted)
+        }
+        XCTAssertTrue(settings.requested)
+        XCTAssertFalse(settings.unavailable)
+    }
+
+    @MainActor
+    func testAutomaticRecoveryDoesNotOverrideAManualShutdown() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { nil })
+        settings.setEnabled(false)
+        let attempted = await settings.restartAfterSamplingFailure()
+        XCTAssertFalse(attempted)
+        await waitForSettingsChange(settings)
+        XCTAssertEqual(service.registrations, 0)
+        XCTAssertFalse(settings.requested)
+        XCTAssertFalse(settings.unavailable)
+    }
+
+    func testDeferredRestartDoesNotStartPostRestartDeadline() {
+        var recovery = AuthorizedPowerRecovery(gracePeriod: 1)
+        let start = Date()
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(1)))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(2)))
+        recovery.markRestarted(now: start.addingTimeInterval(5))
+        XCTAssertFalse(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(6.5)))
+        XCTAssertTrue(recovery.observe(PowerSamplingResponse(), now: start.addingTimeInterval(7)))
+    }
+
+    @MainActor
+    func testManualDisableUpdatesSwitchImmediatelyAndUnregistersService() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { nil })
+
+        settings.setEnabled(false)
+        XCTAssertFalse(settings.requested)
+        XCTAssertFalse(defaults.bool(forKey: PowerSamplingService.enabledKey))
+        await waitForSettingsChange(settings)
+        XCTAssertEqual(service.unregistrations, 1)
+        XCTAssertEqual(settings.status, .notRegistered)
+
+        settings.setEnabled(true)
+        await waitForSettingsChange(settings)
+        XCTAssertTrue(settings.requested)
+        XCTAssertEqual(service.registrations, 1)
+        XCTAssertEqual(settings.status, .enabled)
+    }
+
+    @MainActor
+    func testManualDisableStaysOffWhenUnregisterFails() async {
+        let suite = "PowerRecoverySettings.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(true, forKey: PowerSamplingService.enabledKey)
+        let service = RecoveryPowerTestService()
+        service.failsRemoval = true
+        let settings = AuthorizedPowerSettings(defaults: defaults, service: service, pinnedHelperIdentity: { nil })
+        settings.setEnabled(false)
+        await waitForSettingsChange(settings)
+        XCTAssertFalse(settings.requested)
+        XCTAssertFalse(defaults.bool(forKey: PowerSamplingService.enabledKey))
+        XCTAssertNotNil(settings.errorMessage)
+    }
+
+    @MainActor
+    private func waitForSettingsChange(_ settings: AuthorizedPowerSettings) async {
+        for _ in 0..<100 {
+            if !settings.isChanging { return }
+            try? await Task.sleep(for: .milliseconds(10))
+        }
+        XCTFail("Settings change did not finish")
     }
 
     func testEnginePublishesFinalReportBeforeProcessExit() async throws {
@@ -242,6 +612,45 @@ final class AuthorizedPowerSamplingTests: XCTestCase {
         XCTAssertFalse(delegate.wasCalled)
     }
 
+    func testPinnedCDHashMatchesTheSignatureOfUnteamedCode() throws {
+        let host = Bundle.main.bundleURL
+        var code: SecStaticCode?
+        var information: CFDictionary?
+        XCTAssertEqual(SecStaticCodeCreateWithPath(host as CFURL, [], &code), errSecSuccess)
+        XCTAssertEqual(SecCodeCopySigningInformation(
+            try XCTUnwrap(code), SecCSFlags(rawValue: kSecCSSigningInformation), &information
+        ), errSecSuccess)
+        let values = try XCTUnwrap(information as? [String: Any])
+        let pinned = PowerSamplingIdentity.pinnedCDHash(for: host)
+        if values[kSecCodeInfoTeamIdentifier as String] != nil {
+            XCTAssertNil(pinned)
+        } else {
+            let hash = try XCTUnwrap(values[kSecCodeInfoUnique as String] as? Data)
+            XCTAssertEqual(pinned, hash.map { String(format: "%02x", $0) }.joined())
+        }
+        XCTAssertNil(PowerSamplingIdentity.pinnedCDHash(for: URL(fileURLWithPath: "/nonexistent/ToolBox.app")))
+    }
+
+    func testHelperExecutableIdentityDetectsReplacedOrRemovedFile() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let executable = directory.appendingPathComponent("ToolBoxPowerHelper")
+        try Data("old".utf8).write(to: executable)
+        let launched = try XCTUnwrap(ExecutableFileIdentity(path: executable.path))
+        XCTAssertEqual(ExecutableFileIdentity(path: executable.path), launched)
+
+        // An app update installs a new file at the same path, even with the same bytes.
+        let update = directory.appendingPathComponent("update")
+        try Data("old".utf8).write(to: update)
+        _ = try FileManager.default.replaceItemAt(executable, withItemAt: update)
+        XCTAssertNotEqual(ExecutableFileIdentity(path: executable.path), launched)
+
+        try FileManager.default.removeItem(at: executable)
+        XCTAssertNil(ExecutableFileIdentity(path: executable.path))
+    }
+
     private func poll(_ engine: PowerSamplingEngine) async -> PowerSamplingResponse {
         await withCheckedContinuation { continuation in engine.poll { continuation.resume(returning: $0) } }
     }
@@ -298,5 +707,50 @@ private final class PowerTestClient: AuthorizedPowerSampling {
         ))
     }
     func suspend() {}
+    func restart() {}
     func stop() { lock.lock(); defer { lock.unlock() }; stopped = true }
+}
+
+private final class RecoveryPowerTestClient: AuthorizedPowerSampling {
+    private let lock = NSLock()
+    private let recoversAfterRestart: Bool
+    private var restartCount = 0
+    private var suspensionCount = 0
+    private var stopped = false
+    var onRestart: ((Int) -> Void)?
+    var restarts: Int { lock.lock(); defer { lock.unlock() }; return restartCount }
+    var suspensions: Int { lock.lock(); defer { lock.unlock() }; return suspensionCount }
+    var didStop: Bool { lock.lock(); defer { lock.unlock() }; return stopped }
+
+    init(recoversAfterRestart: Bool) { self.recoversAfterRestart = recoversAfterRestart }
+
+    func response() -> PowerSamplingResponse {
+        guard recoversAfterRestart, restarts > 0 else { return PowerSamplingResponse() }
+        return PowerSamplingResponse(reading: AuthorizedPowerReading(
+            timestamp: Date(), interval: 1, cpuWatts: 0, gpuWatts: nil, aneWatts: nil, combinedWatts: nil
+        ))
+    }
+    func suspend() { lock.lock(); defer { lock.unlock() }; suspensionCount += 1 }
+    func restart() {
+        lock.lock()
+        restartCount += 1
+        let count = restartCount
+        lock.unlock()
+        onRestart?(count)
+    }
+    func stop() { lock.lock(); defer { lock.unlock() }; stopped = true }
+}
+
+private final class RecoveryPowerTestService: AuthorizedPowerServicing {
+    var status: SMAppService.Status = .enabled
+    var registrations = 0
+    var unregistrations = 0
+    var failsRemoval = false
+
+    func register() throws { registrations += 1; status = .enabled }
+    func unregister() async throws {
+        unregistrations += 1
+        if failsRemoval { throw NSError(domain: "PowerRecoveryTests", code: 1) }
+        status = .notRegistered
+    }
 }

@@ -6,6 +6,9 @@ enum PowerSamplingService {
     static let helperRelativePath = "Contents/Library/LaunchServices/ToolBoxPowerHelper"
     static let enabledKey = "authorizedPowerSamplingEnabled"
     static let maximumSampleAge: TimeInterval = 3
+    /// With no client connected the helper exits after this delay, so launchd
+    /// starts a fresh process on the next connection.
+    static let helperIdleExitDelay: TimeInterval = 15
 }
 
 // The service exposes no executable paths, arguments, file operations, or shell commands.

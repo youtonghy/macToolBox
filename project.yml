@@ -99,6 +99,10 @@ targets:
         # Helps TCC surface a proper Input Monitoring purpose string and list entry.
         NSInputMonitoringUsageDescription: "ToolBox 需要输入监控权限，以便拦截亮度 / 音量媒体键并转发给外接显示器。"
         NSAudioCaptureUsageDescription: "ToolBox 需要系统音频捕获权限，以便为不同应用调整音量并路由到指定输出设备。"
+        NSScreenCaptureUsageDescription: "ToolBox 需要屏幕录制权限，以便截取屏幕内容并呈现 Duo 屏幕展开效果。"
+        # macOS 14+ only reveals the Wi-Fi SSID to Location-authorized apps (SSID → network location auto-switch).
+        NSLocationUsageDescription: "ToolBox 需要定位服务权限来读取当前 Wi-Fi 名称（SSID），以便按 SSID 自动切换网络位置；不会读取或保存你的地理位置。"
+        NSLocationWhenInUseUsageDescription: "ToolBox 需要定位服务权限来读取当前 Wi-Fi 名称（SSID），以便按 SSID 自动切换网络位置；不会读取或保存你的地理位置。"
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.youtonghy.toolbox

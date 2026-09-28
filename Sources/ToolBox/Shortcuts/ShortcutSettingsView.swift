@@ -228,6 +228,7 @@ private extension ShortcutActionID {
         case .captureRegion: "区域截图"
         case .screenWipeExit: "退出擦屏幕"
         case .clipboardHistory: "剪贴板历史"
+        case .duoEffectToggle: "Duo 效果"
         }
     }
 
@@ -236,6 +237,7 @@ private extension ShortcutActionID {
         case .captureRegion: "camera.viewfinder"
         case .screenWipeExit: "rectangle.inset.filled"
         case .clipboardHistory: "doc.on.clipboard"
+        case .duoEffectToggle: "macbook"
         }
     }
 
@@ -244,8 +246,9 @@ private extension ShortcutActionID {
         case .captureRegion: Color(nsColor: .systemBlue)
         case .screenWipeExit: Color(nsColor: .systemIndigo)
         case .clipboardHistory: Color(nsColor: .systemCyan)
+        case .duoEffectToggle: Color(nsColor: .systemIndigo)
         }
     }
 
-    var canDisable: Bool { self == .captureRegion || self == .clipboardHistory }
+    var canDisable: Bool { self == .captureRegion || self == .clipboardHistory || self == .duoEffectToggle }
 }
