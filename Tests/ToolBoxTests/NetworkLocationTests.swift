@@ -1,3 +1,4 @@
+import CoreLocation
 import Foundation
 import XCTest
 @testable import ToolBoxCore
@@ -199,6 +200,27 @@ final class NetworkLocationTests: XCTestCase {
 
         XCTAssertThrowsError(try controller.createLocation(named: "公司", allowsAuthorizationPrompt: true)) { error in
             XCTAssertEqual(error as? NetworkLocationError, .alreadyExists("公司"))
+        }
+    }
+
+    // MARK: - SSID authorization
+
+    func testSSIDAuthorizationMapsStatuses() {
+        typealias Resolve = NetworkLocationSSIDAuthorization
+        XCTAssertEqual(Resolve.resolve(status: .notDetermined, servicesEnabled: true), .notDetermined)
+        XCTAssertEqual(Resolve.resolve(status: .authorizedAlways, servicesEnabled: true), .authorized)
+        XCTAssertEqual(Resolve.resolve(status: .denied, servicesEnabled: true), .denied)
+        XCTAssertEqual(Resolve.resolve(status: .restricted, servicesEnabled: true), .denied)
+    }
+
+    func testSSIDAuthorizationReportsServicesDisabledBeforeStatus() {
+        // With Location Services off system-wide the per-app prompt can never
+        // appear, even while the app status is still notDetermined.
+        for status: CLAuthorizationStatus in [.notDetermined, .denied, .restricted, .authorizedAlways] {
+            XCTAssertEqual(
+                NetworkLocationSSIDAuthorization.resolve(status: status, servicesEnabled: false),
+                .servicesDisabled
+            )
         }
     }
 

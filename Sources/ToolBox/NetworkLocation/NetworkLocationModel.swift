@@ -137,6 +137,12 @@ final class NetworkLocationModel: ObservableObject {
         ssidMonitor.requestAuthorization()
     }
 
+    /// Re-reads the authorization state; the global Location Services switch
+    /// can change it without a delegate callback.
+    func refreshSSIDAuthorization() {
+        ssidAuthorization = ssidMonitor.authorization
+    }
+
     /// Adds a rule, or re-targets the existing rule for the same SSID.
     func upsertRule(ssid rawSSID: String, location: String) throws {
         let ssid = rawSSID.trimmingCharacters(in: .whitespacesAndNewlines)

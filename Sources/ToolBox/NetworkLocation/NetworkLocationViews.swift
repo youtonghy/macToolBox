@@ -47,6 +47,7 @@ struct NetworkLocationSettingsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 4)
         }
+        .onAppear { model.refreshSSIDAuthorization() }
     }
 
     // MARK: Locations
@@ -160,6 +161,15 @@ struct NetworkLocationSettingsView: View {
         case .denied:
             HStack(spacing: 10) {
                 Text(L10n.string("定位服务权限被拒绝，无法读取 SSID，自动切换不会生效。"))
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 8)
+                Button(L10n.string("打开系统设置"), action: openLocationPrivacySettings)
+            }
+        case .servicesDisabled:
+            HStack(spacing: 10) {
+                Text(L10n.string("系统定位服务已关闭，无法读取 SSID，授权弹窗也不会出现。请在系统设置中开启定位服务。"))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(.orange)
                     .fixedSize(horizontal: false, vertical: true)

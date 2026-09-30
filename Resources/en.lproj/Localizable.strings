@@ -214,6 +214,7 @@
 "macOS 需要定位服务权限才能读取 Wi-Fi 名称（SSID）。ToolBox 不会读取你的位置。" = "macOS requires Location Services permission to read the Wi-Fi name (SSID). ToolBox does not read your location.";
 "授权定位服务" = "Allow Location Services";
 "定位服务权限被拒绝，无法读取 SSID，自动切换不会生效。" = "Location Services permission was denied. The SSID cannot be read, so auto-switching will not work.";
+"系统定位服务已关闭，无法读取 SSID，授权弹窗也不会出现。请在系统设置中开启定位服务。" = "Location Services is turned off system-wide, so the SSID cannot be read and no permission prompt can appear. Turn on Location Services in System Settings.";
 "打开系统设置" = "Open System Settings";
 "SSID 规则" = "SSID Rules";
 "按顺序匹配第一条" = "First match wins";
