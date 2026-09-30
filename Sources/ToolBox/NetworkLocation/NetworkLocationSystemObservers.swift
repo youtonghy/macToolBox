@@ -7,7 +7,27 @@ import SystemConfiguration
 enum NetworkLocationSSIDAuthorization: Equatable {
     case notDetermined
     case denied
+    /// Location Services is off system-wide, so no per-app prompt can ever
+    /// appear; the only fix is System Settings → Privacy & Security.
+    case servicesDisabled
     case authorized
+
+    static func resolve(
+        status: CLAuthorizationStatus,
+        servicesEnabled: Bool
+    ) -> NetworkLocationSSIDAuthorization {
+        guard servicesEnabled else { return .servicesDisabled }
+        switch status {
+        case .notDetermined:
+            return .notDetermined
+        case .authorizedAlways, .authorizedWhenInUse:
+            return .authorized
+        case .denied, .restricted:
+            return .denied
+        @unknown default:
+            return .denied
+        }
+    }
 }
 
 protocol NetworkLocationSSIDMonitoring: AnyObject {
@@ -44,16 +64,10 @@ final class CoreWLANSSIDMonitor: NSObject, NetworkLocationSSIDMonitoring {
     }
 
     var authorization: NetworkLocationSSIDAuthorization {
-        switch locationManager.authorizationStatus {
-        case .notDetermined:
-            return .notDetermined
-        case .authorizedAlways, .authorizedWhenInUse:
-            return .authorized
-        case .denied, .restricted:
-            return .denied
-        @unknown default:
-            return .denied
-        }
+        NetworkLocationSSIDAuthorization.resolve(
+            status: locationManager.authorizationStatus,
+            servicesEnabled: CLLocationManager.locationServicesEnabled()
+        )
     }
 
     func requestAuthorization() {
