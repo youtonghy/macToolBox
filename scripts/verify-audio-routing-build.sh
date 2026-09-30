@@ -24,7 +24,8 @@ xcodebuild test \
   -scheme ToolBox \
   -destination 'platform=macOS' \
   -derivedDataPath "$TEST_DATA" \
-  CODE_SIGNING_ALLOWED=NO
+  CODE_SIGN_IDENTITY=- \
+  DEVELOPMENT_TEAM=
 
 for config in Debug Release; do
   config_data="$VERIFY_ROOT/$config"
